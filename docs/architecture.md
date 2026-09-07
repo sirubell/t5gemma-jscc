@@ -1,0 +1,79 @@
+# Architecture and experiment semantics
+
+This describes the current implementation. Both task entry points and common configuration fields are in the [README](../README.md).
+
+## Split model
+
+The T5Gemma-2 backbone is frozen and kept in eval mode. SplitModel inserts a hook at a configured encoder/decoder location, sends the representation through the codec/channel, and returns the reconstructed representation to the model.
+
+The implementation uses standard PyTorch/Transformers operations and the configured device/dtype. It contains no H200-only kernels or scheduler requirement. Hardware compatibility and batch-memory fit are execution concerns described in the [running guide](running.md).
+
+```text
+hidden [B,T,D] → codec.encode → z [B,T,K]
+              → power normalization → channel(z, snr_db)
+              → codec.decode → reconstructed [B,T,D]
+```
+
+D comes from the backbone configuration; K is codec.bottleneck_dim. Both codec halves consist of Linear layers and residual blocks. External LayerNorm is configurable; internal block LayerNorm remains enabled. Optional receiver FiLM conditions the first decoder hidden representation on SNR.
+
+## Shared baseline
+
+COCO and HellaSwag reference `configs/model.yaml` for the same backbone revision, encoder-final-norm split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
+
+| Component | Baseline |
+|---|---|
+| Split | Encoder after final norm; no layer index is required |
+| Codec hidden width | 1152 |
+| Bottleneck width | 512 |
+| Residual blocks | Two in each codec half; each block computes x + F(x) |
+| Activation / dropout | GELU / 0 |
+| External LayerNorm | Both input and output; internal block norms remain enabled |
+| Channel | AWGN with per-sample power normalization |
+| SNR-FiLM | Disabled |
+
+This baseline makes the task designs consistent; it is not an experimentally established optimum. Task-specific preprocessing, targets, training budgets and metrics still differ. A study may explicitly override the split or codec settings.
+
+FiLM remains implemented as an opt-in experiment via `codec.snr_film: true` in a separately named model design file. Point the relevant experiment's task YAML at that file, keeping the shared default off for normal development and collaboration. When disabled, no FiLM module or parameters are created and codec decoding does not depend on SNR. The channel still uses SNR to generate noise. `film_hidden` and `clean_film_snr` have no numerical effect while FiLM is off.
+
+With FiLM enabled, an SNR-conditioned MLP applies `(1 + gamma) * hidden + beta` after the first codec decoder Linear. Its final layer starts at zero, making modulation initially identity. This is receiver-side conditioning, not a change to the physical channel interface.
+
+For multimodal encoder splits, after_embed and before_first_layer are pre-hooks on the first text layer. They run after vision features replace image placeholder tokens. A hook on the token embedding itself would be too early: later image scatter could overwrite the reconstructed image positions. The regression tests explicitly distinguish these placements.
+
+Encoder and decoder splits have different signal paths. A decoder-only split modifies the decoder stream while encoder memory remains clean; it does not force all image information through the noisy channel. This is a model assumption, separate from the historical image-scatter bug. Generation can call the decoder channel repeatedly.
+
+The shared default now uses an encoder split, so its encoder output memory passes through the codec/channel before the decoder consumes it. Decoder splits remain supported for explicit experiments.
+
+## Training objective
+
+Each microbatch runs a no-grad teacher with codec/channel bypassed, then a student through the codec/channel. Gradients can pass through frozen downstream layers to the codec. Custom channel parameters with requires_grad=True also enter the optimizer.
+
+Loss is kl_weight × KL(teacher || student) + mse_weight × nMSE:
+
+- KL uses positions whose labels are not −100, computes probabilities in float32 and applies the configured temperature.
+- nMSE divides hidden-state reconstruction MSE by the original representation's mean squared value. It includes all positions, without the labels' padding mask.
+- Teacher forcing uses the backbone decoder start token, falling back to pad when absent. Generation uses its generation configuration; do not assume both start tokens are identical.
+
+A step is an optimizer update. Microbatches accumulate gradients before clipping, AdamW and cosine scheduling. Validation evaluates configured SNR conditions, then restores training mode.
+
+## Task data
+
+| Task | Training inputs/targets | Task evaluation |
+|---|---|---|
+| COCO | Images and demonstration captions as prompt; caption target | Autoregressive captions, Java PTB tokenizer, CIDEr |
+| HellaSwag | Context prompt; correct ending target | lm-eval likelihood of candidate endings, acc/acc_norm |
+
+COCO selects disjoint train/demo/validation/report IDs using Karpathy splits and saves them in each run. Evaluation reuses the checkpoint's report IDs. These IDs are not claimed to match historical reports.
+
+HellaSwag uses the train split for training and a prefix of validation rows for checkpoint validation. Its full benchmark also uses the validation split, including those rows; it is not an untouched independent test set.
+
+## Checkpoints and randomness
+
+best.pt is replaced only when the monitored metric improves by the configured relative min_delta. It need not be the checkpoint with the smallest floating-point loss across every validation. last.pt is updated after validation, with optional extra save_steps.
+
+A checkpoint includes codec/channel, optimizer, scheduler, scaler, configuration, data IDs and selected RNG state. It does not include the frozen backbone. Resume reconstructs that backbone and restores the saved recipe; the data iterator restarts, so exact uninterrupted batch order is not guaranteed.
+
+Changing current YAML defaults does not alter historical checkpoints. Evaluation and resume restore their saved split, LayerNorm and FiLM settings. In particular, old COCO decoder-split/FiLM checkpoints are not checkpoints of the new shared baseline.
+
+Validation and evaluation conditions isolate/reset Python, NumPy and PyTorch RNG. A custom simulator's private RNG or cross-call state must provide its own seed/reset behavior.
+
+See [validation coverage](validation.md), [migration decisions](migration.md), and the [channel integration guide](channel-integration.md) before extending these paths.

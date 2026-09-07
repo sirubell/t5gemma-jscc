@@ -1,0 +1,7 @@
+# One shared design, two task recipes. Preview/export does not start training.
+name: baseline
+task_configs: [../tasks/coco.yaml, ../tasks/hellaswag.yaml]
+seeds: [0]
+experiments:
+  - name: shared
+    model_overrides: {}

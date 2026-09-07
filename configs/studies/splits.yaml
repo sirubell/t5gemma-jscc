@@ -1,0 +1,47 @@
+# The 13 split locations from the historical launcher, evaluated under the NEW shared design.
+# This is a prospective comparison template, not a reproduction of old model/protocol settings.
+# All variants retain the shared codec (including LayerNorm both and FiLM off).
+# Decoder splits retain clean encoder memory; interpret them separately from a full communication cut.
+name: splits
+task_configs: [../tasks/coco.yaml, ../tasks/hellaswag.yaml]
+seeds: [0]
+experiments:
+  - name: enc_emb
+    model_overrides:
+      split: {stack: enc, where: after_embed}
+  - name: enc_l4
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 4}
+  - name: enc_l9
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 9}
+  - name: enc_l14
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 14}
+  - name: enc_l19
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 19}
+  - name: enc_fn
+    model_overrides:
+      split: {stack: enc, where: after_final_norm}
+  - name: dec_l0
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 0}
+  - name: dec_l4
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 4}
+  - name: dec_l8
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 8}
+  - name: dec_l12
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 12}
+  - name: dec_l16
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 16}
+  - name: dec_l20
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 20}
+  - name: dec_l24
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 24}

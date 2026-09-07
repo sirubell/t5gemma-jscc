@@ -1,0 +1,5 @@
+# Evaluation-only overrides for either task; task-specific options come from the checkpoint.
+snrs: [no_noise, 0]
+num_samples: 2
+batch_size: 1
+vanilla: true

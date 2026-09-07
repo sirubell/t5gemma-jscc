@@ -1,0 +1,46 @@
+model_config: ../model.yaml
+task: hellaswag
+seed: 0
+run:
+  name: smoke-hellaswag-h200
+  output_dir: ../../runs
+  wandb_project: null
+data:
+  name: Rowan/hellaswag
+  revision: null
+  num_train: 4
+  num_validation: 2
+  max_length: 512
+  num_workers: 2
+training:
+  max_steps: 4
+  batch_size: 1
+  gradient_accumulation: 2
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.0
+  min_lr_ratio: 0.0
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 2
+  validation_snrs:
+  - no_noise
+  validation_batches: 2
+  monitor: loss
+  patience: null
+  min_steps: 1000
+  min_delta: 0.005
+  log_every: 1
+  save_steps:
+  - 2
+  max_minutes: 2
+evaluation:
+  snrs:
+  - no_noise
+  - 0
+  batch_size: 1
+  num_samples: 2
+  num_fewshot: 5
+  vanilla: true

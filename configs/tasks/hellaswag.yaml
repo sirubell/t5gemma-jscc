@@ -1,0 +1,42 @@
+# Same backbone, split, codec and channel baseline as COCO.
+model_config: ../model.yaml
+task: hellaswag
+seed: 0
+run:
+  name: hellaswag
+  output_dir: ../../runs
+  wandb_project: null
+data:
+  name: Rowan/hellaswag
+  revision: null
+  num_train: null                # Full training split.
+  num_validation: 512
+  max_length: 512
+  num_workers: 4
+training:
+  max_steps: 20000
+  batch_size: 16
+  gradient_accumulation: 2
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.0
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 500
+  validation_snrs: [no_noise]
+  validation_batches: 20
+  monitor: loss
+  patience: 5
+  min_steps: 1000
+  min_delta: 0.005
+  log_every: 50
+  save_steps: []
+evaluation:
+  snrs: [no_noise, -6, -3, 0, 3, 6, 9, 12, 15, 18]
+  batch_size: 8
+  num_samples: 10042
+  num_fewshot: 5
+  vanilla: true

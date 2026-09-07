@@ -1,0 +1,55 @@
+# Small CPU integration check; scores are not experiment results.
+model_config: ../model.yaml
+task: coco
+seed: 0
+run:
+  name: smoke-coco-cpu
+  output_dir: ../../runs/smoke
+  wandb_project: null
+runtime:
+  device: cpu
+  dtype: float32
+data:
+  name: lmms-lab/COCO-Caption
+  revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  karpathy_name: yerevann/coco-karpathy
+  karpathy_revision: 448fdb1bc7b2d09e46881c4541a14d796a3d41e8
+  num_train: 4
+  num_validation: 2
+  num_report: 2
+  num_demos: 4
+  max_prompt_length: 1500
+  max_target_length: 16
+  num_workers: 0
+training:
+  max_steps: 2
+  batch_size: 1
+  gradient_accumulation: 2
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 1
+  validation_snrs:
+  - no_noise
+  validation_batches: 1
+  monitor: kl
+  patience: null
+  min_steps: 0
+  min_delta: 0.005
+  log_every: 1
+  save_steps:
+  - 1
+  - 2
+evaluation:
+  snrs:
+  - no_noise
+  - 0
+  batch_size: 1
+  num_samples: 2
+  max_new_tokens: 8
+  vanilla: true

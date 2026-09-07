@@ -1,0 +1,35 @@
+[project]
+name = "t5gemma-jscc"
+version = "0.1.0"
+description = "T5Gemma-2 JSCC research: COCO and HellaSwag"
+requires-python = ">=3.13"
+dependencies = [
+    "torch==2.10.0",
+    "transformers==5.10.2",
+    "datasets==5.0.0",
+    "accelerate==1.13.0",
+    "numpy==2.4.6",
+    "pillow==12.2.0",
+    "pyyaml==6.0.3",
+    "tqdm==4.68.1",
+    "pycocoevalcap==1.2",
+    "lm-eval==0.4.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyright[nodejs]==1.1.411", "ruff==0.15.18"]
+wandb = ["wandb==0.25.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Private notes/backups and macOS sidecars are not project source, including in archive deployments.
+extend-exclude = ["docs/local", "._*"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+include = ["jscc", "examples", "tests", "train.py", "evaluate.py", "study.py"]

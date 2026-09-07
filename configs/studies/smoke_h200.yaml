@@ -1,0 +1,7 @@
+# Uses small task budgets and the same model.yaml as other studies.
+name: smoke-h200
+task_configs: [../smoke/coco_h200.yaml, ../smoke/hellaswag_h200.yaml]
+seeds: [0]
+experiments:
+  - name: shared
+    model_overrides: {}

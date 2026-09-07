@@ -1,0 +1,25 @@
+# Shared model design for both tasks. Task YAMLs reference this file.
+model:
+  name: google/t5gemma-2-1b-1b
+  revision: dd0a2683227859151b1730ca3a63087df5b5f39b
+  device: cuda
+  dtype: bfloat16
+split:
+  stack: enc
+  where: after_final_norm
+codec:
+  hidden_dim: 1152
+  bottleneck_dim: 512
+  n_res_blocks: 2
+  activation: gelu
+  dropout: 0.0
+  layernorm: both                # Shared baseline; residual-block norms also remain enabled.
+  snr_film: false                # Opt in only for a dedicated FiLM experiment.
+  film_hidden: 64                # Inactive while snr_film is false.
+channel:
+  type: awgn                    # Or Python module:ClassName
+  kwargs: {}
+  normalize_power: true
+  train_noise: true
+  train_snr_range: [-6.0, 18.0]
+  clean_film_snr: 18.0

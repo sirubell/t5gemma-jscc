@@ -1,0 +1,11 @@
+# Pass to: uv run --locked python evaluate.py --run runs/<run> --config configs/evaluation/wireless.yaml
+# Replace channel.type and kwargs to evaluate a custom Python channel.
+# Model/FiLM settings come from the checkpoint; use the shared FiLM-off baseline.
+channel:
+  type: examples.wireless_channel:WirelessChannel
+  kwargs:
+    gain: 0.9
+snrs: [no_noise, -6, 0, 18]
+num_samples: 32
+batch_size: 4
+vanilla: true

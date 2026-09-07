@@ -1,0 +1,14 @@
+# Vary transmitted width only; both tasks keep the shared split/codec design and FiLM off.
+name: bottleneck
+task_configs: [../tasks/coco.yaml, ../tasks/hellaswag.yaml]
+seeds: [0]
+experiments:
+  - name: b256
+    model_overrides:
+      codec: {bottleneck_dim: 256}
+  - name: b512
+    model_overrides:
+      codec: {bottleneck_dim: 512}
+  - name: b1024
+    model_overrides:
+      codec: {bottleneck_dim: 1024}
