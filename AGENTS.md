@@ -8,6 +8,7 @@
 - For config layout, read configs/README.md; for study expansion and paired jobs, read docs/studies.md.
 - Before remote access or Slurm work, read docs/running.md and the local docs/local/environment.md if present.
 - For actual run IDs, paths and decisions, consult docs/local/experiments.md if present.
+- When resuming research, backup or experiment scheduling, read docs/local/research/CURRENT-PLAN.md and backup-status.md if present; current owner decisions supersede earlier proposals.
 - For custom channels, read docs/channel-integration.md.
 - For retrospective research, start with docs/local/research/reported-experiments.md when present: prioritize presented experiments and map each slide to raw evidence. Use docs/research-roadmap.md for the portable research scope.
 - For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For storage cleanup, read docs/local/research/cleanup-plan.md before proposing deletion paths.

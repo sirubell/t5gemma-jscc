@@ -136,6 +136,7 @@ def train(config, resume: str | Path | None = None):
     model.train()
     progress = tqdm(range(start + 1, settings["max_steps"] + 1), desc="Optimizer steps")
     started = time.monotonic()
+    last_log_time, last_log_step = started, start
     stop_reason = "max_steps"
     step = start
     def save(name, step):
@@ -168,18 +169,32 @@ def train(config, resume: str | Path | None = None):
             scheduler.step()
         progress.set_postfix(loss=f"{totals['loss']:.4f}")
         if step % settings["log_every"] == 0 or step == 1:
+            logged_at = time.monotonic()
+            # Loop wall time includes validation/checkpoint/logging overhead since
+            # the previous training row, but excludes model/data setup before it.
+            interval_seconds = logged_at - last_log_time
             row = {"step": step, "phase": "train", "lr": optimizer.param_groups[0]["lr"],
-                   "seconds_per_update": time.monotonic() - step_started,
+                   "seconds_per_update": logged_at - step_started,
+                   "elapsed_seconds": logged_at - started,
+                   "interval_wall_seconds": interval_seconds,
+                   "interval_updates": step - last_log_step,
+                   "interval_wall_updates_per_second": (step - last_log_step) / interval_seconds,
                    "peak_memory_gib": torch.cuda.max_memory_allocated() / 2**30
                    if config["model"]["device"] == "cuda" else None, **totals}
             append_metrics(run / "metrics.jsonl", row)
             if tracker:
-                tracker.log({f"train/{key}": value for key, value in totals.items()}, step=step)
+                tracker.log({f"train/{key}": value for key, value in row.items()
+                             if key not in {"step", "phase"} and value is not None}, step=step)
+            last_log_time, last_log_step = logged_at, step
         time_limit = settings.get("max_minutes")
         timed_out = time_limit is not None and time.monotonic() - started >= time_limit * 60
         if step % settings["eval_every"] == 0 or step == settings["max_steps"] or timed_out:
+            validation_started = time.monotonic()
             metrics = validate(model, data.validation, config)
-            append_metrics(run / "metrics.jsonl", {"step": step, "phase": "validation", **metrics})
+            validation_finished = time.monotonic()
+            validation_row = {"elapsed_seconds": validation_finished - started,
+                              "validation_seconds": validation_finished - validation_started, **metrics}
+            append_metrics(run / "metrics.jsonl", {"step": step, "phase": "validation", **validation_row})
             score = metrics[settings["monitor"]]
             improved = score < best * (1.0 - settings["min_delta"])
             if improved:
@@ -191,7 +206,7 @@ def train(config, resume: str | Path | None = None):
                 save("best.pt", step)
             print(f"step={step} validation={metrics} best={best:.6f}", flush=True)
             if tracker:
-                tracker.log({f"validation/{key}": value for key, value in metrics.items()}, step=step)
+                tracker.log({f"validation/{key}": value for key, value in validation_row.items()}, step=step)
             if settings["patience"] and bad >= settings["patience"]:
                 if step in settings["save_steps"]:
                     save(f"step_{step:06d}.pt", step)

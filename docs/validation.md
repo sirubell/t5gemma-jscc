@@ -28,7 +28,7 @@ Pyright and Ruff are pinned project dev dependencies in pyproject.toml and uv.lo
 
 The image-route fixture assigns a nonzero image projector: Transformers initializes an untrained projector to zero, which otherwise erases all pixel differences. This fixture change does not modify pretrained model loading.
 
-The COCO regression checks that image pixels affect transmitted representations, AWGN changes image positions, and the first text layer receives the reconstructed image positions. A control probe moving the hook back to token embeddings must fail because later image scatter overwrites those positions. Decoder-only splits deliberately keep encoder memory clean; that separate design is covered explicitly.
+The COCO regression checks that image pixels affect transmitted representations, AWGN changes image positions, and the first text layer receives the reconstructed image positions. A control probe moving the hook back to token embeddings must fail because later image scatter overwrites those positions. At decoder splits, transmitter layers retain original encoder memory, while receiver layers use separately transmitted memory; decoder-memory tests cover that boundary and cached generation.
 
 ## Real-weight execution
 
@@ -65,3 +65,9 @@ The RTX 5090 check used driver 570.211.01, PyTorch 2.10.0+cu128, capability (12,
 4. Full-duration multi-seed sweeps collect research evidence. They are not required just to check the software and should only run for an explicit research question.
 
 Private job IDs, machine/account details, full metrics and artifact paths remain in ignored docs/local/experiments.md and docs/local/ws-validation.md on the owner's checkout.
+
+## Study timing and HellaSwag evidence
+
+Training writes local `metrics.jsonl` regardless of W&B configuration: loss, KL, nMSE, learning rate, sampled update time and GPU allocated-memory peak. Interval wall throughput includes intervening validation/checkpoint overhead; elapsed loop time excludes model/data setup. Validation rows include their own duration. W&B remains optional and disabled in the default task recipe.
+
+Evaluation records per-condition wall time. HellaSwag writes harness metadata and per-example samples beside aggregate results; its dataset name/revision follows the saved data configuration. These records support paired analysis and execution provenance. Noise is still sampled per forward call/candidate batch, not a shared physical realization for all endings of a question.

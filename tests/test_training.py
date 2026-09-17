@@ -1,4 +1,5 @@
 import copy
+import json
 from pathlib import Path
 
 import torch
@@ -24,7 +25,25 @@ def test_training_checkpoint_and_resume(tmp_path, monkeypatch, stack):
         return None, model
     monkeypatch.setattr(training, "build_model", build)
     monkeypatch.setattr(training, "load_data", lambda *args: TaskData(train=[batch()], validation=[batch()], ids={"test": [1]}))
+    clock = [0.0]
+    def monotonic():
+        clock[0] += 1.0
+        return clock[0]
+    original_validate = training.validate
+    def validate(*args):
+        clock[0] += 100.0  # Deliberate validation overhead must enter wall throughput.
+        return original_validate(*args)
+    monkeypatch.setattr(training.time, "monotonic", monotonic)
+    monkeypatch.setattr(training, "validate", validate)
     run = training.train(copy.deepcopy(config))
+    rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
+    train_rows = [row for row in rows if row["phase"] == "train"]
+    second = train_rows[1]
+    assert second["interval_updates"] == 1
+    assert second["interval_wall_seconds"] == second["elapsed_seconds"] - train_rows[0]["elapsed_seconds"]
+    assert second["interval_wall_seconds"] > second["seconds_per_update"] + 100
+    assert second["interval_wall_updates_per_second"] == pytest.approx(1 / second["interval_wall_seconds"])
+    assert all(row["validation_seconds"] >= 100 for row in rows if row["phase"] == "validation")
     last = torch.load(run / "last.pt", weights_only=True)
     assert last["step"] == 2
     assert last["scheduler"]["last_epoch"] == 2
@@ -42,3 +61,6 @@ def test_training_checkpoint_and_resume(tmp_path, monkeypatch, stack):
     new_state = torch.load(resumed / "last.pt", weights_only=True)
     assert new_state["step"] == 2
     assert new_state["scheduler"]["last_epoch"] == 2
+    resumed_rows = [json.loads(line) for line in (resumed / "metrics.jsonl").read_text().splitlines()]
+    resumed_train = next(row for row in resumed_rows if row["phase"] == "train")
+    assert resumed_train["interval_updates"] == 1  # Excludes the update from the earlier run.

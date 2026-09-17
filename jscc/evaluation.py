@@ -1,6 +1,7 @@
 """Evaluate the saved model configuration; optional YAML overrides evaluation only."""
 import copy
 import json
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,21 +59,47 @@ def evaluate_coco(model, processor, data, settings, output, condition):
                for key in ("eos", "empty", "truncated")}}
 
 
-def evaluate_hellaswag(model, tokenizer, settings):
+def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str | float = "no_noise", data_settings=None):
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.api.registry import get_model
+    from lm_eval.tasks import TaskManager
+    from lm_eval.tasks._yaml_loader import load_yaml
+    from lm_eval.utils import handle_non_serializable
     # Hooks live on the backbone. Passing it directly keeps HFLM's usual HF interface.
     # The registry is typed as base LM; its HF implementation accepts these HF kwargs.
     harness_class = cast(type[Any], get_model("hf"))
     adapter = harness_class(pretrained=model.base, tokenizer=tokenizer, backend="seq2seq",
                             batch_size=settings["batch_size"])
+    task_manager = TaskManager()
+    # Resolve !function entries before passing an inline recipe back to the factory.
+    # The index .cfg deliberately contains strings, not executable preprocessing.
+    recipe_path = task_manager.task_index["hellaswag"].yaml_path
+    if recipe_path is None:
+        raise RuntimeError("Installed harness has no HellaSwag YAML recipe")
+    task_config = copy.deepcopy(load_yaml(recipe_path, resolve_func=True))
+    if data_settings:
+        task_config["dataset_path"] = data_settings["name"]
+        if data_settings.get("revision") is not None:
+            task_config.setdefault("dataset_kwargs", {})["revision"] = data_settings["revision"]
     result = simple_evaluate(
-        model=adapter, tasks=["hellaswag"], num_fewshot=settings["num_fewshot"],
+        model=adapter, tasks=[task_config], task_manager=task_manager, log_samples=True, num_fewshot=settings["num_fewshot"],
         limit=settings["num_samples"], random_seed=0, numpy_random_seed=1234,
         torch_random_seed=0, fewshot_random_seed=1234,
     )
     if result is None or "results" not in result:
         raise RuntimeError("lm-eval returned no task results")
+    if output is not None:
+        output = Path(output)
+        output.mkdir(parents=True, exist_ok=True)
+        # Keep all harness provenance, but avoid duplicating the large per-example payload.
+        metadata = {key: value for key, value in result.items() if key != "samples"}
+        (output / f"harness_{condition}.json").write_text(
+            json.dumps(metadata, indent=2, default=handle_non_serializable) + "\n")
+        with (output / f"samples_{condition}.jsonl").open("w") as stream:
+            for task, samples in result.get("samples", {}).items():
+                for sample in samples:
+                    stream.write(json.dumps({"task": task, **sample},
+                                            default=handle_non_serializable) + "\n")
     metrics = result["results"]["hellaswag"]
     return {"acc": metrics["acc,none"], "acc_norm": metrics["acc_norm,none"],
             "num_fewshot": settings["num_fewshot"],
@@ -110,13 +137,15 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
         conditions.append("vanilla")
     for condition in conditions:
         snr = None if condition in ("no_noise", "vanilla") else float(condition)
+        started = time.perf_counter()
         with isolated_rng(config["seed"]), model.transmission(snr, bypass=condition == "vanilla"):
             if config["task"] == "coco":
                 metrics = evaluate_coco(model, processor, data, settings, output, condition)
             else:
-                metrics = evaluate_hellaswag(model, processor, settings)
+                metrics = evaluate_hellaswag(model, processor, settings, output, condition, config["data"])
         results.append({"condition": condition, **metrics,
-                        "channel_uses_real": dict(model.channel_uses)})
+                        "channel_uses_real": dict(model.channel_uses),
+                        "elapsed_seconds": time.perf_counter() - started})
         print(results[-1], flush=True)
         # Write after each condition so a later interruption preserves completed points.
         (output / "results.json").write_text(json.dumps({
