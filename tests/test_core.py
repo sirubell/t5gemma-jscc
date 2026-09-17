@@ -19,15 +19,34 @@ def config():
             "snr_film": True, "film_hidden": 4}
 
 
-class Stack(nn.Module):
-    def __init__(self):
+class ToyAttention(nn.Module):
+    def __init__(self, layer_idx):
         super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(8, 8), nn.Linear(8, 8)])
+        self.layer_idx = layer_idx
+        self.projection = nn.Linear(8, 8)
+
+    def forward(self, hidden, *, encoder_hidden_states):
+        return self.projection(hidden + encoder_hidden_states.mean(dim=1, keepdim=True))
+
+
+class ToyDecoderLayer(nn.Module):
+    def __init__(self, layer_idx):
+        super().__init__()
+        self.self_attn = ToyAttention(layer_idx)
+
+    def forward(self, hidden, memory):
+        return self.self_attn(hidden, encoder_hidden_states=memory)
+
+
+class Stack(nn.Module):
+    def __init__(self, decoder=False):
+        super().__init__()
+        self.layers = nn.ModuleList([ToyDecoderLayer(i) if decoder else nn.Linear(8, 8) for i in range(2)])
         self.norm = nn.LayerNorm(8)
 
-    def forward(self, hidden):
+    def forward(self, hidden, memory=None):
         for layer in self.layers:
-            hidden = layer(hidden)
+            hidden = layer(hidden) if memory is None else layer(hidden, memory)
         return self.norm(hidden)
 
 
@@ -35,7 +54,7 @@ class ToyBackbone(nn.Module):
     def __init__(self):
         super().__init__()
         self.embedding = nn.Embedding(16, 8)
-        self.enc, self.dec = Stack(), Stack()
+        self.enc, self.dec = Stack(), Stack(decoder=True)
         self.head = nn.Linear(8, 16)
         self.config = SimpleNamespace(pad_token_id=0, decoder_start_token_id=0)
 
@@ -46,8 +65,8 @@ class ToyBackbone(nn.Module):
         return self.dec
 
     def forward(self, input_ids, decoder_input_ids, **kwargs):
-        memory = self.enc(self.embedding(input_ids)).mean(dim=1, keepdim=True)
-        hidden = self.dec(self.embedding(decoder_input_ids) + memory)
+        memory = self.enc(self.embedding(input_ids))
+        hidden = self.dec(self.embedding(decoder_input_ids), memory)
         return SimpleNamespace(logits=self.head(hidden))
 
 

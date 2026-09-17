@@ -10,6 +10,7 @@ data:
   revision: null
   num_train: 4
   num_validation: 2
+  selection_seed: 0
   max_length: 512
   num_workers: 2
 training:

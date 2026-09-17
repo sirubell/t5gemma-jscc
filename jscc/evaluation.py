@@ -94,8 +94,7 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
     if "device" in settings:
         config["model"]["device"] = settings["device"]
     processor, model = build_model(config)
-    model.codec.load_state_dict(state["codec"])
-    model.channel.load_state_dict(state["channel"])
+    model.load_communication_state(state)
     if "channel" in settings:
         parameter = next(model.base.parameters())
         model.channel = build_channel(settings["channel"]).to(device=parameter.device, dtype=parameter.dtype)
@@ -116,7 +115,8 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
                 metrics = evaluate_coco(model, processor, data, settings, output, condition)
             else:
                 metrics = evaluate_hellaswag(model, processor, settings)
-        results.append({"condition": condition, **metrics})
+        results.append({"condition": condition, **metrics,
+                        "channel_uses_real": dict(model.channel_uses)})
         print(results[-1], flush=True)
         # Write after each condition so a later interruption preserves completed points.
         (output / "results.json").write_text(json.dumps({

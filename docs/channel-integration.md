@@ -51,7 +51,7 @@ AWGN adds real Gaussian noise with standard deviation 10 ** (−snr_db / 20), as
 - Representation and channel uses: the current interface sends floating-point representations, not a defined bitstream. Specify real/complex packing, modulation and symbols per token.
 - SNR: distinguish real-dimension power, complex-symbol power, Es/N0 and Eb/N0; identify where power is normalized.
 - State: generation may call the channel repeatedly. Define when fading, packet state and randomness reset.
-- Split: encoder splits modify encoder representations. Decoder-only splits keep encoder memory clean, so they describe a different physical system.
+- Split: decoder receiver layers receive a second encoded memory stream; transmitter layers keep original memory. A custom channel sees both streams at the same configured SNR. Define shared fading/state and total channel uses; default AWGN draws independently per call.
 - Clean/vanilla: no-noise keeps the codec; vanilla bypasses codec/channel. clean_film_snr is inactive in the default FiLM-off baseline; it only conditions a clean path when FiLM is explicitly enabled.
 
 Only AWGN and the simple attenuation example have been validated so far. An initial collaboration deliverable is one channel module plus its power, SNR and state definitions; full model experimentation can follow when the interface is confirmed.

@@ -73,12 +73,20 @@ def test_image_features_reach_channel_after_vision_scatter(where):
 
 
 @torch.no_grad()
-def test_decoder_split_keeps_clean_encoder_memory():
-    """Document the decoder-only design separately from the old scatter bug."""
+def test_decoder_receiver_memory_crosses_channel_but_sender_stays_clean():
     torch.manual_seed(7)
     model = coco_model("dec", "after_layer").eval()
     batch = {**image_batch(), "decoder_input_ids": torch.tensor([[0, 5]]), "use_cache": False}
     memories = []
+    receiver, sender = [], []
+    def record(destination):
+        def hook(module, args, kwargs):
+            destination.append(kwargs["encoder_hidden_states"].detach().clone())
+        return hook
+    sender_handle = model.base.get_decoder().layers[0].self_attn.register_forward_pre_hook(
+        record(sender), with_kwargs=True)
+    receiver_handle = model.base.get_decoder().layers[1].self_attn.register_forward_pre_hook(
+        record(receiver), with_kwargs=True)
     handle = model.base.get_encoder().register_forward_hook(
         lambda module, args, output: memories.append(output.last_hidden_state.detach().clone()))
     try:
@@ -87,10 +95,16 @@ def test_decoder_split_keeps_clean_encoder_memory():
         with model.transmission(0.0):
             noisy = model(**batch).logits
         torch.testing.assert_close(memories[0], memories[1], rtol=0, atol=0)
-        assert model.channel.sent.shape[1] == batch["decoder_input_ids"].shape[1]
+        torch.testing.assert_close(sender[1], memories[1], rtol=0, atol=0)
+        torch.testing.assert_close(receiver[1], model.memory_reconstruction, rtol=0, atol=0)
+        assert not torch.equal(receiver[1], memories[1])
+        assert not torch.equal(receiver[0], receiver[1])
+        assert model.channel_uses == {"hidden": 2 * 8, "memory": 6 * 8}
         assert not torch.equal(clean, noisy)
     finally:
         handle.remove()
+        sender_handle.remove()
+        receiver_handle.remove()
 
 
 @pytest.mark.parametrize("stack,where", [("enc", "after_embed"), ("enc", "after_layer"),

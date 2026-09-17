@@ -42,7 +42,7 @@ The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only mo
 
 Each training configuration can have a separate evaluation job. Evaluation SNRs do not multiply the number of trained models. All supplied plans keep FiLM off.
 
-The split plan lists the 13 locations used by the historical launcher, but uses the NEW shared codec settings (including LayerNorm both and FiLM off). It is not a reproduction of historical results. Decoder splits retain clean encoder memory and have different communication semantics from encoder splits. These plans are editable study definitions, not evidence that the choices are optimal or requests to execute them.
+The split plan lists the 13 historical locations under the NEW shared codec settings (LayerNorm both and FiLM off). Decoder receiver layers now use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol, including HellaSwag's current early-stop setting.
 
 ## Examples
 

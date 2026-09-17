@@ -1,6 +1,6 @@
 # Validation coverage
 
-The real-environment executability check is complete. No additional run is required solely to establish that the current paths can train and evaluate. This is not a guarantee for every configuration or a claim of optimal model quality/performance.
+Earlier real-environment checks established execution for the recipes recorded below. The later receiver-only decoder-memory correction and HellaSwag training-holdout selection are covered by CPU regression tests; full-weight checks of these changes are still required before a new research sweep. Historical execution does not establish current model quality or convergence.
 
 ## Automated tests
 
@@ -14,13 +14,13 @@ uv run --locked --extra dev python -m pytest -q tests/test_hellaswag.py
 uv run --locked --extra dev python -m pytest -q tests/test_sweep_routes.py
 ```
 
-The suite uses CPU tensors and tiny real T5Gemma-2 modules, without pretrained downloads. All 83 tests pass at this update. Coverage includes shared-design composition, runtime overrides, saved flat-config independence, alignment of both task recipes with FiLM off, study expansion/export, train/eval index pairing, and the absence of FiLM parameters or SNR-conditioned decoding when disabled.
+The suite uses CPU tensors and tiny real T5Gemma-2 modules without pretrained downloads. Coverage includes shared-design composition, runtime overrides, saved flat-config independence, task alignment with FiLM off, study expansion/export, train/eval pairing, and the absence of FiLM parameters when disabled. New tests verify sender-clean/receiver-transmitted memory, shared memory realizations, cached generation without repeated memory transmission, gradients to both codecs, checkpoint/resume, and disjoint HellaSwag training/selection rows with legacy-ID compatibility.
 
 Pyright and Ruff are pinned project dev dependencies in pyproject.toml and uv.lock. Use the project uv commands above rather than a machine's Mason/global executables. Third-party dynamic registry/dataset boundaries are explicitly typed; missing-import diagnostics are not globally disabled.
 
 | Area | Coverage |
 |---|---|
-| COCO | Split separation, multimodal forward/backward/generation, image channel routing after vision scatter, decoder-only clean-memory behavior |
+| COCO | Data separation, multimodal forward/backward/generation, image channel routing after vision scatter, receiver-only memory transmission |
 | HellaSwag | Padding/labels and actual HFLM seq2seq likelihood through the codec |
 | Shared core | LayerNorm choices, power/SNR, channel replacement, gradients and frozen backbone, RNG isolation, scheduler, checkpoint and resume |
 | Configs/studies | All supplied plan counts, task filters, seeds, isolated overrides, relative paths, portable resolved exports, preview without execution, failed-train and same-index evaluation routing |
@@ -55,6 +55,7 @@ The RTX 5090 check used driver 570.211.01, PyTorch 2.10.0+cu128, capability (12,
 - Tiny-model tests establish routes and gradients, not image-caption quality.
 - FP8, compile, shared encoder computation and batch/worker alternatives have not been benchmarked for this project.
 - A collaborator's physical channel has not yet been supplied or validated.
+- Beam search with receiver-memory coding is not supported. Tests use greedy generation; feedback communication and per-context deduplication of evaluation channel-use counts remain outside the simulator.
 
 ## What a sweep test does and does not prove
 

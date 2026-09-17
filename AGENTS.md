@@ -9,7 +9,8 @@
 - Before remote access or Slurm work, read docs/running.md and the local docs/local/environment.md if present.
 - For actual run IDs, paths and decisions, consult docs/local/experiments.md if present.
 - For custom channels, read docs/channel-integration.md.
-- For retrospective paper organization and future ablations, read docs/research-roadmap.md.
+- For retrospective research, start with docs/local/research/reported-experiments.md when present: prioritize presented experiments and map each slide to raw evidence. Use docs/research-roadmap.md for the portable research scope.
+- For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For storage cleanup, read docs/local/research/cleanup-plan.md before proposing deletion paths.
 
 ## Working conventions
 
@@ -25,7 +26,7 @@ Git tracks code, configuration, uv.lock and portable docs. docs/local/ is intent
 
 Keep passwords, access tokens and private keys out of both portable and local Markdown; refer to the installed credential mechanism. Update only current commits to remove personal notes; preserve existing Git history unless the user explicitly requests a rewrite.
 
-The real-environment executability check is complete. A historical COCO timeout is not a pending request to resume training. New compute work must serve the user's current research request.
+Earlier real-environment checks predate the receiver-only decoder-memory correction and HellaSwag selection holdout. CPU regression tests do not establish full-weight performance of those changes. New GPU work requires a concrete experiment scope and budget; a historical COCO timeout is not a pending request to resume training.
 
 ## Checks
 

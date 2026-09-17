@@ -1,7 +1,7 @@
 # The 13 split locations from the historical launcher, evaluated under the NEW shared design.
 # This is a prospective comparison template, not a reproduction of old model/protocol settings.
 # All variants retain the shared codec (including LayerNorm both and FiLM off).
-# Decoder splits retain clean encoder memory; interpret them separately from a full communication cut.
+# Decoder receiver layers use a second memory codec; count both streams and their parameters.
 name: splits
 task_configs: [../tasks/coco.yaml, ../tasks/hellaswag.yaml]
 seeds: [0]

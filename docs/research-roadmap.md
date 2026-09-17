@@ -1,6 +1,6 @@
 # Research synthesis and open questions
 
-The immediate objective is to organize the existing six-to-twelve months of work into a paper-style account. This document identifies evidence gaps and possible future directions; it is not a request to launch new experiments.
+The immediate objective is a presentation-led experiment and results catalog, not a paper narrative yet. Start with experiments actually reported, trace their figures to raw artifacts and configurations, and evaluate their scientific value before deciding what to recover or rerun. The main research question is how split location changes task quality and communication cost across COCO and HellaSwag. There is no hard deadline or request to launch a full sweep.
 
 ## Current working baseline
 
@@ -22,7 +22,7 @@ For each useful figure or experiment, record:
 | Comparability | Which other runs used the same relevant conditions? |
 | Evidence gap | Can the claim be supported now, is reevaluation enough, or is new training necessary? |
 
-Keep personal artifact paths in ignored docs/local/legacy.md or docs/local/experiments.md. Classify results as usable comparisons, diagnostic observations, or unresolved evidence. Historical configuration or evaluation defects are reasons to qualify conclusions, not to silently reinterpret old scores under the new code.
+Keep personal artifact paths and the report-to-result map in ignored docs/local/research/. Classify results as usable comparisons, diagnostic observations, or unresolved evidence. Historical defects qualify conclusions; they do not justify silently reinterpreting old scores. Missing artifacts may warrant retraining when a reported comparison is important. Early Llama work is a separate stage, not a direct T5Gemma baseline. Keep one active experiment project; archive report-linked evidence before retiring historical project directories.
 
 ## Paper outline
 

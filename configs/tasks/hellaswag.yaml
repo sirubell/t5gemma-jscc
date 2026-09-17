@@ -9,8 +9,9 @@ run:
 data:
   name: Rowan/hellaswag
   revision: null
-  num_train: null                # Full training split.
+  num_train: null                # All training rows except the selection holdout.
   num_validation: 512
+  selection_seed: 0              # Same holdout across model/training seeds.
   max_length: 512
   num_workers: 4
 training:

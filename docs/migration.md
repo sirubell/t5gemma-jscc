@@ -21,8 +21,8 @@ The refactor established one research project with shared COCO/HellaSwag trainin
 - Steps and the learning-rate schedule count optimizer updates. Effective batch still depends on microbatch size and accumulation.
 - Checkpoint selection uses the configured validation metric rather than separate selection jobs. Additional saved steps can be evaluated explicitly.
 - COCO validation/report subsets are generated and saved in the new run; they are not guaranteed to equal historical report panels.
-- HellaSwag uses the correct ending for distillation and reports benchmark accuracy separately. Its benchmark validation split overlaps checkpoint-validation rows.
-- Unused experimental branches such as LoRA, token mixing, rate gates and a second encoder-memory codec were not ported.
+- HellaSwag uses the correct ending for distillation. New runs hold out selection rows from training, reserving official validation for final evaluation; legacy saved IDs retain the original overlapping protocol.
+- LoRA, token mixing and rate gates were not ported. Receiver-only encoder-memory coding was added after the owner clarified the communication boundary; it differs from historical global-memory coding.
 - Cluster configuration is outside model code. Runs require no Git-clean or hash approval gate.
 - Source task YAMLs now reference one shared model_config file. Saved run/checkpoint configurations are still complete flat dictionaries; old flat configurations and checkpoint loading do not require conversion.
 - The old flat config filenames moved into tasks/, smoke/ and evaluation/. Update command paths; no duplicate alias files are retained. Relative model references and output directories were adjusted so direct task/smoke runs keep their previous artifact locations. Studies add explicit model overrides and export complete configs without changing the shared model file.

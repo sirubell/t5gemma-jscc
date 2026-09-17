@@ -30,6 +30,8 @@ def batch_losses(model, batch, training, snr_db):
             student = model(**kwargs).logits
         kl = distillation_loss(student, teacher, labels, training["temperature"])
         nmse = reconstruction_loss(model.reconstruction, model.activation)
+        if model.memory_reconstruction is not None:
+            nmse = (nmse + reconstruction_loss(model.memory_reconstruction, model.memory_activation)) / 2
         loss = training["kl_weight"] * kl + training["mse_weight"] * nmse
     return {"loss": loss, "kl": kl, "nmse": nmse}
 
@@ -73,6 +75,7 @@ def make_scheduler(optimizer, settings):
 
 def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step, best, bad):
     torch.save({"codec": model.codec.state_dict(), "channel": model.channel.state_dict(),
+                "memory_codec": model.memory_codec.state_dict() if model.memory_codec is not None else None,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(), "config": config, "data_ids": ids,
                 "step": step, "best": best, "bad_evaluations": bad,
@@ -109,8 +112,7 @@ def train(config, resume: str | Path | None = None):
                                  and config["model"]["device"] == "cuda")
     start, best, bad = 0, float("inf"), 0
     if state and resume_path is not None:
-        model.codec.load_state_dict(state["codec"])
-        model.channel.load_state_dict(state["channel"])
+        model.load_communication_state(state)
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
         scaler.load_state_dict(state["scaler"])

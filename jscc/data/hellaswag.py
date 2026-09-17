@@ -1,5 +1,6 @@
 """HellaSwag: distill context -> correct ending; dynamically pad each batch."""
 from typing import cast
+import random
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -21,16 +22,30 @@ class Collator:
         }
 
 
+def selection_ids(num_rows, num_validation, num_train, seed):
+    """Reserve selection examples before limiting the optimization subset."""
+    if not 0 < num_validation < num_rows:
+        raise ValueError("HellaSwag selection size must leave nonempty training and selection sets")
+    rows = list(range(num_rows))
+    random.Random(seed).shuffle(rows)
+    selection = rows[:num_validation]
+    training = rows[num_validation:]
+    if num_train is not None:
+        training = training[:num_train]
+    if not training:
+        raise ValueError("HellaSwag training subset is empty")
+    return {"train_rows": training, "validation_rows": selection,
+            "validation_split": "train", "selection_seed": seed}
+
+
 def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
     if not for_training:
         return TaskData(ids=saved_ids)
     from datasets import load_dataset
     data = config["data"]
     raw = load_dataset(data["name"], revision=data["revision"])
-    ids = saved_ids or {
-        "train_rows": list(range(min(data["num_train"] or len(raw["train"]), len(raw["train"])))),
-        "validation_rows": list(range(min(data["num_validation"], len(raw["validation"])))),
-    }
+    ids = saved_ids if saved_ids is not None else selection_ids(
+        len(raw["train"]), data["num_validation"], data["num_train"], data.get("selection_seed", 0))
     def tokenize(rows):
         targets = [endings[int(label)] for endings, label in zip(rows["endings"], rows["label"])]
         inputs = tokenizer(rows["ctx"], truncation=True, max_length=data["max_length"])
@@ -44,5 +59,7 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
         return DataLoader(cast(Dataset, dataset), batch_size=config["training"]["batch_size"], shuffle=training,
                           num_workers=data["num_workers"], collate_fn=Collator(tokenizer.pad_token_id),
                           pin_memory=config["model"]["device"] == "cuda")
+    # Old checkpoints have no validation_split and retain their historical rows.
     return TaskData(train=loader("train", ids["train_rows"], True),
-                    validation=loader("validation", ids["validation_rows"], False), ids=ids)
+                    validation=loader(ids.get("validation_split", "validation"),
+                                      ids["validation_rows"], False), ids=ids)

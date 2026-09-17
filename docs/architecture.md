@@ -39,7 +39,13 @@ With FiLM enabled, an SNR-conditioned MLP applies `(1 + gamma) * hidden + beta` 
 
 For multimodal encoder splits, after_embed and before_first_layer are pre-hooks on the first text layer. They run after vision features replace image placeholder tokens. A hook on the token embedding itself would be too early: later image scatter could overwrite the reconstructed image positions. The regression tests explicitly distinguish these placements.
 
-Encoder and decoder splits have different signal paths. A decoder-only split modifies the decoder stream while encoder memory remains clean; it does not force all image information through the noisy channel. This is a model assumption, separate from the historical image-scatter bug. Generation can call the decoder channel repeatedly.
+For a decoder split after layer k, transmitter layers 0..k use original encoder memory. Receiver layers k+1..end use one shared reconstructed memory tensor from a second, independently trained codec with the same architecture settings. The memory is transmitted once per uncached decoder forward; cached generation builds receiver cross-attention K/V from that reconstruction and does not retransmit memory on later tokens. A split after the last decoder layer or final norm needs no memory stream because the receiver has no cross-attention layers. Decoder hidden states still pass through their own codec at the selected boundary.
+
+This corrects the former clean-memory bypass under the [accepted system definition](adr/0001-transmission-boundary.md). Historical global-memory coding also perturbed transmitter decoder layers, so it represents a different protocol. The additional codec increases parameter count and communication use; equal bottleneck width does not imply equal total cost across encoder and decoder splits.
+
+Greedy generation (num_beams=1) is supported. Beam-specific physical noise sharing is not defined, so the wrapper rejects beam search when receiver memory is transmitted. Reusing populated K/V caches across inputs or channel conditions is unsupported. Autoregressive token feedback is assumed available to the transmitter; feedback traffic/latency is not modeled.
+
+Evaluation records channel_uses_real for hidden and memory streams: real latent coordinates actually sent, including padding, prompts and repeated evaluation calls. These are evaluator execution counts, not bits or a deduplicated per-context rate (HellaSwag scores multiple candidates). Per-sample power normalization applies independently to each stream. Teacher-forced full sequences and autoregressive one-token hidden transmissions have different normalization domains; quantify this limitation before interpreting robustness curves.
 
 The shared default now uses an encoder split, so its encoder output memory passes through the codec/channel before the decoder consumes it. Decoder splits remain supported for explicit experiments.
 
@@ -51,6 +57,7 @@ Loss is kl_weight × KL(teacher || student) + mse_weight × nMSE:
 
 - KL uses positions whose labels are not −100, computes probabilities in float32 and applies the configured temperature.
 - nMSE divides hidden-state reconstruction MSE by the original representation's mean squared value. It includes all positions, without the labels' padding mask.
+- With receiver memory coding, nMSE is the mean of hidden-stream and memory-stream nMSE, keeping the configured reconstruction weight unchanged. KL gradients train both codecs.
 - Teacher forcing uses the backbone decoder start token, falling back to pad when absent. Generation uses its generation configuration; do not assume both start tokens are identical.
 
 A step is an optimizer update. Microbatches accumulate gradients before clipping, AdamW and cosine scheduling. Validation evaluates configured SNR conditions, then restores training mode.
@@ -64,15 +71,15 @@ A step is an optimizer update. Microbatches accumulate gradients before clipping
 
 COCO selects disjoint train/demo/validation/report IDs using Karpathy splits and saves them in each run. Evaluation reuses the checkpoint's report IDs. These IDs are not claimed to match historical reports.
 
-HellaSwag uses the train split for training and a prefix of validation rows for checkpoint validation. Its full benchmark also uses the validation split, including those rows; it is not an untouched independent test set.
+New HellaSwag runs reserve num_validation rows from the official training split for checkpoint selection, using data.selection_seed (default 0) independently of the training seed. The remaining rows supply optimization examples; num_train limits those remaining rows only. All split variants share the same selection IDs. Official validation is reserved for final evaluation. Saved legacy IDs without validation_split retain the old official-validation selection protocol when resuming; they are not silently migrated.
 
 ## Checkpoints and randomness
 
 best.pt is replaced only when the monitored metric improves by the configured relative min_delta. It need not be the checkpoint with the smallest floating-point loss across every validation. last.pt is updated after validation, with optional extra save_steps.
 
-A checkpoint includes codec/channel, optimizer, scheduler, scaler, configuration, data IDs and selected RNG state. It does not include the frozen backbone. Resume reconstructs that backbone and restores the saved recipe; the data iterator restarts, so exact uninterrupted batch order is not guaranteed.
+A checkpoint includes hidden codec, optional receiver-memory codec, channel, optimizer, scheduler, scaler, configuration, data IDs and selected RNG state. It does not include the frozen backbone. Resume reconstructs that backbone and restores the saved recipe; the data iterator restarts, so exact uninterrupted batch order is not guaranteed.
 
-Changing current YAML defaults does not alter historical checkpoints. Evaluation and resume restore their saved split, LayerNorm and FiLM settings. In particular, old COCO decoder-split/FiLM checkpoints are not checkpoints of the new shared baseline.
+Changing current YAML defaults does not alter historical checkpoints. Encoder checkpoints retain their saved design. Old decoder checkpoints requiring receiver memory but lacking a memory codec cannot load into the corrected boundary; evaluate them with archived historical source for diagnostics, or train a new corrected checkpoint. Do not initialize a random memory codec and report it as the old model.
 
 Validation and evaluation conditions isolate/reset Python, NumPy and PyTorch RNG. A custom simulator's private RNG or cross-call state must provide its own seed/reset behavior.
 

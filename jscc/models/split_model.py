@@ -29,6 +29,10 @@ class SplitModel(nn.Module):
         self.bypass = False
         self.activation = None
         self.reconstruction = None
+        self.memory_activation = None
+        self.memory_reconstruction = None
+        self.memory_codec: Codec | None = None
+        self.channel_uses = {"hidden": 0, "memory": 0}
         stack = stack_module(base, split["stack"])
         where = split["where"]
         if where in ("after_embed", "before_first_layer"):
@@ -40,6 +44,14 @@ class SplitModel(nn.Module):
             self.handle = stack.norm.register_forward_hook(self._hook)
         else:
             raise ValueError(f"unknown split.where: {where}")
+        if split["stack"] == "dec":
+            first_receiver = (split["index"] + 1 if where == "after_layer" else
+                              len(stack.layers) if where == "after_final_norm" else 0)
+            if first_receiver < len(stack.layers):
+                self.memory_codec = Codec(codec.encoder[0].weight.shape[1], codec.config)
+                stack.register_forward_pre_hook(self._begin_decoder, with_kwargs=True)
+                for layer in stack.layers[first_receiver:]:
+                    layer.self_attn.register_forward_pre_hook(self._receiver_memory, with_kwargs=True)
 
     def train(self, mode=True):
         super().train(mode)
@@ -50,26 +62,55 @@ class SplitModel(nn.Module):
     def transmission(self, snr_db=None, *, bypass=False):
         previous = self.snr_db, self.bypass
         self.snr_db, self.bypass = snr_db, bypass
+        self.channel_uses = {"hidden": 0, "memory": 0}
         try:
             yield
         finally:
             self.snr_db, self.bypass = previous
 
-    def _roundtrip(self, hidden):
-        self.activation = hidden.detach()
-        if self.bypass:
-            self.reconstruction = None
-            return hidden
-        z = self.codec.encode(hidden)
+    def _transmit(self, hidden, codec, stream):
+        z = codec.encode(hidden)
+        self.channel_uses[stream] += z.numel()
         if self.channel_config["normalize_power"]:
             z = normalize_power(z)
         received = self.channel(z, self.snr_db)
         film_snr = self.snr_db
         if film_snr is None:
             film_snr = self.channel_config["clean_film_snr"]
-        reconstructed = self.codec.decode(received, film_snr)
-        self.reconstruction = reconstructed
-        return reconstructed
+        return codec.decode(received, film_snr)
+
+    def _roundtrip(self, hidden):
+        self.activation = hidden.detach()
+        self.reconstruction = None if self.bypass else self._transmit(hidden, self.codec, "hidden")
+        return hidden if self.bypass else self.reconstruction
+
+    def _begin_decoder(self, module, args, kwargs):
+        self.memory_activation = self.memory_reconstruction = None
+
+    def _receiver_memory(self, module, args, kwargs):
+        if self.bypass:
+            return
+        cache = kwargs.get("past_key_values")
+        if cache is not None and cache.is_updated.get(module.layer_idx, False):
+            # These receiver K/V tensors were built from transmitted memory.
+            return
+        if self.memory_reconstruction is None:
+            memory = kwargs["encoder_hidden_states"]
+            self.memory_activation = memory.detach()
+            self.memory_reconstruction = self._transmit(memory, self.memory_codec, "memory")
+        return args, {**kwargs, "encoder_hidden_states": self.memory_reconstruction}
+
+    def load_communication_state(self, state):
+        self.codec.load_state_dict(state["codec"])
+        self.channel.load_state_dict(state["channel"])
+        memory = state.get("memory_codec")
+        if self.memory_codec is not None:
+            if memory is None:
+                raise ValueError("Decoder checkpoint has no receiver-memory codec. Use its historical source "
+                                 "for diagnostic evaluation; train a new checkpoint for the corrected boundary.")
+            self.memory_codec.load_state_dict(memory)
+        elif memory is not None:
+            raise ValueError("Checkpoint memory codec does not match this split")
 
     def _hook(self, module, inputs, output):
         if isinstance(output, tuple):
@@ -85,6 +126,11 @@ class SplitModel(nn.Module):
         return self.base(**kwargs)
 
     def generate(self, **kwargs):
+        if self.memory_codec is not None:
+            generation_config = kwargs.get("generation_config") or self.base.generation_config
+            beams = kwargs.get("num_beams", generation_config.num_beams) or 1
+            if beams != 1:
+                raise ValueError("Receiver-memory transmission currently supports num_beams=1 only")
         return self.base.generate(**kwargs)
 
 

@@ -9,7 +9,7 @@ hidden representation → codec encoder → power normalization → channel
                       → codec decoder → downstream model computation
 ```
 
-For a decoder split, only the decoder stream passes through the codec; encoder memory remains clean. See [architecture](docs/architecture.md) for the exact signal paths.
+For a decoder split, receiver layers obtain encoder memory through a second codec/channel transmission. Transmitter layers retain original memory. See [architecture](docs/architecture.md) for signal paths and [terminology](CONTEXT.md) for the system definition.
 
 ## Setup
 
@@ -161,7 +161,7 @@ The sweep-route tests exercise all supplied split and bottleneck variants on sma
 
 For a quick H200 check, both `configs/smoke/*_h200.yaml` recipes use four optimizer updates, accumulation two, validation every two updates, and two evaluation samples across no-noise, 0 dB and vanilla. `configs/studies/smoke_h200.yaml` groups them into one plan. These checks cover the main train/checkpoint/evaluation paths, not every configuration or convergence.
 
-The real-environment execution validation is complete. HellaSwag completed training and full evaluation; COCO completed substantial training before a scheduler timeout, and its small-scale generation/CIDEr path passed. No further run is needed solely to prove that these paths execute. See [validation scope](docs/validation.md) for limits and the image-route regression test.
+Earlier full-weight checks completed HellaSwag training/evaluation and COCO small-scale generation/CIDEr; the older long COCO run timed out. The subsequent receiver-memory and HellaSwag holdout corrections have CPU regression coverage and still need full-weight validation before a new research sweep. See [validation scope](docs/validation.md) for the exact versions and limits.
 
 ## Documentation and collaboration
 
