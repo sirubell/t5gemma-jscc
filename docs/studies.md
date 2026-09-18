@@ -67,7 +67,8 @@ entries:
 All entries use T5Gemma 2, residual codec B512/H1152, FiLM off, seed 0,
 training batch `16 x 2`, 4,000 optimizer updates, a 20,000-step schedule
 horizon, the fixed 512-row validation holdout, and evaluation at `no_noise`,
-`-6`, `18`, plus vanilla. This plan has not been submitted to H200.
+`-6`, `18`, plus vanilla. The plan is a reusable definition; individual
+submission IDs and completion evidence belong to the execution record.
 The resolved task config carries `protocol: corrected-baseline-v1`, so result
 indexers can keep this cohort separate from legacy evidence.
 

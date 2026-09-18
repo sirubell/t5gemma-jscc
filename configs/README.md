@@ -64,8 +64,9 @@ separate protocol and must be reported separately from both the historical
 (`dec_l8` / main `none`, memory `both`). All three use T5Gemma 2,
 B512/H1152, FiLM off, seed 0, batch `16 x 2`, 4,000 optimizer updates,
 a 20,000-step schedule horizon, a 512-row validation holdout, and
-`no_noise`/`-6`/`18` plus vanilla evaluation. The plan has not been submitted
-to H200. Its resolved task config carries the explicit
+`no_noise`/`-6`/`18` plus vanilla evaluation. The checked-in plan is a reusable
+definition; job IDs and completion evidence belong in ignored local research
+notes for each execution. Its resolved task config carries the explicit
 `protocol: corrected-baseline-v1` label for run manifests and downstream
 result indexing.
 
@@ -89,5 +90,5 @@ configs and a manifest. The expected future H200 entry point is the exported
 manifest with matching train/evaluate arrays, for example
 `--array=0-2%3` for one GPU per route and an `aftercorr` dependency for the
 evaluation array. Site-specific partition/account/QOS options still belong at
-submission time. Do not treat this documentation as evidence that an H200 job
-has been sent.
+submission time. Do not infer job status from the plan alone; inspect the
+recorded execution manifest and Slurm evidence for the specific run.
