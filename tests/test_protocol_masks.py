@@ -7,6 +7,7 @@ from test_core import batch
 from jscc.models.channel import AWGNChannel, normalize_power
 from jscc.models.codec import Codec
 from jscc.models.split_model import SplitModel
+from jscc.runtime import prepare_trainable_parameters
 
 
 def _codec():
@@ -167,3 +168,26 @@ def test_real_tiny_model_generation_uses_one_memory_payload_per_sequence():
                        min_new_tokens=3, do_sample=False, num_beams=1)
     assert model.channel_uses_valid["memory"] == 3 * 8
     assert model.channel_uses_valid["hidden"] == 3 * 8
+
+
+@torch.no_grad()
+def test_direct_bf16_backbone_evaluation_autocasts_fp32_codec():
+    config = {"hidden_dim": 8, "bottleneck_dim": 4, "n_res_blocks": 1,
+              "activation": "gelu", "dropout": 0.0, "layernorm": "none",
+              "snr_film": False}
+    model = SplitModel(
+        _ToyBackbone(), Codec(8, config), AWGNChannel(),
+        {"stack": "enc", "where": "after_layer", "index": 0},
+        {"normalize_power": True, "clean_film_snr": 18.0},
+    ).eval()
+    model.base.to(dtype=torch.bfloat16)
+    prepare_trainable_parameters(model)
+    with model.transmission(None):
+        output = model.base(
+            input_ids=torch.tensor([[1, 2, 3]]),
+            attention_mask=torch.ones(1, 3, dtype=torch.long),
+            decoder_input_ids=torch.tensor([[0, 4]]),
+            use_cache=False,
+        )
+    assert output.logits.dtype == torch.bfloat16
+    assert all(parameter.dtype == torch.float32 for parameter in model.codec.parameters())

@@ -121,16 +121,25 @@ class SplitModel(nn.Module):
         return mask
 
     def _transmit(self, hidden, codec, stream, valid_mask=None, *, token_wise=False):
-        z = codec.encode(hidden)
-        self.channel_uses[stream] += z.numel()
-        self.channel_uses_valid[stream] += valid_payload_count(z, valid_mask)
-        if self.channel_config["normalize_power"]:
-            z = normalize_power(z, valid_mask, token_wise=token_wise)
-        received = self.channel(z, self.snr_db)
-        film_snr = self.snr_db
-        if film_snr is None:
-            film_snr = self.channel_config["clean_film_snr"]
-        return codec.decode(received, film_snr)
+        # Training wraps the complete teacher/student pass in autocast.  The
+        # HellaSwag evaluator calls ``model.base`` directly through lm-eval,
+        # so the communication hook must preserve the same BF16-backbone /
+        # FP32-codec boundary on its own.
+        backbone_parameter = next(self.base.parameters())
+        autocast_enabled = backbone_parameter.dtype in (torch.bfloat16, torch.float16)
+        with torch.autocast(device_type=backbone_parameter.device.type,
+                            dtype=backbone_parameter.dtype,
+                            enabled=autocast_enabled):
+            z = codec.encode(hidden)
+            self.channel_uses[stream] += z.numel()
+            self.channel_uses_valid[stream] += valid_payload_count(z, valid_mask)
+            if self.channel_config["normalize_power"]:
+                z = normalize_power(z, valid_mask, token_wise=token_wise)
+            received = self.channel(z, self.snr_db)
+            film_snr = self.snr_db
+            if film_snr is None:
+                film_snr = self.channel_config["clean_film_snr"]
+            return codec.decode(received, film_snr)
 
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()
