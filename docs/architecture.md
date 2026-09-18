@@ -56,8 +56,9 @@ Each microbatch runs a no-grad teacher with codec/channel bypassed, then a stude
 Loss is kl_weight × KL(teacher || student) + mse_weight × nMSE:
 
 - KL uses positions whose labels are not −100, computes probabilities in float32 and applies the configured temperature.
-- nMSE divides hidden-state reconstruction MSE by the original representation's mean squared value. It includes all positions, without the labels' padding mask.
-- With receiver memory coding, nMSE is the mean of hidden-stream and memory-stream nMSE, keeping the configured reconstruction weight unchanged. KL gradients train both codecs.
+- In the legacy helper call without a mask, nMSE divides global hidden-state reconstruction MSE by the original representation's global mean squared value. The corrected baseline passes a stream-specific valid-position mask and computes a per-sample nMSE, excluding padding before averaging samples.
+- With receiver memory coding, corrected-baseline nMSE is the equal mean of the hidden-stream and memory-stream per-sample masked nMSE means, keeping the configured reconstruction weight unchanged. KL gradients train both codecs.
+- The corrected baseline aggregates KL over all valid target tokens in the effective batch, uses the same aggregation in validation, and samples one SNR per training sample. Its allocated latent-coordinate count and valid payload count are recorded separately.
 - Teacher forcing uses the backbone decoder start token, falling back to pad when absent. Generation uses its generation configuration; do not assume both start tokens are identical.
 
 A step is an optimizer update. Microbatches accumulate gradients before clipping, AdamW and cosine scheduling. `training.max_steps` is the stop budget; optional `training.schedule_steps` keeps the learning-rate horizon independent for short diagnostics and must be at least `max_steps`. Validation evaluates configured SNR conditions, then restores training mode.

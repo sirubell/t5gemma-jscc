@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 import pytest
+import torch.nn.functional as F
 
 from jscc.config import load_config
 from jscc.data import TaskData
@@ -144,3 +145,11 @@ def test_effective_batch_objective_matches_concatenated_batch():
         concatenated_gradients.append(parameter.grad.detach().clone())
     for actual, expected in zip(accumulated_gradients, concatenated_gradients):
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_unmasked_reconstruction_loss_keeps_legacy_global_contract():
+    original = torch.tensor([[[1.0, 2.0], [4.0, 8.0]], [[1.0, 1.0], [1.0, 1.0]]])
+    reconstructed = original + 0.5
+    expected = F.mse_loss(reconstructed, original) / (original.square().mean() + 1e-8)
+    from jscc.losses import reconstruction_loss
+    assert reconstruction_loss(reconstructed, original).item() == pytest.approx(expected.item())

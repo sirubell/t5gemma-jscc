@@ -8,8 +8,6 @@ accumulation) instead of averaging already-normalised microbatch losses.
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn.functional as F
 
@@ -119,10 +117,23 @@ def reconstruction_loss(
     *,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    """Compute masked per-sample normalized MSE."""
+    """Compute normalized MSE.
+
+    The no-mask call keeps the historical global nMSE contract for direct
+    callers.  Corrected training passes a stream mask and uses the new
+    per-sample statistic instead.
+    """
 
     if reduction not in {"mean", "sum"}:
         raise ValueError("reduction must be mean or sum")
+    if mask is None:
+        original_float = original.float()
+        value = F.mse_loss(reconstructed.float(), original_float) / (
+            original_float.square().mean() + 1e-8
+        )
+        if reduction == "sum":
+            return value * reconstructed.numel()
+        return value
     numerator, denominator = reconstruction_loss_stats(reconstructed, original, mask)
     if reduction == "sum":
         return numerator
@@ -139,9 +150,3 @@ def aggregate_stream_numerators(
     means = [numerator / count.clamp_min(1).to(numerator.dtype)
              for numerator, count in streams]
     return torch.stack(means).mean()
-
-
-def serializable_dtype(value: Any) -> str:
-    """Return a stable dtype string for run metadata and tests."""
-
-    return str(value).replace("torch.", "")
