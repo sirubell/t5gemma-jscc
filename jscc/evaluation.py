@@ -14,7 +14,7 @@ from .data import load_data
 from .data.coco import caption_prompt
 from .models.channel import build_channel
 from .models.split_model import build_model
-from .runtime import append_metrics, isolated_rng, new_run
+from .runtime import append_metrics, isolated_rng, new_run, source_state
 
 
 def clean_caption(text):
@@ -150,7 +150,8 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
         # Write after each condition so a later interruption preserves completed points.
         (output / "results.json").write_text(json.dumps({
             "checkpoint": str(checkpoint_path), "optimizer_step": state["step"],
-            "task": config["task"], "split": config["split"], "conditions": results,
+            "task": config["task"], "split": config["split"], "source": source_state(),
+            "torch_version": str(torch.__version__), "conditions": results,
         }, indent=2) + "\n")
     print(f"Evaluation: {output}", flush=True)
     return output

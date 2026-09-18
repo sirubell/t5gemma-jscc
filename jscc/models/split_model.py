@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import torch
 from torch import nn
 
+from ..config import resolve_codec_configs
 from .channel import build_channel, normalize_power
 from .codec import Codec
 
@@ -48,7 +49,8 @@ class SplitModel(nn.Module):
             first_receiver = (split["index"] + 1 if where == "after_layer" else
                               len(stack.layers) if where == "after_final_norm" else 0)
             if first_receiver < len(stack.layers):
-                self.memory_codec = Codec(codec.encoder[0].weight.shape[1], codec.config)
+                _, memory_config = resolve_codec_configs(codec.config)
+                self.memory_codec = Codec(codec.encoder[0].weight.shape[1], memory_config)
                 stack.register_forward_pre_hook(self._begin_decoder, with_kwargs=True)
                 for layer in stack.layers[first_receiver:]:
                     layer.self_attn.register_forward_pre_hook(self._receiver_memory, with_kwargs=True)

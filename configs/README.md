@@ -6,6 +6,7 @@ configs/
   tasks/
     coco.yaml                  # Data, training and evaluation defaults
     hellaswag.yaml
+    hellaswag_diagnostic.yaml  # Five-setting pre-H200 HellaSwag diagnostic
   smoke/
     coco_cpu.yaml              # Tiny budgets on CPU / float32
     hellaswag_cpu.yaml
@@ -18,6 +19,7 @@ configs/
     baseline.yaml
     splits.yaml
     bottleneck.yaml
+    hellaswag_diagnostic.yaml  # 5 settings, WS/5090 only before formal H200
     smoke_h200.yaml
 ```
 
@@ -29,6 +31,8 @@ configs/
 - Pass evaluation/ files to evaluate.py with --config. They override evaluation settings from a checkpoint, not the checkpoint's model architecture.
 - Use studies/ to list a set of experiments without duplicating model/task configurations. Study model_overrides apply equally to both tasks.
 
+`codec.memory` is an optional nested override for the receiver-memory codec. It inherits the main codec design and can pin a memory-specific boundary norm; a flat codec configuration keeps the historical shared setting.
+
 The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only model implementations. A compatible RTX 5090 can try the same small recipes directly with Python; see [standalone GPU execution](../docs/running.md#standalone-gpu-workstations-including-rtx-5090). Keep task-specific batch/resource adjustments in task recipes and record the actual hardware used.
 
 ## Supplied study plans
@@ -39,10 +43,13 @@ The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only mo
 | splits | 13 encoder/decoder locations | 0 | 26 |
 | bottleneck | 256, 512, 1024 | 0 | 6 |
 | smoke_h200 | Shared model, H200 smoke budgets | 0 | 2 |
+| hellaswag_diagnostic | Five HellaSwag split/norm settings | 0 | 5 |
 
 Each training configuration can have a separate evaluation job. Evaluation SNRs do not multiply the number of trained models. All supplied plans keep FiLM off.
 
-The split plan lists the 13 historical locations under the NEW shared codec settings (LayerNorm both and FiLM off). Decoder receiver layers now use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol, including HellaSwag's current early-stop setting.
+The split plan lists the 13 historical locations under the current shared codec design with boundary-aware normalization: `post` at `enc_emb`, `both` at `enc_fn`, and `none` at raw encoder/decoder residual streams. Internal residual-block LayerNorm and FiLM-off remain shared. Decoder receiver layers use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. `hellaswag_diagnostic.yaml` is a five-setting, 4,000-update pre-H200 plan; it keeps a 20,000-update schedule horizon and fixes decoder memory normalization while varying the main decoder codec. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol, including HellaSwag's current early-stop setting.
+
+The `hellaswag_diagnostic` plan is the gate before a formal H200 study. It is HellaSwag-only, stops after 4,000 optimizer updates while retaining a 20,000-update schedule, uses effective batch 32 (`16 x 2`), validates the full fixed 512-row selection holdout, and evaluates a fixed 512-example panel at `no_noise`, `-6`, `18`, plus `vanilla`. Its five rows change only the split and main codec boundary norm; `codec.memory.layernorm: both` is held constant for decoder rows.
 
 ## Examples
 
@@ -52,6 +59,7 @@ uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
 uv run --locked python study.py --config configs/studies/splits.yaml
 uv run --locked python study.py --config configs/studies/splits.yaml --task hellaswag
 uv run --locked python study.py --config configs/studies/smoke_h200.yaml --output runs/studies/smoke-h200
+uv run --locked python study.py --config configs/studies/hellaswag_diagnostic.yaml --task hellaswag
 ```
 
 References inside a task/study YAML are relative to that file. Direct task runs write to the project runs/ directory; smoke runs retain their configured output directory. Exported studies instead collect artifacts beneath their prepared directory. See [study execution](../docs/studies.md) for the manifest and job workflow.

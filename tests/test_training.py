@@ -36,6 +36,9 @@ def test_training_checkpoint_and_resume(tmp_path, monkeypatch, stack):
     monkeypatch.setattr(training.time, "monotonic", monotonic)
     monkeypatch.setattr(training, "validate", validate)
     run = training.train(copy.deepcopy(config))
+    run_metadata = json.loads((run / "run.json").read_text())
+    assert set(run_metadata["source"]) == {"revision", "dirty"}
+    assert run_metadata["training_budget"] == {"max_steps": 2, "schedule_steps": 2}
     rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     train_rows = [row for row in rows if row["phase"] == "train"]
     second = train_rows[1]

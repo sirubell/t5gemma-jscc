@@ -39,7 +39,7 @@ With FiLM enabled, an SNR-conditioned MLP applies `(1 + gamma) * hidden + beta` 
 
 For multimodal encoder splits, after_embed and before_first_layer are pre-hooks on the first text layer. They run after vision features replace image placeholder tokens. A hook on the token embedding itself would be too early: later image scatter could overwrite the reconstructed image positions. The regression tests explicitly distinguish these placements.
 
-For a decoder split after layer k, transmitter layers 0..k use original encoder memory. Receiver layers k+1..end use one shared reconstructed memory tensor from a second, independently trained codec with the same architecture settings. The memory is transmitted once per uncached decoder forward; cached generation builds receiver cross-attention K/V from that reconstruction and does not retransmit memory on later tokens. A split after the last decoder layer or final norm needs no memory stream because the receiver has no cross-attention layers. Decoder hidden states still pass through their own codec at the selected boundary.
+For a decoder split after layer k, transmitter layers 0..k use original encoder memory. Receiver layers k+1..end use one shared reconstructed memory tensor from a second, independently trained codec. By default the memory codec inherits the main `codec` settings; an explicit `codec.memory` mapping may override fields such as `layernorm` while inheriting the remaining shared design. The memory is transmitted once per uncached decoder forward; cached generation builds receiver cross-attention K/V from that reconstruction and does not retransmit memory on later tokens. A split after the last decoder layer or final norm needs no memory stream because the receiver has no cross-attention layers. Decoder hidden states still pass through their own codec at the selected boundary.
 
 This corrects the former clean-memory bypass under the [accepted system definition](adr/0001-transmission-boundary.md). Historical global-memory coding also perturbed transmitter decoder layers, so it represents a different protocol. The additional codec increases parameter count and communication use; equal bottleneck width does not imply equal total cost across encoder and decoder splits.
 
@@ -60,7 +60,7 @@ Loss is kl_weight × KL(teacher || student) + mse_weight × nMSE:
 - With receiver memory coding, nMSE is the mean of hidden-stream and memory-stream nMSE, keeping the configured reconstruction weight unchanged. KL gradients train both codecs.
 - Teacher forcing uses the backbone decoder start token, falling back to pad when absent. Generation uses its generation configuration; do not assume both start tokens are identical.
 
-A step is an optimizer update. Microbatches accumulate gradients before clipping, AdamW and cosine scheduling. Validation evaluates configured SNR conditions, then restores training mode.
+A step is an optimizer update. Microbatches accumulate gradients before clipping, AdamW and cosine scheduling. `training.max_steps` is the stop budget; optional `training.schedule_steps` keeps the learning-rate horizon independent for short diagnostics and must be at least `max_steps`. Validation evaluates configured SNR conditions, then restores training mode.
 
 ## Task data
 

@@ -1,0 +1,52 @@
+# Five-setting HellaSwag diagnostic before the formal 13-split study.
+#
+# This recipe deliberately stops at 4,000 optimizer updates while retaining
+# the 20,000-update learning-rate schedule. It keeps the current task/data
+# protocol, effective batch, and fixed 512-row selection holdout so the five
+# settings differ only in split location and main codec boundary norm. The
+# study file fixes codec.memory.layernorm=both for every setting; this is the
+# receiver-memory control for decoder splits.
+model_config: ../model.yaml
+task: hellaswag
+seed: 0
+run:
+  name: hellaswag-diagnostic
+  output_dir: ../../runs
+  wandb_project: null
+data:
+  name: Rowan/hellaswag
+  revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+  num_train: null
+  num_validation: 512
+  selection_seed: 0
+  max_length: 512
+  num_workers: 4
+training:
+  max_steps: 4000              # Optimizer updates; this is the stop budget.
+  schedule_steps: 20000        # Keep the formal recipe's LR horizon.
+  batch_size: 16
+  gradient_accumulation: 2     # Effective batch = 16 x 2 = 32.
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.0
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 500
+  validation_snrs: [no_noise]
+  validation_batches: null      # All 512 fixed selection rows.
+  monitor: loss
+  patience: null                # Fixed-step diagnostic; no early stopping.
+  min_steps: 1000
+  min_delta: 0.005
+  log_every: 50
+  save_steps: [1000, 2000, 4000]
+evaluation:
+  # Fixed short panel: two noisy points plus the clean and vanilla controls.
+  snrs: [no_noise, -6, 18]
+  batch_size: 8
+  num_samples: 512             # Fixed paired panel; small enough for WS iteration, large enough for uncertainty checks.
+  num_fewshot: 5
+  vanilla: true

@@ -14,6 +14,8 @@ codec:
   activation: gelu
   dropout: 0.0
   layernorm: both                # Shared baseline; residual-block norms also remain enabled.
+  memory:
+    layernorm: both              # Fixed receiver-memory norm for decoder diagnostics.
   snr_film: false                # Opt in only for a dedicated FiLM experiment.
   film_hidden: 64                # Inactive while snr_film is false.
 channel:

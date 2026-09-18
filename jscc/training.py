@@ -18,7 +18,7 @@ from .config import save_config
 from .data import load_data
 from .losses import distillation_loss, reconstruction_loss
 from .models.split_model import build_model
-from .runtime import append_metrics, autocast_for, isolated_rng, model_inputs, new_run, seed_everything
+from .runtime import append_metrics, autocast_for, isolated_rng, model_inputs, new_run, seed_everything, source_state
 
 
 def batch_losses(model, batch, training, snr_db):
@@ -62,7 +62,7 @@ def validate(model, loader, config):
 
 
 def make_scheduler(optimizer, settings):
-    steps = settings["max_steps"]
+    steps = settings.get("schedule_steps", settings["max_steps"])
     warmup = int(steps * settings["warmup_ratio"])
     minimum = settings["min_lr_ratio"]
     def factor(step):
@@ -102,8 +102,15 @@ def train(config, resume: str | Path | None = None):
     run = new_run(config["run"]["output_dir"], config["run"]["name"])
     save_config(config, run / "config.yaml")
     (run / "data_ids.json").write_text(json.dumps(data.ids, indent=2) + "\n")
-    (run / "run.json").write_text(json.dumps({"resume_from": str(Path(resume).resolve()) if resume else None,
-                                             "torch_version": str(torch.__version__)}, indent=2) + "\n")
+    (run / "run.json").write_text(json.dumps({
+        "resume_from": str(Path(resume).resolve()) if resume else None,
+        "torch_version": str(torch.__version__),
+        "source": source_state(),
+        "training_budget": {
+            "max_steps": settings["max_steps"],
+            "schedule_steps": settings.get("schedule_steps", settings["max_steps"]),
+        },
+    }, indent=2) + "\n")
     print(f"Run: {run}", flush=True)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(parameters, lr=settings["lr"], weight_decay=settings["weight_decay"])
@@ -180,6 +187,8 @@ def train(config, resume: str | Path | None = None):
                    "interval_updates": step - last_log_step,
                    "interval_wall_updates_per_second": (step - last_log_step) / interval_seconds,
                    "peak_memory_gib": torch.cuda.max_memory_allocated() / 2**30
+                   if config["model"]["device"] == "cuda" else None,
+                   "peak_memory_reserved_gib": torch.cuda.max_memory_reserved() / 2**30
                    if config["model"]["device"] == "cuda" else None, **totals}
             append_metrics(run / "metrics.jsonl", row)
             if tracker:

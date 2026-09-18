@@ -51,6 +51,26 @@ def test_split_replacement_and_order_are_deterministic():
     assert splits["dec_l24"] == {"stack": "dec", "where": "after_layer", "index": 24}
 
 
+def test_split_plan_uses_boundary_aware_normalization():
+    plan = expand_study(CONFIGS / "studies/splits.yaml", task="hellaswag")
+    norms = {run.experiment: run.config["codec"]["layernorm"] for run in plan.runs}
+    assert norms == {
+        "enc_emb": "post",
+        "enc_l4": "none",
+        "enc_l9": "none",
+        "enc_l14": "none",
+        "enc_l19": "none",
+        "enc_fn": "both",
+        "dec_l0": "none",
+        "dec_l4": "none",
+        "dec_l8": "none",
+        "dec_l12": "none",
+        "dec_l16": "none",
+        "dec_l20": "none",
+        "dec_l24": "none",
+    }
+
+
 def test_seed_expansion(tmp_path):
     spec = yaml.safe_load((CONFIGS / "studies/baseline.yaml").read_text())
     spec["task_configs"] = [str(CONFIGS / "tasks/coco.yaml"), str(CONFIGS / "tasks/hellaswag.yaml")]

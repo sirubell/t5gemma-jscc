@@ -1,0 +1,41 @@
+# Five-setting HellaSwag diagnostic. This is a preparation plan only;
+# study.py preview/export does not submit jobs.
+#
+# The main codec compares the current boundary-LayerNorm setting (both) with
+# the proposed raw-boundary setting (none). Receiver-memory normalization is
+# explicitly held at both for every row, so dec_l8_old/new isolate the main
+# decoder codec boundary rather than changing both streams together.
+name: hellaswag-diagnostic
+task_configs: [../tasks/hellaswag_diagnostic.yaml]
+seeds: [0]
+experiments:
+  - name: enc_fn
+    model_overrides:
+      split: {stack: enc, where: after_final_norm}
+      codec:
+        layernorm: both
+        memory: {layernorm: both}
+  - name: enc_l9_old
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 9}
+      codec:
+        layernorm: both
+        memory: {layernorm: both}
+  - name: enc_l9_new
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 9}
+      codec:
+        layernorm: none
+        memory: {layernorm: both}
+  - name: dec_l8_old
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 8}
+      codec:
+        layernorm: both
+        memory: {layernorm: both}
+  - name: dec_l8_new
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 8}
+      codec:
+        layernorm: none
+        memory: {layernorm: both}

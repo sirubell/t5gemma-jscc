@@ -3,17 +3,19 @@ import copy
 
 import pytest
 import torch
+from model_helpers import tiny_backbone
 
 from jscc.models.channel import AWGNChannel
 from jscc.models.codec import Codec
 from jscc.models.split_model import SplitModel
 from jscc.training import batch_losses
-from model_helpers import tiny_backbone
 
 
-def make_model(index=0):
+def make_model(index=0, layernorm="both", memory_layernorm=None):
     config = {"hidden_dim": 16, "bottleneck_dim": 8, "n_res_blocks": 1,
-              "activation": "gelu", "layernorm": "both", "snr_film": False}
+              "activation": "gelu", "layernorm": layernorm, "snr_film": False}
+    if memory_layernorm is not None:
+        config["memory"] = {"layernorm": memory_layernorm}
     return SplitModel(tiny_backbone(3), Codec(16, config), AWGNChannel(),
                       {"stack": "dec", "where": "after_layer", "index": index},
                       {"normalize_power": True, "clean_film_snr": 18.0})
@@ -33,6 +35,23 @@ def test_both_codecs_get_task_gradients_and_backbone_is_frozen():
         grad = codec.encoder[0].get_parameter("weight").grad
         assert grad is not None and grad.abs().sum() > 0
     assert all(p.grad is None for p in model.base.parameters())
+
+
+def test_memory_codec_can_override_boundary_layernorm():
+    model = make_model(layernorm="none", memory_layernorm="both")
+    assert model.codec.config["layernorm"] == "none"
+    assert model.memory_codec is not None
+    assert model.memory_codec.config["layernorm"] == "both"
+    # The nested override inherits the rest of the flat codec design.
+    assert model.memory_codec.config["bottleneck_dim"] == model.codec.config["bottleneck_dim"]
+    assert model.memory_codec.config["n_res_blocks"] == model.codec.config["n_res_blocks"]
+
+
+def test_flat_codec_config_keeps_memory_codec_identical():
+    model = make_model(layernorm="none")
+    assert model.memory_codec is not None
+    assert model.memory_codec.config["layernorm"] == "none"
+    assert model.memory_codec.config == model.codec.config
 
 
 @torch.no_grad()

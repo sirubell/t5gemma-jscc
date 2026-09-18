@@ -85,3 +85,25 @@ def test_runtime_only_accepts_execution_settings(tmp_path):
     save_config(task, path)
     with pytest.raises(ValueError, match="device and dtype"):
         load_config(path)
+
+
+def test_memory_codec_overrides_are_preserved_and_inherit_shared_design(tmp_path):
+    model_path, tasks = setup_recipes(tmp_path)
+    design = yaml.safe_load(model_path.read_text())
+    design["codec"]["layernorm"] = "none"
+    design["codec"]["memory"] = {"layernorm": "both"}
+    save_config(design, model_path)
+
+    resolved = load_config(tasks / "hellaswag.yaml")
+    assert resolved["codec"]["layernorm"] == "none"
+    assert resolved["codec"]["memory"] == {"layernorm": "both"}
+
+
+def test_memory_codec_must_be_a_mapping(tmp_path):
+    model_path, tasks = setup_recipes(tmp_path)
+    path = tasks / "coco.yaml"
+    design = yaml.safe_load(model_path.read_text())
+    design["codec"]["memory"] = "both"
+    save_config(design, model_path)
+    with pytest.raises(TypeError, match="codec.memory"):
+        load_config(path)

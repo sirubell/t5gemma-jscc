@@ -40,6 +40,15 @@ prepared/
 
 The original task/model files are not needed to read an exported config. Its output directory is relative to the prepared folder, so the folder can be transferred before execution. The manifest records the source revision and dirty state when available, but it does not copy or pin code: run from the intended source checkout. After execution, run links contain host-specific paths to the actual training output.
 
+The pre-H200 `configs/studies/hellaswag_diagnostic.yaml` plan is intentionally
+HellaSwag-only and expands to five entries: an `enc_fn` reference, old/new
+`enc_l9`, and old/new `dec_l8`. Its task recipe stops at 4,000 optimizer
+updates while retaining a 20,000-update schedule horizon, uses the full
+512-row selection holdout, and evaluates a fixed short `no_noise`/`-6`/`18`
+panel plus vanilla. Decoder entries keep `codec.memory.layernorm` fixed while
+varying the main hidden codec. It is a WS/RTX 5090 diagnostic gate, not a
+formal H200 sweep.
+
 Run outputs and completed links remain on the execution host. Transferring a plan before execution does not automatically sync later results back to the development machine.
 
 Use a fresh prepared folder for a new training attempt. Each entry is independent; rerunning evaluation creates a new evaluation directory for the same recorded checkpoint. A completed training link is not overwritten by another training invocation.

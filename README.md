@@ -37,6 +37,7 @@ The configuration files have distinct responsibilities:
 | `configs/model.yaml` | Shared backbone, split, codec and channel design; FiLM off |
 | `configs/tasks/coco.yaml` | COCO data, training, evaluation and a reference to model.yaml |
 | `configs/tasks/hellaswag.yaml` | HellaSwag data, training, evaluation and the same reference |
+| `configs/tasks/hellaswag_diagnostic.yaml` | Five-setting short HellaSwag diagnostic recipe |
 | `configs/smoke/` | Small CPU/H200 task budgets; the same shared model design |
 | `configs/evaluation/` | Evaluation-only overrides for small checks or custom channels |
 | `configs/studies/` | Multi-experiment plans shared by both tasks |
@@ -73,14 +74,14 @@ Use `--output runs/studies/NEW_NAME` to write complete YAMLs and a train/eval in
 | `codec.snr_film` | Receiver-side SNR conditioning |
 | `channel.type`, `channel.kwargs` | Built-in AWGN/identity or a custom Python module |
 | `training.batch_size`, `gradient_accumulation` | Microbatch size and number of accumulated microbatches |
-| `training.max_steps`, `eval_every` | Optimizer updates and validation interval |
+| `training.max_steps`, `schedule_steps`, `eval_every` | Stop budget, optional LR schedule horizon and validation interval |
 | `training.monitor`, `patience` | Checkpoint metric and early stopping; null patience disables early stopping |
 | `training.save_steps` | Additional checkpoint steps |
 | `training.max_minutes` | Optional training time budget, checked between updates; reserve time for final validation and evaluation |
 
 Batch size 16 with accumulation 2 gives an effective batch size of 32. A 6,000-step run performs 12,000 microbatches.
 
-External LayerNorm `pre` is before codec encoding, and `post` is after decoding; residual blocks retain their internal LayerNorm. Both tasks now start from the same encoder-final-norm split and residual codec with external LayerNorm `both`. SNR-FiLM is disabled in all default and smoke recipes. Task data, training budgets and evaluation methods remain task-specific. See [the shared baseline](docs/architecture.md#shared-baseline) for the design and compatibility limits.
+External LayerNorm `pre` is before codec encoding, and `post` is after decoding; residual blocks retain their internal LayerNorm. Both tasks now start from the same encoder-final-norm split and residual codec with external LayerNorm `both`. A decoder experiment may add `codec.memory` overrides to hold the receiver-memory codec's settings fixed while varying the main hidden codec. SNR-FiLM is disabled in all default and smoke recipes. Task data, training budgets and evaluation methods remain task-specific. See [the shared baseline](docs/architecture.md#shared-baseline) for the design and compatibility limits.
 
 W&B is optional: set `run.wandb_project` and add `--extra wandb` to `uv run --locked`.
 
@@ -92,7 +93,7 @@ Each training invocation prints its new run directory:
 runs/<time>-<name>-<id>/
   config.yaml          # Resolved experiment configuration
   data_ids.json        # Selected dataset rows/IDs
-  run.json
+  run.json                 # Source revision/dirty state, runtime and budget metadata
   metrics.jsonl        # Training/validation metrics and logged timing/memory
   best.pt              # Best checkpoint under the configured improvement rule
   last.pt              # Most recent validation checkpoint

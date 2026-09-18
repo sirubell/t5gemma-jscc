@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import random
+import subprocess
 import uuid
 
 import numpy as np
@@ -33,6 +34,26 @@ def new_run(parent, name):
     path = Path(parent) / f"{stamp}-{name}-{uuid.uuid4().hex[:6]}"
     path.mkdir(parents=True, exist_ok=False)
     return path
+
+
+def source_state():
+    """Return lightweight source provenance for a run manifest.
+
+    Runs may be created from an exported plan or a source archive, so Git
+    metadata is intentionally best-effort. A missing repository is recorded as
+    unknown instead of being inferred from a directory name.
+    """
+    root = Path(__file__).resolve().parents[1]
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=root, stderr=subprocess.DEVNULL, text=True
+        ).strip())
+        return {"revision": revision, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"revision": None, "dirty": None}
 
 
 def append_metrics(path, values):
