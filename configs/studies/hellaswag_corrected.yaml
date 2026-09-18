@@ -1,0 +1,28 @@
+# Three-route corrected-protocol HellaSwag baseline.
+#
+# This is a preparation plan. Preview/export is safe and does not submit
+# Slurm jobs. The plan is deliberately separate from the legacy study and
+# the five-row WS diagnostic so their results cannot be mixed accidentally.
+# It has not been submitted to H200.
+name: hellaswag-corrected-baseline
+task_configs: [../tasks/hellaswag_corrected.yaml]
+seeds: [0]
+experiments:
+  - name: corrected_enc_fn
+    model_overrides:
+      split: {stack: enc, where: after_final_norm}
+      codec:
+        layernorm: both
+        memory: {layernorm: both}
+  - name: corrected_enc_l9
+    model_overrides:
+      split: {stack: enc, where: after_layer, index: 9}
+      codec:
+        layernorm: none
+        memory: {layernorm: both}
+  - name: corrected_dec_l8
+    model_overrides:
+      split: {stack: dec, where: after_layer, index: 8}
+      codec:
+        layernorm: none
+        memory: {layernorm: both}

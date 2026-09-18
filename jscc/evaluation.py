@@ -143,8 +143,14 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
                 metrics = evaluate_coco(model, processor, data, settings, output, condition)
             else:
                 metrics = evaluate_hellaswag(model, processor, settings, output, condition, config["data"])
+        allocated = dict(getattr(model, "channel_uses_allocated", model.channel_uses))
+        valid = getattr(model, "valid_payload_counts", None)
         results.append({"condition": condition, **metrics,
-                        "channel_uses_real": dict(model.channel_uses),
+                        # Keep the historical key as an allocated execution
+                        # count, and add the corrected valid-payload count.
+                        "channel_uses_real": allocated,
+                        "channel_uses_allocated": allocated,
+                        "channel_uses_valid": dict(valid) if valid is not None else None,
                         "elapsed_seconds": time.perf_counter() - started})
         print(results[-1], flush=True)
         # Write after each condition so a later interruption preserves completed points.

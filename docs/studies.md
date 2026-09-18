@@ -49,6 +49,66 @@ panel plus vanilla. Decoder entries keep `codec.memory.layernorm` fixed while
 varying the main hidden codec. It is a WS/RTX 5090 diagnostic gate, not a
 formal H200 sweep.
 
+## Corrected baseline after the diagnostic
+
+The corrected baseline is a separate protocol. Keep its results separate from
+the historical task recipe and the five-row diagnostic; the protocol changes
+power/mask semantics, trainable precision and loss aggregation. The plan is
+`configs/studies/hellaswag_corrected.yaml` and its task recipe is
+`configs/tasks/hellaswag_corrected.yaml`. It expands to three HellaSwag
+entries:
+
+| Entry | Split | Main codec boundary norm | Memory codec boundary norm |
+|---|---|---|---|
+| `corrected_enc_fn` | encoder final norm | `both` | `both` (inherited control) |
+| `corrected_enc_l9` | encoder layer 9 | `none` | `both` (inherited control) |
+| `corrected_dec_l8` | decoder layer 8 | `none` | `both` |
+
+All entries use T5Gemma 2, residual codec B512/H1152, FiLM off, seed 0,
+training batch `16 x 2`, 4,000 optimizer updates, a 20,000-step schedule
+horizon, the fixed 512-row validation holdout, and evaluation at `no_noise`,
+`-6`, `18`, plus vanilla. This plan has not been submitted to H200.
+The resolved task config carries `protocol: corrected-baseline-v1`, so result
+indexers can keep this cohort separate from legacy evidence.
+
+Prepare the portable H200 plan without submitting it:
+
+```bash
+uv run --locked python study.py \
+  --config configs/studies/hellaswag_corrected.yaml \
+  --task hellaswag \
+  --output runs/studies/hellaswag-corrected-h200
+```
+
+After a separate execution approval and a target-host preflight, the expected
+Slurm shape is one training array with the three entries in parallel, followed
+by a matching evaluation array. The commands below are a template only; fill
+in the site's partition/account/QOS and the returned training job ID:
+
+```bash
+sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS \
+  --array=0-2%3 --job-name=hs-corrected-train \
+  --output=runs/slurm/%x-%A_%a.out \
+  --error=runs/slurm/%x-%A_%a.err \
+  scripts/slurm_study.sh train \
+  runs/studies/hellaswag-corrected-h200/manifest.json
+
+sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS \
+  --array=0-2%3 --dependency=aftercorr:TRAIN_ARRAY_ID \
+  --kill-on-invalid-dep=yes --job-name=hs-corrected-eval \
+  --output=runs/slurm/%x-%A_%a.out \
+  --error=runs/slurm/%x-%A_%a.err \
+  scripts/slurm_study.sh evaluate \
+  runs/studies/hellaswag-corrected-h200/manifest.json
+```
+
+Each array element requests one GPU. `aftercorr` keeps evaluation index `i`
+paired with the successful training index `i`; it does not start evaluation
+for a failed or timed-out training route. The `study.py --output` step and the
+commands above do not submit anything by themselves. The H200 execution
+decision remains a separate gate after code review, local tests and a target
+GPU smoke.
+
 Run outputs and completed links remain on the execution host. Transferring a plan before execution does not automatically sync later results back to the development machine.
 
 Use a fresh prepared folder for a new training attempt. Each entry is independent; rerunning evaluation creates a new evaluation directory for the same recorded checkpoint. A completed training link is not overwritten by another training invocation.

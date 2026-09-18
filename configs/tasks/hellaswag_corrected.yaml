@@ -1,0 +1,50 @@
+# Corrected-protocol HellaSwag baseline used after the WS diagnostic.
+#
+# This recipe is intentionally separate from hellaswag.yaml and
+# hellaswag_diagnostic.yaml. It is a portable research definition only; it
+# does not submit a job. The corrected implementation defines the
+# sequence/mask/precision semantics documented in the research plan.
+model_config: ../model.yaml
+protocol: corrected-baseline-v1
+task: hellaswag
+seed: 0
+run:
+  name: hellaswag-corrected-baseline
+  output_dir: ../../runs
+  wandb_project: null
+data:
+  name: Rowan/hellaswag
+  revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+  num_train: null
+  num_validation: 512
+  selection_seed: 0
+  max_length: 512
+  num_workers: 4
+training:
+  max_steps: 4000
+  schedule_steps: 20000
+  batch_size: 16
+  gradient_accumulation: 2
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.0
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 500
+  validation_snrs: [no_noise]
+  validation_batches: null
+  monitor: loss
+  patience: null
+  min_steps: 1000
+  min_delta: 0.005
+  log_every: 50
+  save_steps: [1000, 2000, 4000]
+evaluation:
+  snrs: [no_noise, -6, 18]
+  batch_size: 8
+  num_samples: 512
+  num_fewshot: 5
+  vanilla: true

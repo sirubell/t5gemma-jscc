@@ -88,3 +88,77 @@ def autocast_for(model):
     parameter = next(model.base.parameters())
     return torch.autocast(device_type=parameter.device.type, dtype=parameter.dtype,
                           enabled=parameter.dtype in (torch.bfloat16, torch.float16))
+
+
+def prepare_trainable_parameters(model):
+    """Keep communication parameters in FP32 beside a BF16 frozen backbone.
+
+    ``SplitModel.build_model`` applies the requested execution dtype to the
+    complete wrapper.  Training has a more specific precision contract: the
+    frozen T5Gemma backbone can stay in BF16, while the trainable codec(s) and
+    any trainable channel parameters use FP32.  Casting parameters by name
+    would be brittle for custom channels, so cast every trainable module
+    reachable through the communication components only.
+    """
+
+    for component_name in ("codec", "memory_codec", "channel"):
+        component = getattr(model, component_name, None)
+        if component is not None:
+            component.float()
+    return model
+
+
+def promote_optimizer_state(optimizer):
+    """Upcast floating AdamW state after loading an older checkpoint."""
+
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value) and value.is_floating_point():
+                state[key] = value.float()
+    return optimizer
+
+
+def _dtype_counts(values):
+    counts = {}
+    for value in values:
+        key = str(value.dtype).replace("torch.", "")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def precision_telemetry(model, optimizer=None):
+    """Return JSON-safe parameter/optimizer dtype evidence for a run."""
+
+    parameters = list(model.named_parameters())
+    trainable = [(name, value) for name, value in parameters if value.requires_grad]
+    frozen = [(name, value) for name, value in parameters if not value.requires_grad]
+    telemetry = {
+        "parameters": _dtype_counts(value for _, value in parameters),
+        "trainable_parameters": _dtype_counts(value for _, value in trainable),
+        "frozen_parameters": _dtype_counts(value for _, value in frozen),
+        "trainable_parameter_names": [name for name, _ in trainable],
+    }
+    if optimizer is not None:
+        optimizer_values = [value for state in optimizer.state.values()
+                            for value in state.values()
+                            if torch.is_tensor(value) and value.is_floating_point()]
+        telemetry["optimizer_state"] = _dtype_counts(optimizer_values)
+    else:
+        telemetry["optimizer_state"] = {}
+    return telemetry
+
+
+def parameter_update_l2(parameters, before):
+    """Return the FP32 L2 magnitude of an optimizer update."""
+
+    squared = torch.zeros((), dtype=torch.float64)
+    for parameter, previous in zip(parameters, before):
+        squared += (parameter.detach().float().cpu() - previous.float().cpu()).square().sum().double()
+    return float(torch.sqrt(squared).item())
+
+
+def sample_snr_db(model, low, high, batch_size):
+    """Draw one SNR per sample, shaped for ``[batch, positions, channels]``."""
+
+    parameter = next(model.base.parameters())
+    return torch.empty((batch_size, 1, 1), device=parameter.device).uniform_(low, high)

@@ -7,6 +7,7 @@ configs/
     coco.yaml                  # Data, training and evaluation defaults
     hellaswag.yaml
     hellaswag_diagnostic.yaml  # Five-setting pre-H200 HellaSwag diagnostic
+    hellaswag_corrected.yaml   # Three-route corrected-protocol baseline
   smoke/
     coco_cpu.yaml              # Tiny budgets on CPU / float32
     hellaswag_cpu.yaml
@@ -20,6 +21,7 @@ configs/
     splits.yaml
     bottleneck.yaml
     hellaswag_diagnostic.yaml  # 5 settings, WS/5090 only before formal H200
+    hellaswag_corrected.yaml   # 3 routes, prepared before H200 submission
     smoke_h200.yaml
 ```
 
@@ -44,12 +46,28 @@ The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only mo
 | bottleneck | 256, 512, 1024 | 0 | 6 |
 | smoke_h200 | Shared model, H200 smoke budgets | 0 | 2 |
 | hellaswag_diagnostic | Five HellaSwag split/norm settings | 0 | 5 |
+| hellaswag_corrected | Corrected protocol: enc_fn, enc_l9, dec_l8 | 0 | 3 |
 
 Each training configuration can have a separate evaluation job. Evaluation SNRs do not multiply the number of trained models. All supplied plans keep FiLM off.
 
 The split plan lists the 13 historical locations under the current shared codec design with boundary-aware normalization: `post` at `enc_emb`, `both` at `enc_fn`, and `none` at raw encoder/decoder residual streams. Internal residual-block LayerNorm and FiLM-off remain shared. Decoder receiver layers use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. `hellaswag_diagnostic.yaml` is a five-setting, 4,000-update pre-H200 plan; it keeps a 20,000-update schedule horizon and fixes decoder memory normalization while varying the main decoder codec. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol, including HellaSwag's current early-stop setting.
 
 The `hellaswag_diagnostic` plan is the gate before a formal H200 study. It is HellaSwag-only, stops after 4,000 optimizer updates while retaining a 20,000-update schedule, uses effective batch 32 (`16 x 2`), validates the full fixed 512-row selection holdout, and evaluates a fixed 512-example panel at `no_noise`, `-6`, `18`, plus `vanilla`. Its five rows change only the split and main codec boundary norm; `codec.memory.layernorm: both` is held constant for decoder rows.
+
+`hellaswag_diagnostic` is legacy diagnostic evidence. The corrected baseline is a
+separate protocol and must be reported separately from both the historical
+`hellaswag.yaml` runs and the five-row diagnostic. Use
+`configs/tasks/hellaswag_corrected.yaml` with
+`configs/studies/hellaswag_corrected.yaml` for the three planned routes:
+`corrected_enc_fn` (`enc_fn` / main `both`), `corrected_enc_l9`
+(`enc_l9` / main `none`), and `corrected_dec_l8`
+(`dec_l8` / main `none`, memory `both`). All three use T5Gemma 2,
+B512/H1152, FiLM off, seed 0, batch `16 x 2`, 4,000 optimizer updates,
+a 20,000-step schedule horizon, a 512-row validation holdout, and
+`no_noise`/`-6`/`18` plus vanilla evaluation. The plan has not been submitted
+to H200. Its resolved task config carries the explicit
+`protocol: corrected-baseline-v1` label for run manifests and downstream
+result indexing.
 
 ## Examples
 
@@ -60,6 +78,16 @@ uv run --locked python study.py --config configs/studies/splits.yaml
 uv run --locked python study.py --config configs/studies/splits.yaml --task hellaswag
 uv run --locked python study.py --config configs/studies/smoke_h200.yaml --output runs/studies/smoke-h200
 uv run --locked python study.py --config configs/studies/hellaswag_diagnostic.yaml --task hellaswag
+uv run --locked python study.py --config configs/studies/hellaswag_corrected.yaml --task hellaswag
+uv run --locked python study.py --config configs/studies/hellaswag_corrected.yaml --task hellaswag --output runs/studies/hellaswag-corrected-h200
 ```
 
 References inside a task/study YAML are relative to that file. Direct task runs write to the project runs/ directory; smoke runs retain their configured output directory. Exported studies instead collect artifacts beneath their prepared directory. See [study execution](../docs/studies.md) for the manifest and job workflow.
+
+The corrected HellaSwag plan's export command only prepares three resolved
+configs and a manifest. The expected future H200 entry point is the exported
+manifest with matching train/evaluate arrays, for example
+`--array=0-2%3` for one GPU per route and an `aftercorr` dependency for the
+evaluation array. Site-specific partition/account/QOS options still belong at
+submission time. Do not treat this documentation as evidence that an H200 job
+has been sent.
