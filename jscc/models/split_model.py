@@ -139,7 +139,11 @@ class SplitModel(nn.Module):
             film_snr = self.snr_db
             if film_snr is None:
                 film_snr = self.channel_config["clean_film_snr"]
-            return codec.decode(received, film_snr)
+            # LayerNorm and residual blocks remain FP32 parameters in the
+            # corrected precision contract.  Return the reconstructed stream
+            # in the backbone activation dtype before downstream BF16 linear
+            # layers consume it.
+            return codec.decode(received, film_snr).to(dtype=hidden.dtype)
 
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()

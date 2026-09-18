@@ -191,3 +191,27 @@ def test_direct_bf16_backbone_evaluation_autocasts_fp32_codec():
         )
     assert output.logits.dtype == torch.bfloat16
     assert all(parameter.dtype == torch.float32 for parameter in model.codec.parameters())
+
+
+@torch.no_grad()
+def test_real_bf16_encoder_memory_returns_to_backbone_dtype():
+    config = {"hidden_dim": 16, "bottleneck_dim": 8, "n_res_blocks": 1,
+              "activation": "gelu", "dropout": 0.0, "layernorm": "both",
+              "snr_film": False}
+    model = SplitModel(
+        tiny_backbone(2), Codec(16, config), AWGNChannel(),
+        {"stack": "enc", "where": "after_final_norm"},
+        {"normalize_power": True, "clean_film_snr": 18.0},
+    ).eval()
+    model.base.to(dtype=torch.bfloat16)
+    prepare_trainable_parameters(model)
+    with model.transmission(None):
+        output = model.base(
+            input_ids=torch.tensor([[2, 3, 4]]),
+            attention_mask=torch.ones(1, 3, dtype=torch.long),
+            decoder_input_ids=torch.tensor([[0, 5]]),
+            use_cache=False,
+        )
+    assert output.logits.dtype == torch.bfloat16
+    assert model.reconstruction is not None
+    assert model.reconstruction.dtype == torch.bfloat16
