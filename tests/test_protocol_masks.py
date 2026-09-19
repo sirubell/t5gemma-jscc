@@ -215,3 +215,52 @@ def test_real_bf16_encoder_memory_returns_to_backbone_dtype():
     assert output.logits.dtype == torch.bfloat16
     assert model.reconstruction is not None
     assert model.reconstruction.dtype == torch.bfloat16
+
+
+@torch.no_grad()
+def test_full_teacher_forcing_matches_cached_decoder_prefix():
+    config = {"hidden_dim": 16, "bottleneck_dim": 8, "n_res_blocks": 1,
+              "activation": "gelu", "layernorm": "none", "snr_film": False}
+    model = SplitModel(
+        tiny_backbone(3), Codec(16, config), AWGNChannel(),
+        {"stack": "dec", "where": "after_layer", "index": 0},
+        {"normalize_power": True, "clean_film_snr": 18.0},
+    ).eval()
+    inputs = {"input_ids": torch.tensor([[2, 3, 4]]),
+              "attention_mask": torch.ones(1, 3, dtype=torch.long)}
+    with model.transmission(None):
+        full = model(**inputs, decoder_input_ids=torch.tensor([[0, 5, 6]]), use_cache=False)
+    with model.transmission(None):
+        first = model(**inputs, decoder_input_ids=torch.tensor([[0]]), use_cache=True)
+        second = model(**inputs, decoder_input_ids=torch.tensor([[5]]),
+                       use_cache=True, past_key_values=first.past_key_values)
+    torch.testing.assert_close(full.logits[:, :1], first.logits, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(full.logits[:, 1:2], second.logits, rtol=1e-5, atol=1e-6)
+
+
+@torch.no_grad()
+def test_fixed_noise_and_no_noise_roundtrips_are_reproducible():
+    config = {"hidden_dim": 8, "bottleneck_dim": 4, "n_res_blocks": 1,
+              "activation": "gelu", "layernorm": "none", "snr_film": False}
+    model = SplitModel(
+        _ToyBackbone(), Codec(8, config), AWGNChannel(),
+        {"stack": "enc", "where": "after_layer", "index": 0},
+        {"normalize_power": True, "clean_film_snr": 18.0},
+    ).eval()
+    inputs = {"input_ids": torch.tensor([[1, 2, 3]]),
+              "attention_mask": torch.ones(1, 3, dtype=torch.long),
+              "decoder_input_ids": torch.tensor([[0, 4]]), "use_cache": False}
+
+    with model.transmission(None):
+        clean_first = model(**inputs).logits
+    with model.transmission(None):
+        clean_second = model(**inputs).logits
+    torch.testing.assert_close(clean_first, clean_second, rtol=0, atol=0)
+
+    torch.manual_seed(123)
+    with model.transmission(0.0):
+        noisy_first = model(**inputs).logits
+    torch.manual_seed(123)
+    with model.transmission(0.0):
+        noisy_second = model(**inputs).logits
+    torch.testing.assert_close(noisy_first, noisy_second, rtol=0, atol=0)
