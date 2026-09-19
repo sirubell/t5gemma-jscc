@@ -23,7 +23,7 @@ def summarize(root: Path) -> dict:
     for row in repeats:
         if row.get("status") != "completed":
             continue
-        grouped.setdefault(row["variant_id"], []).append(row)
+        grouped.setdefault(row.get("matrix_id", row["variant_id"]), []).append(row)
     speed = {}
     for variant, rows in grouped.items():
         values = [row["updates_per_second"] for row in rows if row.get("updates_per_second") is not None]
