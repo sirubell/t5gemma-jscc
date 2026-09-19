@@ -84,14 +84,17 @@ def _stream_stats(model, batch, labels, stream, reconstructed, original):
 
 
 @overload
-def batch_losses(model, batch, training, snr_db, *, return_stats: Literal[False] = False) -> dict[str, torch.Tensor]: ...
+def batch_losses(model, batch, training, snr_db, *, return_stats: Literal[False] = False,
+                 valid_only_kl: bool = False) -> dict[str, torch.Tensor]: ...
 
 
 @overload
-def batch_losses(model, batch, training, snr_db, *, return_stats: Literal[True]) -> BatchValues: ...
+def batch_losses(model, batch, training, snr_db, *, return_stats: Literal[True],
+                 valid_only_kl: bool = False) -> BatchValues: ...
 
 
-def batch_losses(model, batch, training, snr_db, *, return_stats=False) -> dict[str, torch.Tensor] | BatchValues:
+def batch_losses(model, batch, training, snr_db, *, return_stats=False,
+                 valid_only_kl=False) -> dict[str, torch.Tensor] | BatchValues:
     kwargs, labels = model_inputs(batch, model)
     encoder_mask = batch.get("attention_mask")
     decoder_mask = labels != -100
@@ -105,7 +108,8 @@ def batch_losses(model, batch, training, snr_db, *, return_stats=False) -> dict[
         ):
             student = model(**kwargs).logits
         kl_numerator, kl_denominator = distillation_loss_stats(
-            student, teacher, labels, training["temperature"])
+            student, teacher, labels, training["temperature"],
+            valid_only=valid_only_kl)
         hidden_stats = _stream_stats(model, batch, labels, "hidden",
                                      model.reconstruction, model.activation)
         if hidden_stats is None:
@@ -129,6 +133,71 @@ def batch_losses(model, batch, training, snr_db, *, return_stats=False) -> dict[
             "memory_denominator": memory_stats[1] if memory_stats is not None else None,
         })
     return cast(BatchValues, values)
+
+
+def _valid_sample_count(mask: torch.Tensor) -> torch.Tensor:
+    """Count samples with at least one valid position without model work."""
+
+    if mask.ndim == 1:
+        mask = mask[:, None]
+    return mask.to(dtype=torch.bool).reshape(mask.shape[0], -1).any(dim=1).sum()
+
+
+def effective_batch_denominators(model, batches: list[dict], device) -> dict[str, torch.Tensor | int]:
+    """Return the fixed denominators required by streamed backward.
+
+    Counts depend only on labels and validity masks, so they can be collected
+    before the first forward without retaining a computation graph.  The
+    resulting objective is the same global effective-batch objective used by
+    ``aggregate_batch_losses``.
+    """
+
+    kl = torch.zeros((), device=device, dtype=torch.float32)
+    hidden = torch.zeros((), device=device, dtype=torch.float32)
+    memory = torch.zeros((), device=device, dtype=torch.float32)
+    has_memory = getattr(model, "memory_codec", None) is not None
+    stack = model.split.get("stack") if hasattr(model, "split") else "enc"
+    for batch in batches:
+        labels = batch["labels"].to(device=device)
+        encoder_mask = batch["attention_mask"].to(device=device, dtype=torch.bool)
+        kl = kl + (labels != -100).sum().to(dtype=torch.float32)
+        hidden_mask = labels != -100 if stack == "dec" else encoder_mask
+        hidden = hidden + _valid_sample_count(hidden_mask).to(dtype=torch.float32)
+        if has_memory:
+            memory = memory + _valid_sample_count(encoder_mask).to(dtype=torch.float32)
+    return {"kl": kl, "hidden": hidden, "memory": memory,
+            "stream_count": 2 if has_memory else 1}
+
+
+def scaled_batch_loss(values: BatchValues, training, denominators) -> torch.Tensor:
+    """Scale one microbatch so its backward contributes to the global loss."""
+
+    kl_numerator = _required_stat(values, "kl_numerator")
+    hidden_numerator = _required_stat(values, "hidden_numerator")
+    kl_denominator = cast(torch.Tensor, denominators["kl"]).clamp_min(1).to(
+        dtype=kl_numerator.dtype)
+    kl = kl_numerator / kl_denominator
+    streams = [
+        hidden_numerator /
+        cast(torch.Tensor, denominators["hidden"]).clamp_min(1).to(
+            dtype=hidden_numerator.dtype)
+    ]
+    memory_numerator = values.get("memory_numerator")
+    if memory_numerator is not None:
+        memory_denominator = cast(torch.Tensor, denominators["memory"]).clamp_min(1).to(
+            dtype=memory_numerator.dtype)
+        streams.append(memory_numerator / memory_denominator)
+    nmse = torch.stack(streams).mean()
+    return training["kl_weight"] * kl + training["mse_weight"] * nmse
+
+
+def detached_batch_values(values: BatchValues) -> BatchValues:
+    """Drop computation graphs before retaining stats for a later log row."""
+
+    return cast(BatchValues, {
+        key: value.detach() if torch.is_tensor(value) else value
+        for key, value in values.items()
+    })
 
 
 def _required_stat(values: BatchValues, name: str) -> torch.Tensor:
@@ -272,6 +341,11 @@ def train(config, resume: str | Path | None = None):
             "nmse": "equal mean of per-sample masked stream nMSE means",
             "snr": "one sampled SNR per training sample",
         },
+        "execution_options": {
+            "streamed_backward": bool(settings.get("streamed_backward", False)),
+            "valid_only_kl": bool(settings.get("valid_only_kl", False)),
+            "low_sync_logging": bool(settings.get("low_sync_logging", False)),
+        },
     }
     (run / "run.json").write_text(json.dumps(run_metadata, indent=2) + "\n")
     tracker = None
@@ -295,12 +369,15 @@ def train(config, resume: str | Path | None = None):
         sampled_snrs = []
         capture_update = step % settings["log_every"] == 0 or step == 1
         before_parameters = [parameter.detach().clone() for parameter in parameters] if capture_update else None
-        for _ in range(settings["gradient_accumulation"]):
+        def take_batch():
+            nonlocal iterator
             try:
-                batch = next(iterator)
+                return next(iterator)
             except StopIteration:
                 iterator = iter(data.train)
-                batch = next(iterator)
+                return next(iterator)
+
+        def snr_for_batch(batch):
             snr = None
             if config["channel"]["train_noise"]:
                 low, high = config["channel"]["train_snr_range"]
@@ -314,9 +391,31 @@ def train(config, resume: str | Path | None = None):
                                          getattr(model, "memory_codec", None))
                        if component is not None):
                     snr = float(snr.mean().item())
-            values.append(batch_losses(model, batch, settings, snr, return_stats=True))
-        totals = aggregate_batch_losses(values, settings)
-        scaler.scale(totals["loss"]).backward()
+            return snr
+
+        if settings.get("streamed_backward", False):
+            # Materialise only the CPU batches, not their computation graphs;
+            # global counts are known from labels/masks before any forward.
+            batches = [take_batch() for _ in range(settings["gradient_accumulation"])]
+            device = next(model.base.parameters()).device
+            denominators = effective_batch_denominators(model, batches, device)
+            for batch in batches:
+                batch_values = batch_losses(
+                    model, batch, settings, snr_for_batch(batch), return_stats=True,
+                    valid_only_kl=settings.get("valid_only_kl", False),
+                )
+                scaler.scale(scaled_batch_loss(batch_values, settings, denominators)).backward()
+                values.append(detached_batch_values(batch_values))
+            totals = aggregate_batch_losses(values, settings)
+        else:
+            for _ in range(settings["gradient_accumulation"]):
+                batch = take_batch()
+                values.append(batch_losses(
+                    model, batch, settings, snr_for_batch(batch), return_stats=True,
+                    valid_only_kl=settings.get("valid_only_kl", False),
+                ))
+            totals = aggregate_batch_losses(values, settings)
+            scaler.scale(totals["loss"]).backward()
         scaler.unscale_(optimizer)
         gradient_norm = torch.nn.utils.clip_grad_norm_(parameters, settings["grad_clip"])
         old_scale = scaler.get_scale()
@@ -324,8 +423,12 @@ def train(config, resume: str | Path | None = None):
         scaler.update()
         if scaler.get_scale() >= old_scale:
             scheduler.step()
-        update_l2 = parameter_update_l2(parameters, before_parameters) if before_parameters is not None else None
-        progress.set_postfix(loss=f"{totals['loss']:.4f}")
+        update_l2 = parameter_update_l2(
+            parameters, before_parameters,
+            on_device=settings.get("low_sync_logging", False),
+        ) if before_parameters is not None else None
+        if not settings.get("low_sync_logging", False) or capture_update:
+            progress.set_postfix(loss=f"{totals['loss'].detach().item():.4f}")
         if step % settings["log_every"] == 0 or step == 1:
             logged_at = time.monotonic()
             # Loop wall time includes validation/checkpoint/logging overhead since

@@ -1,10 +1,11 @@
 """Focused tests for corrected power and valid-payload semantics."""
 
+import pytest
 import torch
 
 from model_helpers import tiny_backbone
 from test_core import batch
-from jscc.models.channel import AWGNChannel, normalize_power
+from jscc.models.channel import AWGNChannel, normalize_power, valid_payload_count
 from jscc.models.codec import Codec
 from jscc.models.split_model import SplitModel
 from jscc.runtime import prepare_trainable_parameters
@@ -38,6 +39,23 @@ def test_decoder_token_power_is_prefix_causal():
     first = normalize_power(latent, token_wise=True)
     second = normalize_power(changed_future, token_wise=True)
     torch.testing.assert_close(first[:, :3], second[:, :3], rtol=0, atol=1e-6)
+
+
+def test_four_dimensional_additive_zero_mask_is_not_all_padding():
+    latent = torch.ones(1, 3, 5)
+    additive = torch.zeros(1, 1, 3, 3)
+    with pytest.raises(ValueError, match="ambiguous four-dimensional"):
+        normalize_power(latent, additive)
+    normalized = normalize_power(latent, additive, mask_representation="additive")
+    torch.testing.assert_close(normalized.square().mean(), torch.ones(()), rtol=0, atol=1e-6)
+    assert valid_payload_count(latent, additive, mask_representation="additive") == latent.numel()
+
+
+def test_four_dimensional_binary_mask_requires_explicit_contract():
+    latent = torch.ones(1, 3, 5)
+    binary = torch.ones(1, 1, 3, 3)
+    normalized = normalize_power(latent, binary, mask_representation="binary")
+    torch.testing.assert_close(normalized.square().mean(), torch.ones(()), rtol=0, atol=1e-6)
 
 
 def test_split_model_keeps_allocated_and_valid_payload_counts():

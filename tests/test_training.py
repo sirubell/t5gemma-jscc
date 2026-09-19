@@ -147,6 +147,47 @@ def test_effective_batch_objective_matches_concatenated_batch():
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+def test_streamed_backward_matches_reference_effective_batch_gradients():
+    settings = {"temperature": 1.0, "kl_weight": 1.0, "mse_weight": 0.1}
+    first = {"input_ids": torch.tensor([[1, 2, 3]]),
+             "attention_mask": torch.tensor([[1, 1, 1]]),
+             "labels": torch.tensor([[6, 7, -100]])}
+    second = {"input_ids": torch.tensor([[4, 5, 0]]),
+              "attention_mask": torch.tensor([[1, 1, 0]]),
+              "labels": torch.tensor([[9, 10, 11]])}
+
+    torch.manual_seed(41)
+    reference = toy_model("enc", channel=IdentityChannel()).train()
+    streamed = toy_model("enc", channel=IdentityChannel()).train()
+    streamed.load_state_dict(reference.state_dict())
+    values = [training.batch_losses(reference, item, settings, None, return_stats=True)
+              for item in (first, second)]
+    training.aggregate_batch_losses(values, settings)["loss"].backward()
+    denominators = training.effective_batch_denominators(
+        streamed, [first, second], torch.device("cpu"))
+    for item in (first, second):
+        values = training.batch_losses(streamed, item, settings, None, return_stats=True)
+        training.scaled_batch_loss(values, settings, denominators).backward()
+    for actual, expected in zip(
+        (p.grad for p in streamed.codec.parameters()),
+        (p.grad for p in reference.codec.parameters()),
+    ):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_valid_only_kl_matches_full_vocabulary_reference():
+    from jscc.losses import distillation_loss_stats
+
+    torch.manual_seed(42)
+    student = torch.randn(2, 4, 13, requires_grad=True)
+    teacher = torch.randn(2, 4, 13)
+    labels = torch.tensor([[1, 2, -100, -100], [3, 4, 5, -100]])
+    full_num, full_den = distillation_loss_stats(student, teacher, labels)
+    valid_num, valid_den = distillation_loss_stats(student, teacher, labels, valid_only=True)
+    torch.testing.assert_close(valid_den, full_den)
+    torch.testing.assert_close(valid_num, full_num, rtol=1e-6, atol=1e-6)
+
+
 def test_unmasked_reconstruction_loss_keeps_legacy_global_contract():
     original = torch.tensor([[[1.0, 2.0], [4.0, 8.0]], [[1.0, 1.0], [1.0, 1.0]]])
     reconstructed = original + 0.5

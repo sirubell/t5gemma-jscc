@@ -16,7 +16,7 @@ import torch
 from torch import nn
 
 
-def _token_mask(z, valid_mask):
+def _token_mask(z, valid_mask, *, representation=None):
     """Convert a token-valid mask to ``z``'s leading dimensions.
 
     The public model path passes a ``[batch, tokens]`` mask.  The small amount
@@ -29,15 +29,35 @@ def _token_mask(z, valid_mask):
     mask = torch.as_tensor(valid_mask, device=z.device)
     if mask.ndim == 0:
         mask = mask.reshape(1)
+    if representation not in {None, "binary", "additive"}:
+        raise ValueError("mask representation must be binary or additive")
     if mask.dtype != torch.bool:
         if mask.is_floating_point():
-            # A plain attention mask is usually 0/1, while an expanded
-            # additive mask uses finite/zero values for visible positions and
-            # -inf (or a very negative value) for pads.
-            values = torch.unique(mask.detach())
-            if bool(torch.all((values == 0) | (values == 1))):
-                mask = mask > 0
+            if representation is None:
+                # A two-dimensional float attention mask is the public
+                # 0/1 validity contract.  A four-dimensional float mask is
+                # deliberately rejected here: all-zero binary and additive
+                # masks have different meanings and cannot be inferred from
+                # values alone.
+                values = torch.unique(mask.detach())
+                if mask.ndim == z.ndim - 1 and bool(torch.all((values == 0) | (values == 1))):
+                    representation = "binary"
+                elif mask.ndim == 4 and z.ndim == 3:
+                    raise ValueError(
+                        "ambiguous four-dimensional floating attention mask; "
+                        "pass representation='binary' or 'additive' explicitly"
+                    )
+                else:
+                    raise ValueError(
+                        "floating validity masks require an explicit representation "
+                        "unless they are a two-dimensional 0/1 mask"
+                    )
+            if representation == "binary":
+                mask = mask != 0
             else:
+                # Additive attention masks use finite, non-negative values
+                # for visible positions and a large negative value/-inf for
+                # blocked keys.  The caller must select this representation.
                 mask = torch.isfinite(mask) & (mask > -1e4)
         else:
             mask = mask != 0
@@ -56,19 +76,19 @@ def _token_mask(z, valid_mask):
     return mask
 
 
-def valid_payload_count(z, valid_mask=None):
+def valid_payload_count(z, valid_mask=None, *, mask_representation=None):
     """Return the number of valid latent coordinates in ``z``.
 
     The allocated tensor count remains ``z.numel()``.  For a token mask, every
     valid token contributes all coordinates in the final bottleneck dimension.
     """
-    mask = _token_mask(z, valid_mask)
+    mask = _token_mask(z, valid_mask, representation=mask_representation)
     if mask is None:
         return int(z.numel())
     return int(mask.to(dtype=torch.int64).sum().item() * z.shape[-1])
 
 
-def normalize_power(z, valid_mask=None, *, token_wise=False):
+def normalize_power(z, valid_mask=None, *, token_wise=False, mask_representation=None):
     """Normalize each sample's latent power under an explicit mask policy.
 
     With the default policy, power is averaged over all non-batch dimensions,
@@ -82,7 +102,7 @@ def normalize_power(z, valid_mask=None, *, token_wise=False):
     if token_wise:
         power = z.pow(2).mean(dim=-1, keepdim=True)
     else:
-        mask = _token_mask(z, valid_mask)
+        mask = _token_mask(z, valid_mask, representation=mask_representation)
         if mask is None:
             # Normalize over all token/channel dimensions within each sample.
             power = z.pow(2).mean(dim=tuple(range(1, z.ndim)), keepdim=True)

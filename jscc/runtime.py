@@ -148,12 +148,27 @@ def precision_telemetry(model, optimizer=None):
     return telemetry
 
 
-def parameter_update_l2(parameters, before):
-    """Return the FP32 L2 magnitude of an optimizer update."""
+def parameter_update_l2(parameters, before, *, on_device=False):
+    """Return the FP32 L2 magnitude of an optimizer update.
 
-    squared = torch.zeros((), dtype=torch.float64)
+    The historical path copied every parameter delta to CPU.  The optional
+    on-device reduction preserves the scalar value while moving only one
+    final result across the device boundary, which is useful for low-sync
+    logging benchmarks.
+    """
+
+    first = next(iter(parameters), None)
+    if first is None:
+        return 0.0
+    device = first.device if on_device else torch.device("cpu")
+    squared = torch.zeros((), dtype=torch.float64, device=device)
     for parameter, previous in zip(parameters, before):
-        squared += (parameter.detach().float().cpu() - previous.float().cpu()).square().sum().double()
+        current = parameter.detach().float()
+        prior = previous.float()
+        if not on_device:
+            current = current.cpu()
+            prior = prior.cpu()
+        squared += (current - prior).square().sum().double()
     return float(torch.sqrt(squared).item())
 
 

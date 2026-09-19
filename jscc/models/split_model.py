@@ -41,6 +41,9 @@ class SplitModel(nn.Module):
         self._encoder_valid_mask = None
         self._decoder_valid_mask = None
         self._active_encoder_valid_mask = None
+        self._encoder_mask_representation = None
+        self._decoder_mask_representation = None
+        self._active_encoder_mask_representation = None
         self._encoder_mask_handle = None
         stack = stack_module(base, split["stack"])
         # Capture the original encoder attention mask before Transformers
@@ -77,7 +80,8 @@ class SplitModel(nn.Module):
         return self
 
     @contextmanager
-    def transmission(self, snr_db=None, *, bypass=False, encoder_mask=None, decoder_mask=None):
+    def transmission(self, snr_db=None, *, bypass=False, encoder_mask=None, decoder_mask=None,
+                     encoder_mask_representation=None, decoder_mask_representation=None):
         """Set channel condition and optional stream-valid masks.
 
         ``encoder_mask`` and ``decoder_mask`` are optional so existing callers
@@ -86,20 +90,35 @@ class SplitModel(nn.Module):
         the encoder mask is also used for receiver-memory transmission.
         """
         previous = (self.snr_db, self.bypass, self._encoder_valid_mask,
-                    self._decoder_valid_mask, self._active_encoder_valid_mask)
+                    self._decoder_valid_mask, self._active_encoder_valid_mask,
+                    self._encoder_mask_representation, self._decoder_mask_representation,
+                    self._active_encoder_mask_representation)
         self.snr_db, self.bypass = snr_db, bypass
         if encoder_mask is not None:
             self._encoder_valid_mask = encoder_mask
             self._active_encoder_valid_mask = encoder_mask
+            self._encoder_mask_representation = (
+                encoder_mask_representation
+                if encoder_mask_representation is not None
+                else self._infer_mask_representation(encoder_mask)
+            )
+            self._active_encoder_mask_representation = self._encoder_mask_representation
         if decoder_mask is not None:
             self._decoder_valid_mask = decoder_mask
+            self._decoder_mask_representation = (
+                decoder_mask_representation
+                if decoder_mask_representation is not None
+                else self._infer_mask_representation(decoder_mask)
+            )
         self.channel_uses = {"hidden": 0, "memory": 0}
         self.channel_uses_valid = {"hidden": 0, "memory": 0}
         try:
             yield
         finally:
             (self.snr_db, self.bypass, self._encoder_valid_mask,
-             self._decoder_valid_mask, self._active_encoder_valid_mask) = previous
+             self._decoder_valid_mask, self._active_encoder_valid_mask,
+             self._encoder_mask_representation, self._decoder_mask_representation,
+             self._active_encoder_mask_representation) = previous
 
     @property
     def channel_uses_allocated(self):
@@ -120,7 +139,30 @@ class SplitModel(nn.Module):
             return mask.to(device=hidden.device)
         return mask
 
-    def _transmit(self, hidden, codec, stream, valid_mask=None, *, token_wise=False):
+    @staticmethod
+    def _infer_mask_representation(mask):
+        """Resolve the caller's mask contract without guessing from zeros.
+
+        Public model inputs use a two-dimensional binary validity mask.  A
+        four-dimensional floating mask observed by the encoder hook is the
+        Transformer's expanded additive attention mask.  Other floating
+        shapes are ambiguous and are rejected by ``normalize_power`` unless a
+        caller supplies an explicit representation.
+        """
+        if mask is None:
+            return None
+        if not torch.is_tensor(mask):
+            return None
+        if mask.dtype == torch.bool or not mask.is_floating_point():
+            return "binary"
+        if mask.ndim == 2:
+            return "binary"
+        if mask.ndim == 4:
+            return "additive"
+        return None
+
+    def _transmit(self, hidden, codec, stream, valid_mask=None, *, token_wise=False,
+                  mask_representation=None):
         # Training wraps the complete teacher/student pass in autocast.  The
         # HellaSwag evaluator calls ``model.base`` directly through lm-eval,
         # so the communication hook must preserve the same BF16-backbone /
@@ -132,9 +174,14 @@ class SplitModel(nn.Module):
                             enabled=autocast_enabled):
             z = codec.encode(hidden)
             self.channel_uses[stream] += z.numel()
-            self.channel_uses_valid[stream] += valid_payload_count(z, valid_mask)
+            self.channel_uses_valid[stream] += valid_payload_count(
+                z, valid_mask, mask_representation=mask_representation
+            )
             if self.channel_config["normalize_power"]:
-                z = normalize_power(z, valid_mask, token_wise=token_wise)
+                z = normalize_power(
+                    z, valid_mask, token_wise=token_wise,
+                    mask_representation=mask_representation,
+                )
             received = self.channel(z, self.snr_db)
             film_snr = self.snr_db
             if film_snr is None:
@@ -148,9 +195,15 @@ class SplitModel(nn.Module):
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()
         valid_mask = self._active_encoder_valid_mask if self.split["stack"] == "enc" else self._decoder_valid_mask
+        mask_representation = (
+            self._active_encoder_mask_representation
+            if self.split["stack"] == "enc"
+            else self._decoder_mask_representation
+        )
         self.reconstruction = None if self.bypass else self._transmit(
             hidden, self.codec, "hidden", self._canonical_mask(valid_mask, hidden),
-            token_wise=self.split["stack"] == "dec"
+            token_wise=self.split["stack"] == "dec",
+            mask_representation=mask_representation,
         )
         return hidden if self.bypass else self.reconstruction
 
@@ -170,6 +223,7 @@ class SplitModel(nn.Module):
             self.memory_reconstruction = self._transmit(
                 memory, self.memory_codec, "memory",
                 self._canonical_mask(self._active_encoder_valid_mask, memory),
+                mask_representation=self._active_encoder_mask_representation,
             )
         return args, {**kwargs, "encoder_hidden_states": self.memory_reconstruction}
 
@@ -209,21 +263,29 @@ class SplitModel(nn.Module):
         if candidate is None:
             candidate = self._mask_from_hook_args(args, kwargs)
         self._active_encoder_valid_mask = candidate
+        self._active_encoder_mask_representation = self._infer_mask_representation(candidate)
 
     def _set_input_masks(self, kwargs):
         if "attention_mask" in kwargs:
             self._encoder_valid_mask = kwargs["attention_mask"]
             self._active_encoder_valid_mask = self._encoder_valid_mask
+            self._encoder_mask_representation = self._infer_mask_representation(kwargs["attention_mask"])
+            self._active_encoder_mask_representation = self._encoder_mask_representation
         if "decoder_attention_mask" in kwargs:
             self._decoder_valid_mask = kwargs["decoder_attention_mask"]
+            self._decoder_mask_representation = self._infer_mask_representation(kwargs["decoder_attention_mask"])
 
     def forward(self, **kwargs):
-        previous = self._encoder_valid_mask, self._decoder_valid_mask, self._active_encoder_valid_mask
+        previous = (self._encoder_valid_mask, self._decoder_valid_mask,
+                    self._active_encoder_valid_mask, self._encoder_mask_representation,
+                    self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
         try:
             return self.base(**kwargs)
         finally:
-            self._encoder_valid_mask, self._decoder_valid_mask, self._active_encoder_valid_mask = previous
+            (self._encoder_valid_mask, self._decoder_valid_mask,
+             self._active_encoder_valid_mask, self._encoder_mask_representation,
+             self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
 
     def generate(self, **kwargs):
         if self.memory_codec is not None:
@@ -231,12 +293,16 @@ class SplitModel(nn.Module):
             beams = kwargs.get("num_beams", generation_config.num_beams) or 1
             if beams != 1:
                 raise ValueError("Receiver-memory transmission currently supports num_beams=1 only")
-        previous = self._encoder_valid_mask, self._decoder_valid_mask, self._active_encoder_valid_mask
+        previous = (self._encoder_valid_mask, self._decoder_valid_mask,
+                    self._active_encoder_valid_mask, self._encoder_mask_representation,
+                    self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
         try:
             return self.base.generate(**kwargs)
         finally:
-            self._encoder_valid_mask, self._decoder_valid_mask, self._active_encoder_valid_mask = previous
+            (self._encoder_valid_mask, self._decoder_valid_mask,
+             self._active_encoder_valid_mask, self._encoder_mask_representation,
+             self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
 
 
 def build_model(config):

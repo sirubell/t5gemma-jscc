@@ -23,6 +23,8 @@ def distillation_loss_stats(
     teacher: torch.Tensor,
     labels: torch.Tensor,
     temperature: float = 1.0,
+    *,
+    valid_only: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(sum of token KLs, number of valid target tokens)``.
 
@@ -32,14 +34,24 @@ def distillation_loss_stats(
     """
 
     valid = _valid_token_mask(labels)
-    student_float = student.float() / temperature
-    teacher_float = teacher.float() / temperature
+    if valid_only:
+        # Selecting complete vocabulary rows after masking preserves the
+        # exact KL objective while avoiding softmax/log-softmax work for
+        # padded target positions.  Keep a differentiable zero for the
+        # degenerate all-padding fixture.
+        if not bool(valid.any()):
+            return student.float().sum() * 0.0, valid.sum()
+        student_float = student.float()[valid] / temperature
+        teacher_float = teacher.float()[valid] / temperature
+    else:
+        student_float = student.float() / temperature
+        teacher_float = teacher.float() / temperature
     token_kl = F.kl_div(
         F.log_softmax(student_float, dim=-1),
         F.softmax(teacher_float, dim=-1),
         reduction="none",
     ).sum(dim=-1) * temperature**2
-    numerator = token_kl.masked_select(valid).sum()
+    numerator = token_kl.sum() if valid_only else token_kl.masked_select(valid).sum()
     denominator = valid.sum()
     return numerator, denominator
 
@@ -51,12 +63,15 @@ def distillation_loss(
     temperature: float = 1.0,
     *,
     reduction: str = "mean",
+    valid_only: bool = False,
 ) -> torch.Tensor:
     """Compute KL(teacher || student) over non-padding target tokens."""
 
     if reduction not in {"mean", "sum"}:
         raise ValueError("reduction must be mean or sum")
-    numerator, denominator = distillation_loss_stats(student, teacher, labels, temperature)
+    numerator, denominator = distillation_loss_stats(
+        student, teacher, labels, temperature, valid_only=valid_only
+    )
     if reduction == "sum":
         return numerator
     return numerator / denominator.clamp_min(1).to(numerator.dtype)
