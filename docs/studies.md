@@ -143,3 +143,20 @@ All supplied split/bottleneck entries have small-model CPU forward/backward/gene
 Training retains its existing validation/checkpoint rules. Each evaluation uses best.pt by default and the saved configuration; the module CLI can select --checkpoint last.pt. All SNRs for one checkpoint remain in one evaluation process. Vanilla results are currently computed per entry rather than deduplicated across a study.
 
 This workflow provides planning and train/eval pairing. It does not automatically resume timeouts, tune resource requests, aggregate thesis figures, or reproduce historical protocols. Existing results remain separate from newly prepared plans.
+
+## Fixed-step primary evaluation
+
+For a study whose primary result is a fixed optimizer step, supply both the
+checkpoint filename and expected internal step. For example:
+
+```bash
+uv run --locked python -m jscc.study_task evaluate --manifest PREPARED/manifest.json --index 0 --checkpoint step_020000.pt --expected-step 20000
+```
+
+The Slurm wrapper forwards these options and offers `--fixed-step` to require
+both explicitly. Pass `--fixed-step --checkpoint step_020000.pt --expected-step
+20000` after the manifest argument. The evaluator validates the loaded
+checkpoint's integer `step` before constructing the model; a missing or incorrect
+checkpoint fails, with no fallback to `best.pt`. General evaluation still defaults
+to `best.pt` when no fixed-step contract is requested. These commands describe
+argument flow, not permission to submit a study.

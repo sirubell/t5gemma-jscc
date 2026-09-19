@@ -85,3 +85,20 @@ Changing current YAML defaults does not alter historical checkpoints. Encoder ch
 Validation and evaluation conditions isolate/reset Python, NumPy and PyTorch RNG. A custom simulator's private RNG or cross-call state must provide its own seed/reset behavior.
 
 See [validation coverage](validation.md), [migration decisions](migration.md), and the [channel integration guide](channel-integration.md) before extending these paths.
+
+### HellaSwag decoder payload accounting
+
+The decoder HFLM adapter records actual unpadded continuation token sequences
+before harness batching. Each forward resolves its padded inputs back to a unique
+actual continuation length and supplies a separate 2D payload-validity mask.
+Ambiguous length matches fail instead of inferring length from PAD token values.
+The temporary mask is restored even on exceptions and does not reset condition
+counters. HFLM sorting, native input preparation, attention, scoring and full-shaped
+AWGN draws remain unchanged. Decoder token-wise power does not use this mask to
+couple positions; this correction affects valid-coordinate accounting.
+
+Older direct-HFLM decoder counts may include padding and retain their historical
+meaning. New HellaSwag result metadata identifies `actual-harness-continuation-lengths-v2`.
+Allocated coordinates, valid coordinates and deduplicated physical traffic are
+separate quantities. CPU tiny-model tests cover real harness mixed-length batches;
+full-weight target-hardware acceptance remains separately recorded.

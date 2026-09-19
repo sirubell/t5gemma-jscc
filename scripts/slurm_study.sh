@@ -11,5 +11,31 @@ export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
-uv run --locked --no-sync python -m jscc.study_task "${1:?train or evaluate}" \
-  --manifest "${2:?path to manifest.json}" --index "${SLURM_ARRAY_TASK_ID:?Use --array}"
+phase="${1:?train or evaluate}"
+manifest="${2:?path to manifest.json}"
+shift 2
+fixed_step=false
+checkpoint=""
+expected_step=""
+while (( $# )); do
+  case "$1" in
+    --fixed-step) fixed_step=true; shift ;;
+    --checkpoint|--expected-step)
+      if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
+        echo "$1 requires a value" >&2; exit 2
+      fi
+      if [[ "$1" == --checkpoint ]]; then checkpoint="$2"; else expected_step="$2"; fi
+      shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+if [[ "$fixed_step" == true || -n "$expected_step" ]]; then
+  if [[ "$phase" != evaluate || -z "$checkpoint" || ! "$expected_step" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Fixed-step evaluation requires evaluate, --checkpoint and positive --expected-step together" >&2
+    exit 2
+  fi
+fi
+args=("$phase" --manifest "$manifest" --index "${SLURM_ARRAY_TASK_ID:?Use --array}")
+if [[ -n "$checkpoint" ]]; then args+=(--checkpoint "$checkpoint"); fi
+if [[ -n "$expected_step" ]]; then args+=(--expected-step "$expected_step"); fi
+uv run --locked --no-sync python -m jscc.study_task "${args[@]}"

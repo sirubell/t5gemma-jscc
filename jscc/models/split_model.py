@@ -125,6 +125,18 @@ class SplitModel(nn.Module):
              self._encoder_mask_representation, self._decoder_mask_representation,
              self._active_encoder_mask_representation) = previous
 
+    @contextmanager
+    def decoder_payload_validity(self, mask):
+        """Per-forward accounting mask; do not reset counts or change attention/noise."""
+        if mask.ndim != 2 or mask.dtype != torch.bool:
+            raise ValueError("decoder payload validity requires a 2D boolean mask")
+        previous = self._decoder_valid_mask, self._decoder_mask_representation
+        self._decoder_valid_mask, self._decoder_mask_representation = mask, "binary"
+        try:
+            yield
+        finally:
+            self._decoder_valid_mask, self._decoder_mask_representation = previous
+
     @property
     def channel_uses_allocated(self):
         """Allocated latent coordinates sent through each stream."""

@@ -265,7 +265,7 @@ def test_teacher_forcing_uses_native_t5gemma2_decoder_preparation():
 
     base = tiny_backbone()
     assert base.config.pad_token_id == 0
-    assert base.config.decoder.bos_token_id == 2
+    assert getattr(base.config.decoder, "bos_token_id") == 2
     inputs = {"input_ids": torch.tensor([[3, 4, 0], [5, 6, 7]]),
               "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]]),
               "labels": torch.tensor([[11, 12, -100], [21, -100, -100]])}

@@ -6,7 +6,15 @@ import subprocess
 import sys
 
 
-def run_task(manifest_path, index, phase, checkpoint="best.pt"):
+def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None):
+    if expected_step is not None:
+        if phase != "evaluate":
+            raise ValueError("expected step is only supported for evaluate")
+        if not checkpoint:
+            raise ValueError("expected step requires an explicit checkpoint")
+        if type(expected_step) is not int or expected_step < 1:
+            raise ValueError("expected step must be a positive integer")
+    checkpoint = checkpoint or "best.pt"
     manifest_path = Path(manifest_path).resolve()
     manifest = json.loads(manifest_path.read_text())
     if manifest["version"] != 1:
@@ -28,6 +36,8 @@ def run_task(manifest_path, index, phase, checkpoint="best.pt"):
         if not run:
             raise ValueError("Training run link is empty")
         command = [sys.executable, str(root / "evaluate.py"), "--run", run, "--checkpoint", checkpoint]
+        if expected_step is not None:
+            command += ["--expected-step", str(expected_step)]
     else:
         raise ValueError("phase must be train or evaluate")
     print(f"{phase}: index={index} task={entry['task']} experiment={entry['experiment']} seed={entry['seed']}", flush=True)
@@ -39,9 +49,10 @@ def main():
     parser.add_argument("phase", choices=("train", "evaluate"))
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--index", required=True, type=int)
-    parser.add_argument("--checkpoint", default="best.pt")
+    parser.add_argument("--checkpoint", help="checkpoint filename (default: best.pt)")
+    parser.add_argument("--expected-step", type=int, help="require this exact saved optimizer step")
     args = parser.parse_args()
-    run_task(args.manifest, args.index, args.phase, args.checkpoint)
+    run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step)
 
 
 if __name__ == "__main__":

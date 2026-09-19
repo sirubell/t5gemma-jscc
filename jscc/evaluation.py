@@ -68,8 +68,14 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
     # Hooks live on the backbone. Passing it directly keeps HFLM's usual HF interface.
     # The registry is typed as base LM; its HF implementation accepts these HF kwargs.
     harness_class = cast(type[Any], get_model("hf"))
-    adapter = harness_class(pretrained=model.base, tokenizer=tokenizer, backend="seq2seq",
-                            batch_size=settings["batch_size"])
+    if model.split["stack"] == "dec":
+        from .harness_payload import payload_harness_class
+        adapter = payload_harness_class(harness_class)(
+            communication_model=model, pretrained=model.base, tokenizer=tokenizer,
+            backend="seq2seq", batch_size=settings["batch_size"])
+    else:
+        adapter = harness_class(pretrained=model.base, tokenizer=tokenizer, backend="seq2seq",
+                                batch_size=settings["batch_size"])
     task_manager = TaskManager()
     # Resolve !function entries before passing an inline recipe back to the factory.
     # The index .cfg deliberately contains strings, not executable preprocessing.
@@ -106,10 +112,15 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
             "num_samples": result.get("n-samples", {}).get("hellaswag", {})}
 
 
-def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
+def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=None):
+    if expected_step is not None and not checkpoint_name:
+        raise ValueError("expected-step requires an explicit checkpoint")
+    checkpoint_name = checkpoint_name or "best.pt"
     run_path = Path(run_path).resolve()
     checkpoint_path = run_path / checkpoint_name
     state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    from .checkpoint_policy import validate_checkpoint_step
+    validate_checkpoint_step(state, expected_step)
     config = copy.deepcopy(state["config"])
     settings = config["evaluation"]
     if overrides_path:
@@ -151,6 +162,9 @@ def evaluate(run_path, checkpoint_name="best.pt", overrides_path=None):
                         "channel_uses_real": allocated,
                         "channel_uses_allocated": allocated,
                         "channel_uses_valid": dict(valid) if valid is not None else None,
+                        "payload_count_policy": ("actual-harness-continuation-lengths-v2"
+                                                 if config["task"] == "hellaswag"
+                                                 else "stream-masks-v1"),
                         "elapsed_seconds": time.perf_counter() - started})
         print(results[-1], flush=True)
         # Write after each condition so a later interruption preserves completed points.

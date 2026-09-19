@@ -33,7 +33,7 @@ def test_harness_recipe_and_raw_evidence(monkeypatch, tmp_path, revision):
 
     monkeypatch.setattr("lm_eval.evaluator.simple_evaluate", fake_evaluate)
     settings = {"batch_size": 8, "num_fewshot": 5, "num_samples": 2}
-    metrics = evaluate_hellaswag(SimpleNamespace(base=object()), object(), settings,
+    metrics = evaluate_hellaswag(SimpleNamespace(base=object(), split={"stack": "enc"}), object(), settings,
                                 tmp_path, -6, {"name": "Rowan/hellaswag", "revision": revision})
     assert recipe == original
     used = captured["tasks"][0]
@@ -113,6 +113,6 @@ def test_installed_recipe_keeps_callable_preprocessing_through_factory(monkeypat
         return {"results": {"hellaswag": {"acc,none": 0.5, "acc_norm,none": 0.5}}}
 
     monkeypatch.setattr("lm_eval.evaluator.simple_evaluate", fake_evaluate)
-    evaluate_hellaswag(SimpleNamespace(base=object()), object(),
+    evaluate_hellaswag(SimpleNamespace(base=object(), split={"stack": "enc"}), object(),
                        {"batch_size": 2, "num_fewshot": 5, "num_samples": 1},
                        data_settings={"name": "Rowan/hellaswag", "revision": "pinned-revision"})
