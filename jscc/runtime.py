@@ -78,14 +78,20 @@ def model_inputs(batch, model):
     parameter = next(model.base.parameters())
     device = parameter.device
     labels = batch["labels"].to(device)
-    pad_id = model.base.config.pad_token_id
-    # Teacher forcing falls back to pad when the backbone omits decoder_start_token_id.
-    start_id = getattr(model.base.config, "decoder_start_token_id", None)
-    if start_id is None:
-        start_id = pad_id
-    decoder = torch.full_like(labels, pad_id)
-    decoder[:, 0] = start_id
-    decoder[:, 1:] = labels[:, :-1].masked_fill(labels[:, :-1] == -100, pad_id)
+    prepare_decoder = getattr(model.base, "prepare_decoder_input_ids_from_labels", None)
+    if callable(prepare_decoder):
+        # Native preparation owns model-specific BOS/shift/padding semantics.
+        # T5Gemma 2 stores BOS on config.decoder, not decoder_start_token_id.
+        decoder = prepare_decoder(labels=labels)
+    else:
+        # Compatibility for lightweight/custom backbones without the HF API.
+        pad_id = model.base.config.pad_token_id
+        start_id = getattr(model.base.config, "decoder_start_token_id", None)
+        if start_id is None:
+            start_id = pad_id
+        decoder = torch.full_like(labels, pad_id)
+        decoder[:, 0] = start_id
+        decoder[:, 1:] = labels[:, :-1].masked_fill(labels[:, :-1] == -100, pad_id)
     kwargs = {"input_ids": batch["input_ids"].to(device),
               "attention_mask": batch["attention_mask"].to(device),
               "decoder_input_ids": decoder, "use_cache": False}

@@ -12,7 +12,13 @@ import traceback
 import types
 import torch
 import yaml
-from closeout_cuda import digest, filehash, kl_and_reload, make_batches
+from closeout_cuda import (
+    digest,
+    filehash,
+    kl_and_reload,
+    make_batches,
+    prepared_decoder_metadata,
+)
 from jscc import training
 from jscc.models.split_model import build_model, stack_module
 from jscc.runtime import prepare_trainable_parameters, seed_everything
@@ -131,6 +137,7 @@ def run_split(config, data_ids, entry, output, ledger):
         },
         "memory_codec_present": has_memory,
         "sample_ids": ids,
+        **prepared_decoder_metadata(model, batch),
         "input_hash": digest({k: v.tolist() for k, v in batch.items()}),
         "shape": {k: list(v.shape) for k, v in batch.items()},
         "valid_source_tokens": int(batch["attention_mask"].sum()),
@@ -170,6 +177,7 @@ def run_split(config, data_ids, entry, output, ledger):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--protocol-id", default="corrected-baseline-v1")
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -216,6 +224,7 @@ def main():
             / 32
         }
         row["executed_source_files"] = source_files
+        row["protocol_id"] = args.protocol_id
         with (args.output / "split-smoke.jsonl").open("a") as f:
             f.write(json.dumps(row, allow_nan=False) + "\n")
         print(

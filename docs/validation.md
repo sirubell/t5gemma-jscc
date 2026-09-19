@@ -79,3 +79,18 @@ The speed implementation has full-weight RTX5090 paired acceptance on encoder la
 Streamed backward and valid-only full-vocabulary KL were equivalent under that policy. Actual AWGN production calls confirmed both switches and the validation path. The other eleven split positions passed smaller batch2 train/reload/payload smoke; these are not full16×2 numerical or quality tests. COCO, H200, full-length corrected training and broad seed robustness were not tested in this closeout.
 
 HellaSwag fixed batch8 replay was exact on the512 development panel, but crossbatch BF16 forward sensitivity remains: a large candidate-score anomaly arose before scoring and was greatly reduced by a small FP32-forward probe. Keep evaluator precision, batch composition/panel and backend explicit. A fixed-batch result must not be described as batch-invariant or a full-precision reference. Owner-specific raw evidence and final gates are in ignored local research records.
+
+
+The final closeout also found a native input-preparation mismatch: the old
+training helper used PAD0 when the top-level start-token field was absent,
+whereas T5Gemma2's native method and the HellaSwag adapter used decoder BOS2.
+`model_inputs` now delegates to the native model API; custom backbones without
+that API retain the prior fallback. This is explicitly versioned as
+`corrected-baseline-v2-native-decoder-inputs` in the prospective study recipe.
+The failing regression was reproduced before the fix. Native-prefix paired
+CUDA checks, all13 route checks and production timing were rerun within the
+bounded closeout budget. Tensor differences were zero; scalar losses agreed
+within the preregistered tolerance. Old PAD-prefix results remain historical,
+and no native-v2 task-quality improvement has been measured. Existing training
+labels/context and five-shot evaluator prompts are not claimed to be identical.
+Use recorded source revisions when reproducing older recipe/protocol labels.

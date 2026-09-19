@@ -214,6 +214,76 @@ def recompute(root):
                 abs(r["score_fp32"] - reference) for r in group
             )
         }
+    native_numeric = {}
+    for route in ["enc_l9", "dec_l8"]:
+        case = json.loads(
+            (root / f"results/native-inputs/cuda-{route}.json").read_text()
+        )
+        scalar_max = loss_max = 0.0
+        prepared_count = 0
+        for condition in case["conditions"].values():
+            for branch in condition["branches"].values():
+                assert len(branch) == 3
+                for step in branch:
+                    assert step["lr"] > 0
+                    for batch in step["batches"]:
+                        ids = batch["prepared_decoder_input_ids"]
+                        expected = hashlib.sha256(
+                            json.dumps(
+                                ids, sort_keys=True
+                            ).encode()
+                        ).hexdigest()
+                        assert expected == batch["prepared_decoder_input_hash"]
+                        assert all(row[0] == 2 for row in ids)
+                        prepared_count += 1
+            for a, b, checks in zip(
+                condition["branches"]["reference"],
+                condition["branches"]["candidate"],
+                condition["scalar_checks"],
+            ):
+                for key, check in checks.items():
+                    difference = abs(a["losses"][key] - b["losses"][key])
+                    assert difference == check["absolute_difference"]
+                    passed = difference <= case["tolerances"]["scalar_atol"] + case[
+                        "tolerances"
+                    ]["scalar_rtol"] * abs(a["losses"][key])
+                    assert passed == check["pass"]
+                    scalar_max = max(scalar_max, difference)
+                    if key == "loss":
+                        loss_max = max(loss_max, difference)
+        native_numeric[route] = {
+            "max_loss_absolute_difference": loss_max,
+            "max_scalar_including_numerator_difference": scalar_max,
+            "prepared_hashes_checked": prepared_count,
+        }
+    result["native_numeric"] = native_numeric
+    native_rows = rows(root / "results/native-production-repeats.jsonl")
+    native_variants = {}
+    for variant in ["reference", "candidate"]:
+        group = [
+            r
+            for r in native_rows
+            if r["variant"] == variant and r["measured_updates"] == 60
+        ]
+        native_variants[variant] = {
+            "median_updates_per_second": statistics.median(
+                r["measured_updates"] / r["measured"]["wall_seconds"] for r in group
+            ),
+            "peak_allocated_gib": max(
+                r["measured"]["training_peak_allocated_gib"] for r in group
+            ),
+        }
+    ref, cand = native_variants["reference"], native_variants["candidate"]
+    result["native_production"] = native_variants
+    result["native_production_ratios"] = {
+        "throughput_gain": cand["median_updates_per_second"]
+        / ref["median_updates_per_second"]
+        - 1,
+        "time_reduction": 1
+        - ref["median_updates_per_second"] / cand["median_updates_per_second"],
+        "allocated_reduction": 1
+        - cand["peak_allocated_gib"] / ref["peak_allocated_gib"],
+    }
     ledger = root / "research/experiment-ledger.json"
     if ledger.exists():
         data = json.loads(ledger.read_text())
@@ -230,6 +300,8 @@ def recompute(root):
         "results/cuda-deterministic/cuda-enc_l9.json",
         "results/cuda-deterministic-paired/cuda-enc_l9.json",
         "results/cuda-deterministic-paired/cuda-dec_l8.json",
+        "results/native-inputs/cuda-enc_l9.json",
+        "results/native-inputs/cuda-dec_l8.json",
     ]
     numerical = [
         json.loads((root / name).read_text())["budget"] for name in numerical_paths
@@ -240,8 +312,17 @@ def recompute(root):
         json.loads(p.read_text())
         for p in (root / "results/production").rglob("production_check.json")
     ]
+    production_all += [
+        json.loads(p.read_text())
+        for p in (root / "results/native-production").rglob("production_check.json")
+    ]
     production_steps = sum(r["counters"]["optimizer_steps"] for r in production_all)
     smoke = json.loads((root / "results/split-smoke-budget.json").read_text())
+    native_smoke = json.loads(
+        (root / "results/native-inputs/split-smoke-budget.json").read_text()
+    )
+    for key in ["completed_backward_examples", "optimizer_steps"]:
+        smoke[key] += native_smoke[key]
     backward_examples = (
         numerical_examples
         + production_steps * 32

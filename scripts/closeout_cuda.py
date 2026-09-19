@@ -51,6 +51,21 @@ def dump(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False))
 
 
+def prepared_decoder_metadata(model, batch):
+    from jscc.runtime import model_inputs
+
+    kwargs, _ = model_inputs(batch, model)
+    ids = kwargs["decoder_input_ids"].detach().cpu().tolist()
+    return {
+        "prepared_decoder_input_ids": ids,
+        "prepared_decoder_start_tokens": [row[0] for row in ids],
+        "prepared_decoder_input_hash": digest(ids),
+        "native_preparation_method": type(model.base).__name__
+        + ".prepare_decoder_input_ids_from_labels",
+        "scope_note": "Training context/targets remain distinct from five-shot harness prompts.",
+    }
+
+
 class ReplayChannel(torch.nn.Module):
     """CPU noise coordinates keyed by sample occurrence and explicit stream."""
 
@@ -286,6 +301,7 @@ def run_branch(model, config, batches, initial, condition, branch, temp, ledger)
                 "batches": [
                     {
                         "ids": ids,
+                        **prepared_decoder_metadata(model, batch),
                         "shape": {k: list(v.shape) for k, v in batch.items()},
                         "valid_source": int(batch["attention_mask"].sum()),
                         "valid_target": int((batch["labels"] != -100).sum()),
@@ -450,6 +466,7 @@ def kl_and_reload(model, config, batches, temp, ledger):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--protocol-id", default="corrected-baseline-v1")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--reference-only", action="store_true")
     parser.add_argument(
@@ -513,6 +530,7 @@ def main():
     ledger = {"completed_backward_examples": 0, "optimizer_steps": 0}
     result = {
         "route": args.route,
+        "protocol_id": args.protocol_id,
         "general_only_fallback": args.general_repeat,
         "layer_counts": {
             "encoder": len(stack_module(model.base, "enc").layers),

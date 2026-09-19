@@ -1,5 +1,4 @@
-# Preview/export only; execution is not authorized by this definition.
-name: hellaswag-complete-closeout-20260919
+name: hellaswag-complete-native-inputs-20260919
 task_configs:
 - ../tasks/hellaswag_closeout.yaml
 seeds:

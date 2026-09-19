@@ -1,9 +1,9 @@
 model_config: ../model.yaml
-protocol: corrected-baseline-v1
+protocol: corrected-baseline-v2-native-decoder-inputs
 task: hellaswag
 seed: 0
 run:
-  name: hellaswag-complete
+  name: hellaswag-complete-native-inputs
   output_dir: ../../runs
   wandb_project: null
 data:

@@ -256,3 +256,20 @@ def test_validation_uses_valid_only_kl_and_preserves_loss(monkeypatch):
     optimized = training.validate(model, [batch()], config)
     assert calls == [True]
     assert optimized == pytest.approx(baseline, rel=1e-5, abs=1e-6)
+
+
+def test_teacher_forcing_uses_native_t5gemma2_decoder_preparation():
+    from model_helpers import tiny_backbone
+    from jscc.runtime import model_inputs
+    from types import SimpleNamespace
+
+    base = tiny_backbone()
+    assert base.config.pad_token_id == 0
+    assert base.config.decoder.bos_token_id == 2
+    inputs = {"input_ids": torch.tensor([[3, 4, 0], [5, 6, 7]]),
+              "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]]),
+              "labels": torch.tensor([[11, 12, -100], [21, -100, -100]])}
+    kwargs, labels = model_inputs(inputs, SimpleNamespace(base=base))
+    expected = base.prepare_decoder_input_ids_from_labels(labels=labels)
+    assert torch.equal(kwargs["decoder_input_ids"], expected)
+    assert kwargs["decoder_input_ids"].tolist() == [[2, 11, 12], [2, 21, 0]]
