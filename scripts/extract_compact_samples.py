@@ -19,6 +19,11 @@ def extract(source: Path, output: Path, *, run_id: str, checkpoint_sha256: str,
     output.parent.mkdir(parents=True, exist_ok=True)
     documents = output.with_name("documents.jsonl")
     seen_docs = set()
+    if documents.exists():
+        with documents.open() as existing:
+            for line in existing:
+                if line.strip():
+                    seen_docs.add(json.loads(line)["sample_id"])
     with source.open() as src, output.open("w") as dst, documents.open("a") as docs:
         for line in src:
             row = json.loads(line)
@@ -57,7 +62,7 @@ def extract(source: Path, output: Path, *, run_id: str, checkpoint_sha256: str,
                 "harness_definition": "lm_eval.api.task.MultipleChoiceTask.process_results",
             }
             dst.write(json.dumps(compact, allow_nan=False) + "\n")
-            if row["doc_id"] not in seen_docs:
+            if str(row["doc_id"]) not in seen_docs:
                 docs.write(json.dumps({
                     "sample_id": str(row["doc_id"]),
                     "source_id": source_id,
@@ -69,7 +74,7 @@ def extract(source: Path, output: Path, *, run_id: str, checkpoint_sha256: str,
                     "dataset_split": doc.get("split"),
                     "dataset_split_type": doc.get("split_type"),
                 }, ensure_ascii=False, allow_nan=False) + "\n")
-                seen_docs.add(row["doc_id"])
+                seen_docs.add(str(row["doc_id"]))
 
 
 def main():
