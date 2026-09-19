@@ -35,14 +35,26 @@ class ContinuationLengths:
 def payload_harness_class(harness_class: type[Any]) -> type[Any]:
     """Wrap only the two request/forward seams; leave HFLM numerical code intact."""
     class PayloadHFLM(harness_class):
-        def __init__(self, *args, communication_model, **kwargs):
+        def __init__(self, *args, communication_model, record_requests=False, **kwargs):
             super().__init__(*args, **kwargs)
             if self.backend != "seq2seq" or self.batch_size == "auto":
                 raise ValueError("Payload accounting requires fixed-batch seq2seq evaluation")
             self.communication_model = communication_model
             self._payload_lengths = None
+            self.record_requests = record_requests
+            self.request_evidence = {}
+            self.context_tokens = {}
+            self.forward_logits_dtypes = set()
 
         def _loglikelihood_tokens(self, requests, disable_tqdm=False, override_bs=None):
+            if self.record_requests:
+                for request, context, continuation in requests:
+                    if request[0] not in self.context_tokens:
+                        self.context_tokens[request[0]] = context[-self.max_length:]
+                    self.request_evidence[request] = {
+                        "context_token_ids": self.context_tokens[request[0]],
+                        "continuation_token_ids": continuation[-self.max_length:],
+                    }
             previous = self._payload_lengths
             self._payload_lengths = ContinuationLengths(requests, self.max_length)
             try:
@@ -55,6 +67,8 @@ def payload_harness_class(harness_class: type[Any]) -> type[Any]:
                 raise ValueError("Decoder payload forward has no actual request lengths")
             mask = self._payload_lengths.mask(inps, attn_mask, labels)
             with self.communication_model.decoder_payload_validity(mask):
-                return super()._model_call(inps, attn_mask=attn_mask, labels=labels)
+                logits = super()._model_call(inps, attn_mask=attn_mask, labels=labels)
+            self.forward_logits_dtypes.add(str(logits.dtype))
+            return logits
 
     return PayloadHFLM

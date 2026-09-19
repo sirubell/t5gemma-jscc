@@ -81,6 +81,7 @@ def test_each_condition_retains_timing_and_completed_metrics(monkeypatch, tmp_pa
         return {"acc": 0.5}
 
     monkeypatch.setattr(evaluation, "evaluate_hellaswag", fake_harness)
+    (tmp_path / "best.pt").write_bytes(b"fixture checkpoint bytes")
     evaluation.evaluate(tmp_path)
     results = json.loads((tmp_path / "results.json").read_text())
     assert seen == ["no_noise", 0]

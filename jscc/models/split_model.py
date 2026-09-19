@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from ..config import resolve_codec_configs
-from .channel import build_channel, normalize_power, valid_payload_count
+from .channel import AWGNChannel, build_channel, normalize_power, valid_payload_count
 from .codec import Codec
 
 
@@ -199,7 +199,9 @@ class SplitModel(nn.Module):
                     z, valid_mask, token_wise=token_wise,
                     mask_representation=mask_representation,
                 )
-            received = self.channel(z, self.snr_db)
+            received = (self.channel.transmit(z, self.snr_db, stream=stream)
+                        if isinstance(self.channel, AWGNChannel) and self.channel._replay is not None
+                        else self.channel(z, self.snr_db))
             film_snr = self.snr_db
             if film_snr is None:
                 film_snr = self.channel_config["clean_film_snr"]

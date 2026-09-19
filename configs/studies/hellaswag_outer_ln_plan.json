@@ -1,0 +1,703 @@
+{
+  "plan_id": "hellaswag-native-v2-outer-ln-formal-20260920",
+  "status": "PROPOSED_AWAITING_OWNER_APPROVAL",
+  "execution_authorized": false,
+  "prior_benchmark_authorization_does_not_apply": true,
+  "original_evidence": {
+    "zip": "native-v2-policy-benchmark-20260919.zip",
+    "sha256": "4c407e83e856436c486e5b68c969fcb79cf9df643218a1fae5da1643c429ffcf",
+    "execution_commit": "bbe010b40fa14c5e00a140339c0d9b90066e588b"
+  },
+  "proposed_policy": {
+    "training_microbatch": 128,
+    "gradient_accumulation": 1,
+    "effective_batch": 128,
+    "updates": 5000,
+    "schedule_steps": 5000,
+    "warmup_ratio": 0.05,
+    "lr": 0.0002,
+    "early_stopping": false,
+    "target_presentations_per_run": 640000,
+    "presentation_tail_policy": "fixed-length seeded presentation stream with full batches; explicit approval, not historical loader identity",
+    "training_precision": "BF16 frozen backbone, FP32 trainable codec/Adam, BF16 autocast, FP32 loss",
+    "evaluation_forward": "BF16",
+    "evaluation_log_softmax": "FP32",
+    "evaluation_score_sum": "FP32",
+    "evaluation_candidate_batch": 64,
+    "num_fewshot": 5,
+    "num_eval_documents": 10042,
+    "coarse_conditions": [
+      "no_noise",
+      -6,
+      6,
+      18
+    ],
+    "shared_vanilla_per_evaluation_identity": 1,
+    "max_concurrent_gpu_jobs": 4,
+    "film_main": false,
+    "film_memory": false,
+    "backbone_rmsnorm_unchanged": true,
+    "power_normalization_unchanged": true
+  },
+  "reference_13": [
+    "ref_enc_emb",
+    "ref_enc_l4",
+    "ref_enc_l9",
+    "ref_enc_l14",
+    "ref_enc_l19",
+    "ref_enc_fn",
+    "ref_dec_l0",
+    "ref_dec_l4",
+    "ref_dec_l8",
+    "ref_dec_l12",
+    "ref_dec_l16",
+    "ref_dec_l20",
+    "ref_dec_l24"
+  ],
+  "all_outer_none_13_with_reuse": [
+    "outer_none_enc_emb",
+    "ref_enc_l4",
+    "ref_enc_l9",
+    "ref_enc_l14",
+    "ref_enc_l19",
+    "outer_none_enc_fn",
+    "outer_none_dec_l0",
+    "outer_none_dec_l4",
+    "outer_none_dec_l8",
+    "outer_none_dec_l12",
+    "outer_none_dec_l16",
+    "outer_none_dec_l20",
+    "outer_none_dec_l24"
+  ],
+  "runs": [
+    {
+      "run_id": "ref_enc_emb",
+      "route": "enc_emb",
+      "split": {
+        "stack": "enc",
+        "where": "after_embed"
+      },
+      "arm": "reference",
+      "main_outer_norm": "post",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_enc_emb",
+      "route": "enc_emb",
+      "split": {
+        "stack": "enc",
+        "where": "after_embed"
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_enc_l4",
+      "route": "enc_l4",
+      "split": {
+        "stack": "enc",
+        "where": "after_layer",
+        "index": 4
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_enc_l9",
+      "route": "enc_l9",
+      "split": {
+        "stack": "enc",
+        "where": "after_layer",
+        "index": 9
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_enc_l14",
+      "route": "enc_l14",
+      "split": {
+        "stack": "enc",
+        "where": "after_layer",
+        "index": 14
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_enc_l19",
+      "route": "enc_l19",
+      "split": {
+        "stack": "enc",
+        "where": "after_layer",
+        "index": 19
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_enc_fn",
+      "route": "enc_fn",
+      "split": {
+        "stack": "enc",
+        "where": "after_final_norm"
+      },
+      "arm": "reference",
+      "main_outer_norm": "both",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_enc_fn",
+      "route": "enc_fn",
+      "split": {
+        "stack": "enc",
+        "where": "after_final_norm"
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": null,
+      "memory_enabled": false,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l0",
+      "route": "dec_l0",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 0
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l0",
+      "route": "dec_l0",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 0
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l4",
+      "route": "dec_l4",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 4
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l4",
+      "route": "dec_l4",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 4
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l8",
+      "route": "dec_l8",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 8
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l8",
+      "route": "dec_l8",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 8
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l12",
+      "route": "dec_l12",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 12
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l12",
+      "route": "dec_l12",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 12
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l16",
+      "route": "dec_l16",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 16
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l16",
+      "route": "dec_l16",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 16
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l20",
+      "route": "dec_l20",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 20
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l20",
+      "route": "dec_l20",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 20
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "ref_dec_l24",
+      "route": "dec_l24",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 24
+      },
+      "arm": "reference",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "both",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    },
+    {
+      "run_id": "outer_none_dec_l24",
+      "route": "dec_l24",
+      "split": {
+        "stack": "dec",
+        "where": "after_layer",
+        "index": 24
+      },
+      "arm": "all_outer_none",
+      "main_outer_norm": "none",
+      "memory_outer_norm": "none",
+      "memory_enabled": true,
+      "fresh": true,
+      "seed": 0,
+      "internal_ln_per_codec": 4,
+      "nominal_updates": 5000,
+      "schedule_updates": 5000,
+      "effective_batch": 128,
+      "target_presentations": 640000,
+      "primary_checkpoint": "step_005000.pt"
+    }
+  ],
+  "pairs": [
+    {
+      "pair_id": "enc_emb",
+      "reference": "ref_enc_emb",
+      "candidate": "outer_none_enc_emb",
+      "changed_component": "main_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "enc_fn",
+      "reference": "ref_enc_fn",
+      "candidate": "outer_none_enc_fn",
+      "changed_component": "main_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l0",
+      "reference": "ref_dec_l0",
+      "candidate": "outer_none_dec_l0",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l4",
+      "reference": "ref_dec_l4",
+      "candidate": "outer_none_dec_l4",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l8",
+      "reference": "ref_dec_l8",
+      "candidate": "outer_none_dec_l8",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l12",
+      "reference": "ref_dec_l12",
+      "candidate": "outer_none_dec_l12",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l16",
+      "reference": "ref_dec_l16",
+      "candidate": "outer_none_dec_l16",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l20",
+      "reference": "ref_dec_l20",
+      "candidate": "outer_none_dec_l20",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    },
+    {
+      "pair_id": "dec_l24",
+      "reference": "ref_dec_l24",
+      "candidate": "outer_none_dec_l24",
+      "changed_component": "memory_codec_outer_norm",
+      "primary_condition": "no_noise",
+      "secondary_conditions": [
+        -6,
+        6,
+        18
+      ]
+    }
+  ],
+  "first_wave": [
+    "ref_enc_fn",
+    "outer_none_enc_fn",
+    "ref_dec_l8",
+    "outer_none_dec_l8",
+    "ref_enc_emb",
+    "outer_none_enc_emb"
+  ],
+  "second_wave": [
+    "ref_enc_l4",
+    "ref_enc_l9",
+    "ref_enc_l14",
+    "ref_enc_l19",
+    "ref_dec_l0",
+    "outer_none_dec_l0",
+    "ref_dec_l4",
+    "outer_none_dec_l4",
+    "ref_dec_l12",
+    "outer_none_dec_l12",
+    "ref_dec_l16",
+    "outer_none_dec_l16",
+    "ref_dec_l20",
+    "outer_none_dec_l20",
+    "ref_dec_l24",
+    "outer_none_dec_l24"
+  ],
+  "counts": {
+    "unique_training_runs": 22,
+    "comparison_pairs": 9,
+    "unchanged_raw_encoder_runs_reused": 4,
+    "coarse_panels": 89,
+    "coarse_candidate_requests": 3574952,
+    "all_training_presentations": 14080000,
+    "all_optimizer_updates": 110000,
+    "dense_panels_if_later_authorized": 221,
+    "extra_dense_panels": 132
+  },
+  "not_authorized": [
+    "automatic job submission before owner approval",
+    "COCO",
+    "internal-LN removal",
+    "backbone norm changes",
+    "power normalization removal",
+    "FiLM experiments",
+    "fixed-statistics A/B",
+    "extra seeds",
+    "dense SNR grid",
+    "13x4 normalization grid",
+    "historical reruns"
+  ],
+  "smaller_alternative_not_default": {
+    "unique_runs": 16,
+    "scope": "reference13 plus enc_fn/enc_emb/dec_l8 removal only",
+    "coarse_panels": 65,
+    "limitation": "does not test memory norm removal on other six decoder routes"
+  },
+  "owner_override": {
+    "max_concurrent_gpu_jobs": 4,
+    "single_gpu_per_job": true,
+    "scope": "owner explicitly selected four concurrent jobs after asking about two-GPU cap; full22 conditional on preflight"
+  }
+}

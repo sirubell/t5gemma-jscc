@@ -6,7 +6,9 @@ import subprocess
 import sys
 
 
-def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None):
+def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, evaluation_config=None):
+    if evaluation_config and phase != "evaluate":
+        raise ValueError("evaluation config is only supported for evaluate")
     if expected_step is not None:
         if phase != "evaluate":
             raise ValueError("expected step is only supported for evaluate")
@@ -38,6 +40,13 @@ def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None):
         command = [sys.executable, str(root / "evaluate.py"), "--run", run, "--checkpoint", checkpoint]
         if expected_step is not None:
             command += ["--expected-step", str(expected_step)]
+        if evaluation_config:
+            command += ["--config", str(Path(evaluation_config).resolve())]
+        if entry.get("evaluation_link"):
+            result_link = directory / entry["evaluation_link"]
+            if result_link.exists():
+                raise FileExistsError("This study entry already has a completed evaluation")
+            command += ["--output-path-file", str(result_link)]
     else:
         raise ValueError("phase must be train or evaluate")
     print(f"{phase}: index={index} task={entry['task']} experiment={entry['experiment']} seed={entry['seed']}", flush=True)
@@ -51,8 +60,12 @@ def main():
     parser.add_argument("--index", required=True, type=int)
     parser.add_argument("--checkpoint", help="checkpoint filename (default: best.pt)")
     parser.add_argument("--expected-step", type=int, help="require this exact saved optimizer step")
+    parser.add_argument("--evaluation-config", help="evaluation-only overrides, e.g. a shared vanilla panel")
     args = parser.parse_args()
-    run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step)
+    if args.evaluation_config:
+        run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step, args.evaluation_config)
+    else:
+        run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step)
 
 
 if __name__ == "__main__":

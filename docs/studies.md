@@ -160,3 +160,39 @@ checkpoint's integer `step` before constructing the model; a missing or incorrec
 checkpoint fails, with no fallback to `best.pt`. General evaluation still defaults
 to `best.pt` when no fixed-step contract is requested. These commands describe
 argument flow, not permission to submit a study.
+
+## Native-v2 outer-LN comparison
+
+`configs/studies/hellaswag_outer_ln_plan.json` defines 22 unique HellaSwag runs:
+13 reference routes and nine outer-normalization removal variants. Four raw
+encoder runs are shared by the two 13-route views. Internal residual LayerNorm,
+frozen backbone RMSNorm, channel power normalization and decoder memory
+transmission remain enabled; FiLM remains off. COCO is outside this study.
+
+Prepare complete configurations without executing anything:
+
+```bash
+uv run --locked python -m jscc.outer_ln_study --output NEW_PREPARED_DIRECTORY
+```
+
+The dedicated task recipe uses 128 samples per microbatch, accumulation one,
+5,000 optimizer updates and a 5,000-update schedule. Its explicitly versioned
+presentation stream concatenates seeded epoch permutations into 640,000 actual
+presentations, crossing epoch tails without a partial batch. Paired stream RNG
+and initial core hashes support the outer-LN contrast; this changes the data
+order policy relative to historical loaders. Exact resume is unsupported and
+rejected for this fresh-only recipe.
+
+Evaluation keeps BF16 forward and explicitly uses FP32 log-softmax and sum at
+64 candidate requests per batch. Compact evidence preserves every document's
+scores and reconstructible prompts/few-shot/token identities. Primary results
+use `step_005000.pt` with `--expected-step 5000`; best is not a fallback. The
+optional `--evaluation-config` launcher argument supports a separate vanilla-only
+panel. Prepared manifests record train and evaluation output links.
+
+The first six runs are full formal training, not a short screen. A health gate
+checks their fixed budget, pairing evidence and full evaluation identity before
+releasing the remaining 16; it does not require score improvement. Account limits
+and all execution authorization are site-specific. Exporting this plan never
+submits GPU work. CPU validation does not establish full-weight memory capacity
+or convergence; bounded capacity/scoring checks must precede a new execution.

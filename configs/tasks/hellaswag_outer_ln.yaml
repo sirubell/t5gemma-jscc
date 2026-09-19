@@ -1,0 +1,82 @@
+model_config: ../model.yaml
+protocol: corrected-baseline-v2-native-decoder-inputs
+task: hellaswag
+seed: 0
+run:
+  name: hellaswag-native-v2-outer-ln
+  output_dir: ../../runs
+  wandb_project: null
+data:
+  name: Rowan/hellaswag
+  revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+  num_train: null
+  num_validation: 512
+  selection_seed: 0
+  max_length: 512
+  num_workers: 4
+training:
+  max_steps: 5000
+  schedule_steps: 5000
+  batch_size: 128
+  gradient_accumulation: 1
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.0
+  grad_clip: 1.0
+  temperature: 1.0
+  kl_weight: 1.0
+  mse_weight: 0.1
+  eval_every: 250
+  validation_snrs:
+  - no_noise
+  validation_batches: null
+  monitor: loss
+  patience: null
+  min_steps: 1000
+  min_delta: 0.005
+  log_every: 50
+  save_steps:
+  - 1000
+  - 2500
+  - 5000
+  streamed_backward: true
+  valid_only_kl: true
+  low_sync_logging: false
+  deterministic_algorithms: true
+  expected_attention_backend: sdpa
+  presentation_stream:
+    seed: 0
+    total_presentations: 640000
+    policy: epoch-permutations-v1
+  paired_randomness:
+    seed: 0
+    policy: step-microbatch-stream-v1
+    audit_steps:
+    - 1
+    - 1000
+    - 2500
+    - 5000
+  feature_summary:
+    selection_count: 64
+    steps:
+    - 0
+    - 1000
+    - 2500
+    - 5000
+evaluation:
+  snrs:
+  - no_noise
+  - -6
+  - 6
+  - 18
+  batch_size: 64
+  num_samples: 10042
+  num_fewshot: 5
+  vanilla: false
+  scoring_policy: fp32-v1
+  evidence_mode: compact-v1
+  mode: codec_only
+  noise_seed: 0
+  deterministic_algorithms: true
+  attention_backend: sdpa

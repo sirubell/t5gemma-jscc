@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from . import TaskData
+from ..presentation import PresentationSampler
 
 
 class Collator:
@@ -15,11 +16,14 @@ class Collator:
     def __call__(self, rows):
         input_length = max(len(row["input_ids"]) for row in rows)
         label_length = max(len(row["label_ids"]) for row in rows)
-        return {
+        result = {
             "input_ids": torch.tensor([row["input_ids"] + [self.pad_id] * (input_length - len(row["input_ids"])) for row in rows]),
             "attention_mask": torch.tensor([row["attention_mask"] + [0] * (input_length - len(row["attention_mask"])) for row in rows]),
             "labels": torch.tensor([row["label_ids"] + [-100] * (label_length - len(row["label_ids"])) for row in rows]),
         }
+        if "row_id" in rows[0]:
+            result["row_ids"] = torch.tensor([row["row_id"] for row in rows])
+        return result
 
 
 def selection_ids(num_rows, num_validation, num_train, seed):
@@ -55,8 +59,21 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
     def loader(split, indices, training):
         rows = raw[split].select(indices)
         dataset = rows.map(tokenize, batched=True, remove_columns=rows.column_names)
+        stream = config["training"].get("presentation_stream") if training else None
+        if stream:
+            if stream["policy"] != "epoch-permutations-v1":
+                raise ValueError("unknown presentation stream policy")
+            total = stream["total_presentations"]
+            settings = config["training"]
+            if total != settings["max_steps"] * settings["batch_size"] * settings["gradient_accumulation"]:
+                raise ValueError("presentation budget must match exact full optimizer batches")
+            dataset = dataset.add_column("row_id", list(indices))
+            sampler = PresentationSampler(indices, total, stream["seed"])
+        else:
+            sampler = None
         # HF Dataset implements the map-style protocol but does not inherit torch Dataset.
-        return DataLoader(cast(Dataset, dataset), batch_size=config["training"]["batch_size"], shuffle=training,
+        return DataLoader(cast(Dataset, dataset), batch_size=config["training"]["batch_size"], shuffle=training and sampler is None, sampler=sampler,
+                          generator=torch.Generator().manual_seed(stream["seed"]) if stream else None,
                           num_workers=data["num_workers"], collate_fn=Collator(tokenizer.pad_token_id),
                           pin_memory=config["model"]["device"] == "cuda")
     # Old checkpoints have no validation_split and retain their historical rows.

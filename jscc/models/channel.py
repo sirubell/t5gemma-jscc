@@ -11,6 +11,9 @@ The latter is the causal policy used for decoder hidden streams: a later
 token cannot change an earlier token's normalization factor.
 """
 import importlib
+from contextlib import contextmanager
+
+from ..presentation import derived_seed, tensor_digest
 
 import torch
 from torch import nn
@@ -118,10 +121,53 @@ def normalize_power(z, valid_mask=None, *, token_wise=False, mask_representation
 
 
 class AWGNChannel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._replay = None
+        self._stream = "hidden"
+        self.draw_summaries = []
+
+    @contextmanager
+    def replay(self, seed, namespace, *, capture=False):
+        """Independent stream generators; reset only at a recorded replay boundary.
+
+        Matching seed/namespace, device/dtype, shapes and per-stream call order
+        produce identical epsilon. Each repeated occurrence advances its stream.
+        ``capture`` is for sparse audit steps, never for every production draw.
+        """
+        previous = self._replay
+        self._replay = (seed, namespace, capture, {})
+        self.draw_summaries = []
+        try:
+            yield self
+        finally:
+            self._replay = previous
+
+    def transmit(self, z, snr_db, *, stream):
+        """Select a replay stream while preserving two-argument subclass hooks."""
+        previous = self._stream
+        self._stream = stream
+        try:
+            return self(z, snr_db)
+        finally:
+            self._stream = previous
+
     def forward(self, z, snr_db):
+        stream = self._stream
         if snr_db is None:
             return z
-        return z + torch.randn_like(z) * (10.0 ** (-snr_db / 20.0))
+        if self._replay is None:
+            epsilon = torch.randn_like(z)
+        else:
+            seed, namespace, capture, generators = self._replay
+            key = (stream, str(z.device))
+            if key not in generators:
+                generators[key] = torch.Generator(device=z.device).manual_seed(derived_seed(seed, f"{namespace}:{stream}"))
+            epsilon = torch.randn(z.shape, device=z.device, dtype=z.dtype, generator=generators[key])
+            if capture:
+                self.draw_summaries.append({"stream": stream, "shape": list(z.shape), "dtype": str(z.dtype),
+                                            "epsilon_sha256": tensor_digest(epsilon)})
+        return z + epsilon * (10.0 ** (-snr_db / 20.0))
 
 
 class IdentityChannel(nn.Module):
