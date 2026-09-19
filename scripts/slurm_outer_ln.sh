@@ -6,6 +6,8 @@ prepared=${2:?prepared study}
 phase=${3:?capacity, scoring, train, evaluate, or vanilla}
 output=${4:?artifact directory}
 cd "$release"
+# A source-only release must not inherit the parent checkout's unrelated commit.
+export GIT_CEILING_DIRECTORIES="$(dirname "$release")"
 export SLURM_SUBMIT_DIR="$release"
 export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
