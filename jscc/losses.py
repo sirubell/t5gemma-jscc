@@ -41,8 +41,8 @@ def distillation_loss_stats(
         # degenerate all-padding fixture.
         if not bool(valid.any()):
             return student.float().sum() * 0.0, valid.sum()
-        student_float = student.float()[valid] / temperature
-        teacher_float = teacher.float()[valid] / temperature
+        student_float = student[valid].float() / temperature
+        teacher_float = teacher[valid].float() / temperature
     else:
         student_float = student.float() / temperature
         teacher_float = teacher.float() / temperature

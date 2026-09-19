@@ -1,0 +1,109 @@
+# Preview/export only; execution is not authorized by this definition.
+name: hellaswag-complete-closeout-20260919
+task_configs:
+- ../tasks/hellaswag_closeout.yaml
+seeds:
+- 0
+experiments:
+- name: enc_emb
+  model_overrides:
+    split:
+      stack: enc
+      where: after_embed
+    codec:
+      layernorm: post
+- name: enc_l4
+  model_overrides:
+    split:
+      stack: enc
+      where: after_layer
+      index: 4
+    codec:
+      layernorm: none
+- name: enc_l9
+  model_overrides:
+    split:
+      stack: enc
+      where: after_layer
+      index: 9
+    codec:
+      layernorm: none
+- name: enc_l14
+  model_overrides:
+    split:
+      stack: enc
+      where: after_layer
+      index: 14
+    codec:
+      layernorm: none
+- name: enc_l19
+  model_overrides:
+    split:
+      stack: enc
+      where: after_layer
+      index: 19
+    codec:
+      layernorm: none
+- name: enc_fn
+  model_overrides:
+    split:
+      stack: enc
+      where: after_final_norm
+    codec:
+      layernorm: both
+- name: dec_l0
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 0
+    codec:
+      layernorm: none
+- name: dec_l4
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 4
+    codec:
+      layernorm: none
+- name: dec_l8
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 8
+    codec:
+      layernorm: none
+- name: dec_l12
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 12
+    codec:
+      layernorm: none
+- name: dec_l16
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 16
+    codec:
+      layernorm: none
+- name: dec_l20
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 20
+    codec:
+      layernorm: none
+- name: dec_l24
+  model_overrides:
+    split:
+      stack: dec
+      where: after_layer
+      index: 24
+    codec:
+      layernorm: none

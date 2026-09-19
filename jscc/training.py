@@ -25,6 +25,7 @@ from .losses import (
 from .models.split_model import build_model
 from .runtime import (
     append_metrics,
+    configure_training_determinism,
     autocast_for,
     isolated_rng,
     model_inputs,
@@ -251,7 +252,10 @@ def validate(model, loader, config):
             for batch_index, batch in enumerate(loader):
                 if settings["validation_batches"] and batch_index >= settings["validation_batches"]:
                     break
-                details.append(batch_losses(model, batch, settings, snr, return_stats=True))
+                details.append(batch_losses(
+                    model, batch, settings, snr, return_stats=True,
+                    valid_only_kl=settings.get("valid_only_kl", False),
+                ))
             if not details:
                 raise ValueError("validation dataset is empty")
             aggregated = aggregate_batch_losses(details, settings)
@@ -295,6 +299,7 @@ def train(config, resume: str | Path | None = None):
     settings = config["training"]
     if state and state["step"] >= settings["max_steps"]:
         raise ValueError("This checkpoint has already reached max_steps; use a new config for a new experiment")
+    determinism = configure_training_determinism(settings)
     seed_everything(config["seed"])
     processor, model = build_model(config)
     prepare_trainable_parameters(model)
@@ -341,6 +346,7 @@ def train(config, resume: str | Path | None = None):
             "nmse": "equal mean of per-sample masked stream nMSE means",
             "snr": "one sampled SNR per training sample",
         },
+        "determinism": determinism,
         "execution_options": {
             "streamed_backward": bool(settings.get("streamed_backward", False)),
             "valid_only_kl": bool(settings.get("valid_only_kl", False)),

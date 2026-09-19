@@ -282,3 +282,63 @@ def test_fixed_noise_and_no_noise_roundtrips_are_reproducible():
     with model.transmission(0.0):
         noisy_second = model(**inputs).logits
     torch.testing.assert_close(noisy_first, noisy_second, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("stack", ["enc", "dec"])
+@pytest.mark.parametrize("direct", [False, True])
+def test_explicit_binary_mask_survives_backbone_hook(stack, direct):
+    config = {"hidden_dim": 8, "bottleneck_dim": 4, "n_res_blocks": 1,
+              "activation": "gelu", "layernorm": "none", "snr_film": False}
+    model = SplitModel(_ToyBackbone(), Codec(8, config), AWGNChannel(),
+                       {"stack": stack, "where": "after_layer", "index": 0},
+                       {"normalize_power": True, "clean_film_snr": 18.0})
+    mask = torch.zeros(1, 1, 3, 3)
+    with model.transmission(encoder_mask=mask, encoder_mask_representation="binary"):
+        call = model.base if direct else model
+        call(input_ids=torch.tensor([[1, 2, 3]]), attention_mask=torch.ones(1, 3),
+             decoder_input_ids=torch.tensor([[0, 4]]))
+        assert model._active_encoder_mask_representation == "binary"
+        stream = "hidden" if stack == "enc" else "memory"
+        assert model.channel_uses_valid[stream] == 0
+        reconstructed = model.reconstruction if stack == "enc" else model.memory_reconstruction
+        assert reconstructed is not None
+        assert torch.isfinite(reconstructed).all()
+
+
+def test_zero_valid_sequence_power_returns_zero():
+    result = normalize_power(torch.ones(1, 3, 4), torch.zeros(1, 3))
+    assert torch.equal(result, torch.zeros_like(result))
+
+
+def test_transmission_rejects_ambiguous_masks_before_model_call():
+    model = SplitModel(_ToyBackbone(), Codec(8, {"hidden_dim": 8, "bottleneck_dim": 4,
+        "n_res_blocks": 1, "activation": "gelu", "layernorm": "none", "snr_film": False}),
+        AWGNChannel(), {"stack": "enc", "where": "after_layer", "index": 0},
+        {"normalize_power": True, "clean_film_snr": 18.0})
+    with pytest.raises(ValueError, match="explicit representation"):
+        with model.transmission(encoder_mask=torch.zeros(1, 1, 3, 3)):
+            pass
+    with pytest.raises(ValueError, match="2D token mask"):
+        with model.transmission(decoder_mask=torch.zeros(1, 1, 3, 3)):
+            pass
+
+
+@pytest.mark.parametrize("representation,values,expected", [
+    ("binary", [0., 0., 0.], 0),
+    ("binary", [1., 1., 1.], 3),
+    ("binary", [1., 1., 0.], 2),
+    ("additive", [0., 0., 0.], 3),
+    ("additive", [0., 0., -10000.], 2),
+])
+@pytest.mark.parametrize("direct", [False, True])
+def test_explicit_encoder_mask_visibility_matrix(representation, values, expected, direct):
+    config = {"hidden_dim": 8, "bottleneck_dim": 4, "n_res_blocks": 1,
+              "activation": "gelu", "layernorm": "none", "snr_film": False}
+    model = SplitModel(_ToyBackbone(), Codec(8, config), AWGNChannel(),
+                       {"stack": "dec", "where": "after_layer", "index": 0},
+                       {"normalize_power": True, "clean_film_snr": 18.0})
+    mask = torch.tensor(values).reshape(1, 1, 1, 3).expand(1, 1, 3, 3)
+    with model.transmission(encoder_mask=mask, encoder_mask_representation=representation):
+        (model.base if direct else model)(input_ids=torch.tensor([[1, 2, 3]]),
+                                         decoder_input_ids=torch.tensor([[0, 4]]))
+        assert model.channel_uses_valid["memory"] == expected * 4

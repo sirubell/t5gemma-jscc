@@ -3,12 +3,25 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import json
+import os
 import random
 import subprocess
 import uuid
 
 import numpy as np
 import torch
+
+
+def configure_training_determinism(settings):
+    """Select an explicit repeatable training policy before CUDA initialization."""
+    enabled = bool(settings.get("deterministic_algorithms", False))
+    if enabled:
+        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        if workspace not in {":4096:8", ":16:8"}:
+            raise ValueError("Deterministic training requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
+    torch.use_deterministic_algorithms(enabled)
+    return {"deterministic_algorithms": enabled,
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG")}
 
 
 def seed_everything(seed):

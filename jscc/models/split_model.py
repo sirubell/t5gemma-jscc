@@ -89,6 +89,11 @@ class SplitModel(nn.Module):
         here when its model input intentionally omits ``decoder_attention_mask``;
         the encoder mask is also used for receiver-memory transmission.
         """
+        if (encoder_mask is not None and encoder_mask.is_floating_point()
+                and encoder_mask.ndim == 4 and encoder_mask_representation is None):
+            raise ValueError("explicit representation required for a public 4D encoder mask")
+        if decoder_mask is not None and decoder_mask.ndim != 2:
+            raise ValueError("decoder payload validity requires a 2D token mask, not a causal attention mask")
         previous = (self.snr_db, self.bypass, self._encoder_valid_mask,
                     self._decoder_valid_mask, self._active_encoder_valid_mask,
                     self._encoder_mask_representation, self._decoder_mask_representation,
@@ -263,15 +268,18 @@ class SplitModel(nn.Module):
         if candidate is None:
             candidate = self._mask_from_hook_args(args, kwargs)
         self._active_encoder_valid_mask = candidate
-        self._active_encoder_mask_representation = self._infer_mask_representation(candidate)
+        self._active_encoder_mask_representation = (
+            self._encoder_mask_representation if self._encoder_valid_mask is not None
+            else self._infer_mask_representation(candidate)
+        )
 
     def _set_input_masks(self, kwargs):
-        if "attention_mask" in kwargs:
+        if "attention_mask" in kwargs and self._encoder_valid_mask is None:
             self._encoder_valid_mask = kwargs["attention_mask"]
             self._active_encoder_valid_mask = self._encoder_valid_mask
             self._encoder_mask_representation = self._infer_mask_representation(kwargs["attention_mask"])
             self._active_encoder_mask_representation = self._encoder_mask_representation
-        if "decoder_attention_mask" in kwargs:
+        if "decoder_attention_mask" in kwargs and self._decoder_valid_mask is None:
             self._decoder_valid_mask = kwargs["decoder_attention_mask"]
             self._decoder_mask_representation = self._infer_mask_representation(kwargs["decoder_attention_mask"])
 

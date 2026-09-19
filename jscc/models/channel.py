@@ -112,6 +112,8 @@ def normalize_power(z, valid_mask=None, *, token_wise=False, mask_representation
             count = mask.to(dtype=z.dtype).sum(dim=tuple(range(1, mask.ndim)), keepdim=True)
             count = count.reshape(z.shape[0], *([1] * (z.ndim - 1))) * z.shape[-1]
             power = total / count.clamp_min(1.0)
+            # An empty payload has no power to normalize; keep it safely zero.
+            z = torch.where(count > 0, z, torch.zeros_like(z))
     return z / torch.sqrt(power + 1e-8)
 
 

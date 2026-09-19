@@ -225,3 +225,34 @@ def test_unmasked_reconstruction_loss_keeps_legacy_global_contract():
     expected = F.mse_loss(reconstructed, original) / (original.square().mean() + 1e-8)
     from jscc.losses import reconstruction_loss
     assert reconstruction_loss(reconstructed, original).item() == pytest.approx(expected.item())
+
+
+def test_deterministic_training_policy_is_explicit(monkeypatch):
+    from jscc.runtime import configure_training_determinism
+    calls = []
+    monkeypatch.setattr(torch, "use_deterministic_algorithms", calls.append)
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    assert configure_training_determinism({"deterministic_algorithms": True}) == {
+        "deterministic_algorithms": True, "cublas_workspace_config": ":4096:8"}
+    configure_training_determinism({})
+    assert calls == [True, False]
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", "invalid")
+    with pytest.raises(ValueError, match="CUBLAS_WORKSPACE_CONFIG"):
+        configure_training_determinism({"deterministic_algorithms": True})
+
+
+def test_validation_uses_valid_only_kl_and_preserves_loss(monkeypatch):
+    config = load_config(Path(__file__).parents[1] / "configs/tasks/hellaswag.yaml")
+    config["training"].update(validation_snrs=["no_noise"], validation_batches=None)
+    model = toy_model("enc", channel=IdentityChannel())
+    baseline = training.validate(model, [batch()], config)
+    calls = []
+    original = training.batch_losses
+    def recorded(*args, **kwargs):
+        calls.append(kwargs.get("valid_only_kl"))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(training, "batch_losses", recorded)
+    config["training"]["valid_only_kl"] = True
+    optimized = training.validate(model, [batch()], config)
+    assert calls == [True]
+    assert optimized == pytest.approx(baseline, rel=1e-5, abs=1e-6)

@@ -30,6 +30,8 @@ def main():
         if not path.is_file():
             errors.append(f"MISSING {item['path']}")
             continue
+        if "bytes" in item and path.stat().st_size != item["bytes"]:
+            errors.append(f"SIZE_MISMATCH {item['path']}")
         actual = sha256(path)
         if actual != item.get("sha256"):
             errors.append(f"HASH_MISMATCH {item['path']}")
