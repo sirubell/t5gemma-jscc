@@ -175,6 +175,37 @@ def test_streamed_backward_matches_reference_effective_batch_gradients():
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+def test_streamed_backward_preserves_decoder_memory_gradients():
+    settings = {"temperature": 1.0, "kl_weight": 1.0, "mse_weight": 0.1}
+    first = {"input_ids": torch.tensor([[1, 2, 3]]),
+             "attention_mask": torch.tensor([[1, 1, 1]]),
+             "labels": torch.tensor([[6, 7, -100]])}
+    second = {"input_ids": torch.tensor([[4, 5, 0]]),
+              "attention_mask": torch.tensor([[1, 1, 0]]),
+              "labels": torch.tensor([[9, 10, 11]])}
+
+    torch.manual_seed(43)
+    reference = toy_model("dec", channel=IdentityChannel()).train()
+    streamed = toy_model("dec", channel=IdentityChannel()).train()
+    streamed.load_state_dict(reference.state_dict())
+    values = [training.batch_losses(reference, item, settings, None, return_stats=True)
+              for item in (first, second)]
+    training.aggregate_batch_losses(values, settings)["loss"].backward()
+    denominators = training.effective_batch_denominators(
+        streamed, [first, second], torch.device("cpu"))
+    for item in (first, second):
+        values = training.batch_losses(streamed, item, settings, None, return_stats=True)
+        training.scaled_batch_loss(values, settings, denominators).backward()
+    assert reference.memory_codec is not None and streamed.memory_codec is not None
+    reference_parameters = list(reference.codec.parameters()) + list(reference.memory_codec.parameters())
+    streamed_parameters = list(streamed.codec.parameters()) + list(streamed.memory_codec.parameters())
+    for actual, expected in zip(
+        (p.grad for p in streamed_parameters),
+        (p.grad for p in reference_parameters),
+    ):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
 def test_valid_only_kl_matches_full_vocabulary_reference():
     from jscc.losses import distillation_loss_stats
 
