@@ -23,7 +23,8 @@ from jscc.runtime import isolated_rng
 
 
 def run_batch(run_path: Path, checkpoint_name: str, batch_size: int,
-              repeats: int, output: Path):
+              repeats: int, output: Path, conditions: list[str],
+              write_samples: bool):
     checkpoint_path = run_path / checkpoint_name
     state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     config = copy.deepcopy(state["config"])
@@ -36,7 +37,6 @@ def run_batch(run_path: Path, checkpoint_name: str, batch_size: int,
     model.load_communication_state(state)
     model.eval()
     results = []
-    conditions = ["no_noise", "vanilla"]
     for repeat in range(repeats):
         for condition in conditions:
             snr = None if condition in ("no_noise", "vanilla") else float(condition)
@@ -48,8 +48,11 @@ def run_batch(run_path: Path, checkpoint_name: str, batch_size: int,
                 snr, bypass=condition == "vanilla"
             ):
                 metrics = evaluate_hellaswag(
-                    model, processor, settings, output=None,
-                    condition=condition, data_settings=config["data"],
+                    model, processor, settings,
+                    condition=condition,
+                    output=(output / f"samples-repeat-{repeat}-{condition}"
+                            if write_samples else None),
+                    data_settings=config["data"],
                 )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -91,10 +94,15 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--batch-size", required=True, type=int)
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--conditions", default="no_noise,vanilla",
+                        help="comma-separated conditions")
+    parser.add_argument("--write-samples", action="store_true")
     args = parser.parse_args()
     try:
         run_batch(args.run.resolve(), args.checkpoint, args.batch_size,
-                  args.repeats, args.output.resolve())
+                  args.repeats, args.output.resolve(),
+                  [item for item in args.conditions.split(",") if item],
+                  args.write_samples)
     except torch.cuda.OutOfMemoryError as exc:
         args.output.mkdir(parents=True, exist_ok=True)
         row = {"status": "oom", "batch_size": args.batch_size,
