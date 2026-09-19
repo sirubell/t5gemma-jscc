@@ -161,7 +161,7 @@ def _load_repeat(config_path: Path, checkpoint_path: Path, batch_size: int,
 
 
 def _one_update(model, loader, iterator, optimizer, parameters, settings, variant,
-                snr, valid_only_kl, low_sync_logging, scaler=None):
+                snr, valid_only_kl, logging_mode="none", capture_log=False):
     optimizer.zero_grad(set_to_none=True)
     data_wait = 0.0
     if variant == "streamed":
@@ -174,7 +174,7 @@ def _one_update(model, loader, iterator, optimizer, parameters, settings, varian
         device = next(model.base.parameters()).device
         denominators = training.effective_batch_denominators(model, batches, device)
         values = []
-        before = [parameter.detach().clone() for parameter in parameters] if low_sync_logging else None
+        before = [parameter.detach().clone() for parameter in parameters] if capture_log else None
         for batch in batches:
             value = training.batch_losses(model, batch, settings, snr,
                                           return_stats=True, valid_only_kl=valid_only_kl)
@@ -184,7 +184,7 @@ def _one_update(model, loader, iterator, optimizer, parameters, settings, varian
     else:
         values = []
         batches = []
-        before = [parameter.detach().clone() for parameter in parameters] if low_sync_logging else None
+        before = [parameter.detach().clone() for parameter in parameters] if capture_log else None
         for _ in range(settings["gradient_accumulation"]):
             fetch_started = time.perf_counter()
             batch, iterator = _next_batch(iterator, loader)
@@ -196,8 +196,10 @@ def _one_update(model, loader, iterator, optimizer, parameters, settings, varian
         totals["loss"].backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(parameters, settings["grad_clip"])
     optimizer.step()
-    if low_sync_logging and before is not None:
-        update_l2 = training.parameter_update_l2(parameters, before, on_device=True)
+    if before is not None:
+        update_l2 = training.parameter_update_l2(
+            parameters, before, on_device=logging_mode == "low"
+        )
     else:
         update_l2 = None
     return iterator, batches, totals, float(grad_norm), update_l2, data_wait
@@ -217,7 +219,7 @@ def _profile_update(model, loader, iterator, optimizer, parameters, settings, va
         for _ in range(5):
             iterator, _, _, _, _, _ = _one_update(
                 model, loader, iterator, optimizer, parameters, settings,
-                variant, None, valid_only_kl, False,
+                variant, None, valid_only_kl,
             )
             profiler.step()
     profiler.export_chrome_trace(str(trace_path))
@@ -229,7 +231,7 @@ def _profile_update(model, loader, iterator, optimizer, parameters, settings, va
 def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: str,
                batch_size: int, accumulation: int, warmup: int, measured: int,
                repeat: int, snr: float | None, valid_only_kl: bool,
-               low_sync_logging: bool, profile: bool) -> dict[str, Any]:
+               logging_mode: str, profile: bool) -> dict[str, Any]:
     config, model, data, optimizer, parameters = _load_repeat(
         config_path, checkpoint_path, batch_size, accumulation, 9000 + repeat)
     settings = config["training"]
@@ -247,7 +249,7 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
     for _ in range(warmup):
         iterator, _, _, _, _, _ = _one_update(
             model, data.train, iterator, optimizer, parameters, settings,
-            variant, snr, valid_only_kl, low_sync_logging,
+            variant, snr, valid_only_kl,
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -265,7 +267,8 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
             compute_started = time.perf_counter()
             iterator, batches, totals, grad_norm, update_l2, waited = _one_update(
                 model, data.train, iterator, optimizer, parameters, settings,
-                variant, snr, valid_only_kl, low_sync_logging,
+                variant, snr, valid_only_kl, logging_mode,
+                capture_log=logging_mode != "none" and (step + 1) % 50 == 0,
             )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -317,7 +320,7 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
         "peak_reserved_gib": memory_reserved,
         "minimum_free_gib": telemetry["minimum_free_gib"],
         "includes_dataloader": True,
-        "includes_logging": low_sync_logging,
+        "includes_logging": logging_mode != "none",
         "includes_validation": False,
         "includes_checkpoint_io": False,
         "profiler_enabled": profile,
@@ -331,6 +334,7 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
         "update_seconds": update_seconds,
         "update_l2_mean": (sum(update_l2_values) / len(update_l2_values)
                             if update_l2_values else None),
+        "logging_mode": logging_mode,
         "profile_path": str(profile_path.relative_to(output)) if profile_path else None,
     }
     del model, data, optimizer
@@ -352,7 +356,7 @@ def main():
     parser.add_argument("--repeat", type=int, default=0)
     parser.add_argument("--snr", type=float, default=None)
     parser.add_argument("--valid-only-kl", action="store_true")
-    parser.add_argument("--low-sync-logging", action="store_true")
+    parser.add_argument("--logging-mode", choices=("none", "reference", "low"), default="none")
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     if args.batch_size * args.accumulation != 32:
@@ -362,7 +366,7 @@ def main():
         args.config.resolve(), args.checkpoint.resolve(), args.output.resolve(),
         args.variant, args.batch_size, args.accumulation, args.warmup,
         args.measured, args.repeat, args.snr, args.valid_only_kl,
-        args.low_sync_logging, args.profile,
+        args.logging_mode, args.profile,
     )
     result.update({
         "source_hash": os.environ.get("T5GEMMA_SOURCE_HASH"),
