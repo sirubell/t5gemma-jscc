@@ -47,3 +47,11 @@ def test_panel_rejects_duplicate_or_insufficient_ids():
         stratified_panel([])
     with pytest.raises(ValueError):
         stratified_panel([{'doc_id': 0}]*192)
+
+
+def test_nonfinite_scores_raise_before_json_serialization():
+    import pytest
+    import torch
+    from scripts.native_policy_eval import paired_scores
+    with pytest.raises(RuntimeError, match="nonfinite token score"):
+        paired_scores(torch.tensor([[float("nan"), 0.]]), torch.tensor([0]))

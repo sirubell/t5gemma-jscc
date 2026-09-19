@@ -144,6 +144,8 @@ def prepare_panel(config, data_ids, tokenizer, base):
 def paired_scores(values, target):
     fp32 = F.log_softmax(values.float(), dim=-1).gather(1, target[:, None]).squeeze(1)
     native = F.log_softmax(values, dim=-1).gather(1, target[:, None]).squeeze(1)
+    if not torch.isfinite(fp32).all().item() or not torch.isfinite(native).all().item():
+        raise RuntimeError('nonfinite token score before evidence serialization')
     return {'fp32_token_log_probs': fp32.tolist(), 'fp32_score': float(fp32.sum(dtype=torch.float32)),
             'native_token_log_probs': native.float().tolist(), 'native_score': float(native.sum()),
             'logits_dtype': str(values.dtype), 'native_reduction_dtype': str(native.dtype),
