@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .identity_compatibility import compatible_identity
+
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -17,7 +19,21 @@ def sha(path):
     return h.hexdigest()
 
 
-def check(manifest_path, output):
+def check(manifest_path, output, path_map=None):
+    def storage_path(value):
+        if path_map and str(value).startswith(path_map[0] + "/"):
+            value = path_map[1] + str(value)[len(path_map[0]):]
+        return Path(value)
+
+    identity_map = {}
+
+    def compatibility(evaluation, condition):
+        raw_id = condition["evaluation_identity"]
+        identity = read(evaluation / f"identity_{condition['condition']}.json")
+        key = compatible_identity(identity, raw_id)
+        identity_map[raw_id] = key
+        return key
+
     path = Path(manifest_path)
     manifest = read(path)
     root = path.parent
@@ -25,7 +41,7 @@ def check(manifest_path, output):
     evidence = {}
     identities = set()
     for e in entries:
-        run = Path((root/e['run_link']).read_text().strip())
+        run = storage_path((root/e['run_link']).read_text().strip())
         completion = read(run/'completion.json')
         assert completion['status'] == 'FULL_BUDGET_COMPLETED'
         assert completion['step'] == completion['optimizer_updates'] == 5000
@@ -34,10 +50,10 @@ def check(manifest_path, output):
         ckpt = completion['final_checkpoint']
         assert ckpt['file'] == 'step_005000.pt' and ckpt['step'] == 5000
         assert sha(run/ckpt['file']) == ckpt['sha256']
-        evaluation = Path((root/e['evaluation_link']).read_text().strip())
+        evaluation = storage_path((root/e['evaluation_link']).read_text().strip())
         results = read(evaluation/'results.json')
         assert results['optimizer_step'] == 5000
-        assert str(Path(results['checkpoint']).resolve()) == str((run/'step_005000.pt').resolve())
+        assert str(storage_path(results['checkpoint']).resolve()) == str((run/'step_005000.pt').resolve())
         conditions = results['conditions']
         assert [x['condition'] for x in conditions] == ['no_noise', -6, 6, 18]
         for c in conditions:
@@ -45,7 +61,7 @@ def check(manifest_path, output):
             assert (n.get('effective') if isinstance(n, dict) else n) == 10042
             assert 0 <= c['acc'] <= 1 and 0 <= c['acc_norm'] <= 1
             assert c['compact_num_samples'] == 10042 and c['finite_scores']
-            identities.add(c['evaluation_identity'])
+            identities.add(compatibility(evaluation, c))
             assert c['channel_uses_valid']['hidden'] > 0
             assert (c['channel_uses_valid']['memory'] > 0) == ('dec_' in e['run_id'])
         evidence[e['run_id']] = {'completion': completion, 'initial': read(run/'initialization.json'),
@@ -66,22 +82,25 @@ def check(manifest_path, output):
         for stream in a['initial']:
             assert a['initial'][stream]['core_sha256'] == b['initial'][stream]['core_sha256']
             assert a['initial'][stream]['internal_layernorm_count'] == b['initial'][stream]['internal_layernorm_count'] == 4
-    vanilla = Path((root/'links/vanilla.txt').read_text().strip())
+    vanilla = storage_path((root/'links/vanilla.txt').read_text().strip())
     v = read(vanilla/'results.json')['conditions']
     assert len(v) == 1 and v[0]['condition'] == 'vanilla'
-    assert v[0]['evaluation_identity'] in identities
+    assert compatibility(vanilla, v[0]) in identities
     assert v[0]['compact_num_samples'] == 10042 and v[0]['finite_scores']
     assert v[0]['channel_uses_valid'] == {'hidden': 0, 'memory': 0}
     Path(output).write_text(json.dumps({'status': 'PASS_FIRST_WAVE_HEALTH_NOT_SCORE_GAIN',
-                                       'plan_hash': manifest['plan_hash'], 'runs': list(evidence)}, indent=2)+'\n')
+                                       'plan_hash': manifest['plan_hash'], 'runs': list(evidence),
+                                       'identity_compatibility_policy': 'process-docs-address-only-v1',
+                                       'raw_to_compatible_identity': identity_map}, indent=2)+'\n')
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', required=True)
     p.add_argument('--output', required=True)
+    p.add_argument("--path-map", nargs=2, metavar=("COMPUTE_PREFIX", "LOGIN_PREFIX"))
     a = p.parse_args()
-    check(a.manifest, a.output)
+    check(a.manifest, a.output, a.path_map)
 
 
 if __name__ == '__main__':
