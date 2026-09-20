@@ -50,6 +50,16 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
     raw = load_dataset(data["name"], revision=data["revision"])
     ids = saved_ids if saved_ids is not None else selection_ids(
         len(raw["train"]), data["num_validation"], data["num_train"], data.get("selection_seed", 0))
+    policy = data.get("prompt_policy")
+    builder = None
+    prompt_evidence = None
+    if policy is not None:
+        from .hellaswag_prompts import PromptBuilder, validate_policy
+        validate_policy(policy, data["max_length"])
+        builder = PromptBuilder(raw["train"], ids, policy)
+        prompt_evidence = {"policy": dict(policy), "preprocess_digest": builder.helper_digest,
+                           "source_truncation_side": "left", "target_max_length": 512,
+                           "comparison": "fresh matched arms; not historical 512 right-truncated control"}
     def tokenize(rows):
         targets = [endings[int(label)] for endings, label in zip(rows["endings"], rows["label"])]
         inputs = tokenizer(rows["ctx"], truncation=True, max_length=data["max_length"])
@@ -58,7 +68,16 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
                 "label_ids": labels["input_ids"]}
     def loader(split, indices, training):
         rows = raw[split].select(indices)
-        dataset = rows.map(tokenize, batched=True, remove_columns=rows.column_names)
+        if builder is None:
+            dataset = rows.map(tokenize, batched=True, remove_columns=rows.column_names)
+        else:
+            from .hellaswag_prompts import evidence
+            def tokenize_prompts(batch, positions):
+                assert builder is not None
+                return builder.tokenize(batch, [indices[position] for position in positions], tokenizer)
+            dataset = rows.map(tokenize_prompts, batched=True, with_indices=True, remove_columns=rows.column_names)
+            assert prompt_evidence is not None
+            prompt_evidence["train" if training else "selection"] = evidence(dataset)
         stream = config["training"].get("presentation_stream") if training else None
         if stream:
             if stream["policy"] != "epoch-permutations-v1":
@@ -77,6 +96,10 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
                           num_workers=data["num_workers"], collate_fn=Collator(tokenizer.pad_token_id),
                           pin_memory=config["model"]["device"] == "cuda")
     # Old checkpoints have no validation_split and retain their historical rows.
-    return TaskData(train=loader("train", ids["train_rows"], True),
+    result = TaskData(train=loader("train", ids["train_rows"], True),
                     validation=loader(ids.get("validation_split", "validation"),
                                       ids["validation_rows"], False), ids=ids)
+
+    if prompt_evidence is not None:
+        setattr(result, "prompt_evidence", prompt_evidence)
+    return result

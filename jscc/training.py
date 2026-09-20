@@ -357,6 +357,10 @@ def train(config, resume: str | Path | None = None):
     run = new_run(config["run"]["output_dir"], config["run"]["name"])
     save_config(config, run / "config.yaml")
     (run / "data_ids.json").write_text(json.dumps(data.ids, indent=2) + "\n")
+    prompt_evidence = getattr(data, "prompt_evidence", None)
+    if prompt_evidence is not None:
+        (run / "prompt_evidence.json").write_text(json.dumps(prompt_evidence, indent=2) + "\n")
+
     stream_options = settings.get("presentation_stream")
     paired = settings.get("paired_randomness")
     if paired and (paired["policy"] != "step-microbatch-stream-v1" or not isinstance(model.channel, AWGNChannel)):
