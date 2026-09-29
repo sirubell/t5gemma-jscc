@@ -90,8 +90,19 @@ def test_complete_shapes_masks_native_targets_views_and_immutable_read(tmp_path,
         capture_sequences(directory, spec, [batch], model)
 
 
+@pytest.mark.parametrize("architecture,layernorm", [
+    ("direct_affine", "none"), ("direct_outer_ln", "both"),
+    ("residual_mlp", "none"), ("residual_mlp", "both"),
+])
 @pytest.mark.parametrize("snr", [None, 6.0])
-def test_online_local_activation_reconstruction_codec_gradient_parity(tmp_path, model, batch, spec, snr):
+def test_online_local_activation_reconstruction_codec_gradient_parity(
+    tmp_path, model, batch, spec, snr, architecture, layernorm,
+):
+    # Capture identity is clean-backbone-only; all accepted learners reuse it.
+    from jscc.models.codec import Codec
+    model.codec = Codec(16, {**model.codec.config, "architecture": architecture,
+                            "layernorm": layernorm,
+                            "n_res_blocks": 2 if architecture == "residual_mlp" else 0})
     manifest = capture_sequences(tmp_path / "bank", spec, [batch], model)
     activation = open_replay(tmp_path / "bank", requirement(manifest)).read("batch0", "enc_fn")["activation"]
     mask = batch["attention_mask"]
@@ -102,7 +113,10 @@ def test_online_local_activation_reconstruction_codec_gradient_parity(tmp_path, 
     online_reconstruction = model.reconstruction.clone()
     online = reconstruction_loss(model.reconstruction, model.activation, mask)
     online.backward()
-    gradients = [p.grad.clone() for p in model.codec.parameters()]
+    gradients = []
+    for parameter in model.codec.parameters():
+        assert parameter.grad is not None
+        gradients.append(parameter.grad.clone())
     model.zero_grad(set_to_none=True)
     torch.manual_seed(103)
     with model.transmission(snr, encoder_mask=mask):
