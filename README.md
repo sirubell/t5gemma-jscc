@@ -169,6 +169,8 @@ Earlier full-weight checks completed HellaSwag training/evaluation and COCO smal
 
 ## Documentation and collaboration
 
+For local research, start with `docs/local/research/HANDOFF.md` when present. It records current session state and points to the local Markdown Wayfinder tracker at `docs/local/research/wayfinder/codec-research/map.md`. For one task in a fresh session, follow that tracker’s `SESSION-GUIDE.md` and the assigned ticket. The tracker owns research decisions; experiment reports own evidence. These local files are ignored by Git and are not required for a fresh clone.
+
 - [Current defaults and historical recipe lineage](docs/current-defaults.md)
 - [COCO query-image and endpoint diagnostic](docs/coco-query-endpoint-diagnostic.md)
 - [HellaSwag enc_l9 two-stage preparation and execution](docs/hellaswag-two-stage.md)

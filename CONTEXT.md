@@ -20,6 +20,9 @@ _Avoid_: Vanilla, uncompressed baseline.
 
 **Vanilla baseline**: The frozen backbone with all communication codecs and channel perturbations bypassed.
 
+**Shared codec**: One learned encoder/decoder weight set reused at different split locations. Each evaluated model run has one communication boundary; sharing does not mean repeatedly transmitting at several layers within that run.
+_Avoid_: Shared configuration, when referring to shared learned weights.
+
 **Bottleneck width**: The number of representation coordinates sent per token in a stream. It is not a bit rate; sample length and additional transmitted streams also affect communication cost.
 
 **Selection set**: Examples used to choose a checkpoint or training settings, excluded from gradient-based training and distinct from final evaluation examples.
@@ -31,3 +34,7 @@ _Avoid_: Vanilla, uncompressed baseline.
 **Documentary evidence**: A reported result in a ledger, report or presentation whose underlying raw artifact has not yet been verified.
 
 **Verified artifact**: An inspected result or configuration with an identified location and recorded provenance. Verification of the file does not establish validity of the experiment.
+
+**Reconstruction objective**: A training objective that measures how well the received, decoded representation recovers the original hidden representation. The objective's purpose is distinct from the particular error metric used.
+
+**Output-matching objective**: A training objective that measures how closely the model's outputs after communication match those of the clean frozen model. It is distinct from directly rewarding the dataset's correct answer.

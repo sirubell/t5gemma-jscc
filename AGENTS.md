@@ -3,12 +3,13 @@
 ## Read the relevant documents
 
 - Start with README.md for both task workflows.
-- Before changing model/data/loss behavior, read docs/architecture.md; for historical compatibility, read docs/migration.md.
+- Before changing model/data/loss behavior, read docs/architecture.md; for historical compatibility, read docs/migration.md. For local research changes, also follow HANDOFF.md to the frozen baseline record; preserve earlier baselines and create a new record when adopting a changed design.
 - For test coverage and known limits, read docs/validation.md.
 - For config layout, read configs/README.md; for study expansion and paired jobs, read docs/studies.md.
 - Before remote access or Slurm work, read docs/running.md and the local docs/local/environment.md if present.
 - For actual run IDs, paths and decisions, consult docs/local/experiments.md if present.
-- When resuming research, backup or experiment scheduling, read docs/local/research/CURRENT-PLAN.md and backup-status.md if present; current owner decisions supersede earlier proposals.
+- When resuming research or scheduling experiments, read docs/local/research/HANDOFF.md if present for current state, owners and resume pointers. For backup work, also read backup-status.md if present. Current owner decisions supersede earlier proposals.
+- Research planning uses one local Markdown Wayfinder tracker; read docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md and the assigned ticket before starting a research task. Verify dependencies and claim exclusively before work. Keep decisions in tickets, execution state in HANDOFF.md and scientific evidence in result reports. Local research notes remain outside portable Git documentation.
 - For custom channels, read docs/channel-integration.md.
 - For retrospective research, start with docs/local/research/reported-experiments.md when present: prioritize presented experiments and map each slide to raw evidence. Use docs/research-roadmap.md for the portable research scope.
 - For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For storage cleanup, read docs/local/research/cleanup-plan.md before proposing deletion paths.
