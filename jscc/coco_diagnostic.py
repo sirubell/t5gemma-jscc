@@ -322,7 +322,9 @@ def teacher_student_kl(teacher: torch.Tensor, student: torch.Tensor) -> float:
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
     tensor = tensor.detach().contiguous().cpu()
-    return bytes_sha256(str(tuple(tensor.shape)).encode() + str(tensor.dtype).encode() + tensor.numpy().tobytes())
+    # Hash native storage bytes: NumPy cannot represent BF16 directly.
+    raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+    return bytes_sha256(str(tuple(tensor.shape)).encode() + str(tensor.dtype).encode() + raw)
 
 
 def reference_alignment(caption: str, references: list[str]) -> dict[str, float | None]:

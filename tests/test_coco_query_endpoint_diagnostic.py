@@ -329,3 +329,35 @@ def test_run_orchestrates_exact_matrix_and_durable_items_offline(tmp_path, monke
     assert len(finals) == len(partials) == 1024
     assert len({line["request_id"] for line in finals}) == 1024
     assert sum(line["phase"] == "timing" for line in finals) == 128
+
+
+def test_bfloat16_feature_signatures_hash_native_bits():
+    """Job18383 reached feature logging, where NumPy rejects BF16 tensors."""
+    from types import SimpleNamespace
+    from jscc.coco_diagnostic import feature_signatures, tensor_sha256
+
+    values = torch.tensor([[1.0, -2.0, 3.5]], dtype=torch.bfloat16)
+    # BF16 words 0x3f80,0xc000,0x4060 in native little-endian order.
+    import struct
+    raw = struct.pack('=HHH', 0x3f80, 0xc000, 0x4060)
+    expected = hashlib.sha256(b'(1, 3)torch.bfloat16' + raw).hexdigest()
+    model = SimpleNamespace(activation=values, reconstruction=values.clone(),
+                            memory_activation=None, memory_reconstruction=None)
+    signatures = feature_signatures(model)
+    assert signatures['boundary_input'] == expected
+    assert signatures['boundary_reconstruction'] == expected
+    assert signatures['receiver_memory_input'] is None
+    assert tensor_sha256(values.reshape(3)) != expected
+    assert tensor_sha256(values.float()) != expected
+
+
+def test_tensor_hash_preserves_legacy_float32_and_noncontiguous_values():
+    from jscc.coco_diagnostic import tensor_sha256
+
+    values = torch.tensor([[1.0, -2.0], [3.5, 0.0]], dtype=torch.float32).T
+    expected = hashlib.sha256(str(tuple(values.shape)).encode() +
+                              str(values.dtype).encode() +
+                              values.contiguous().numpy().tobytes()).hexdigest()
+    assert tensor_sha256(values) == expected
+    scalar = torch.tensor(1.0, dtype=torch.bfloat16)
+    assert len(tensor_sha256(scalar)) == 64
