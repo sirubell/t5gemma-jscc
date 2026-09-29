@@ -100,8 +100,12 @@ Evaluate each terminal checkpoint with the same evaluator and fixed panel:
 uv run --locked python evaluate.py --run /path/to/arm-run --checkpoint last.pt
 ```
 
-Use the train-derived selection panel for pilot choices and retain official
-validation for the declared assessment. Report terminal checkpoint step,
+Training selection loss uses a train-derived holdout. The task-accuracy evaluator
+above uses the official HellaSwag validation split; reducing `num_samples` does
+not turn it into a train-derived development panel. Establish an explicit
+train-derived task-accuracy route before using such a panel for pilot choices.
+If official validation is used for screening, record that reuse and do not
+describe it as an untouched final assessment. Report terminal checkpoint step,
 presentations, valid vectors/tokens, SNR exposure, first-use setup/capture,
 cache storage/I/O, B replay, C/D functional and evaluation cost. C inherits B's
 capture and replay cost once; separately report physical campaign cost.
