@@ -117,3 +117,168 @@ def test_installed_recipe_keeps_callable_preprocessing_through_factory(monkeypat
     evaluate_hellaswag(SimpleNamespace(base=object(), split={"stack": "enc"}), object(),
                        {"batch_size": 2, "num_fewshot": 5, "num_samples": 1},
                        data_settings={"name": "Rowan/hellaswag", "revision": "pinned-revision"})
+
+
+def observation_fixture(monkeypatch):
+    from contextlib import nullcontext
+    from dataclasses import asdict
+    from jscc.experiment_state import CheckpointRef, ValidatedState
+    from jscc.models.split_model import ResolvedSite
+    site = ResolvedSite("after_layer", 9, "revision", 24, 8, "encoder.layers.9")
+    monkeypatch.setattr("jscc.models.split_model.resolve_encoder_site", lambda *args: site)
+    metadata = {"snapshot_role": "initialization", "completed_updates": 0,
+                "model_state_contract": "codec-only-stateless-channel-v1",
+                "site": asdict(site), "config_identity": "config", "source_identity": "source",
+                "protocol_identity": "protocol", "parent_identity": None}
+    state = ValidatedState({"kind": "single_site_v2", "metadata": metadata, "model": {}},
+                           CheckpointRef("checkpoint", "hash", 1))
+    request = {"schema": "codec-observation-v1", "checkpoint_sha256": "hash",
+               "target_site": asdict(site), "target_role": "trained", "task": "hellaswag",
+               "input_ids": [7], "source_family_ids": ["source-7"], "prompt_policy": "native",
+               "noise": {"seed": 12, "namespace": "fixture"}, "layout": "full", "backend": "eager", "precision": "fp32",
+               "scorer": "pinned", "reference_corpus": "pinned", "source": "source",
+               "expected_items": 1, "settings": {"num_samples": 1}, "data_settings": {},
+               "conditions": ["no_noise", -6, 0, 6, 12, 18], "config": "config", "data": "data",
+               "parent": None, "panel": "initialization-task", "protocol": "protocol",
+               "learner_kind": "single_site_v2", "step": 0}
+    loaded = []
+    model = SimpleNamespace(base=object(), codec=SimpleNamespace(load_state_dict=loaded.append),
+                            training=True, eval=lambda: None, train=lambda value: None,
+                            channel=SimpleNamespace(replay=lambda *args: nullcontext(), parameters=lambda: iter(())),
+                            transmission=lambda *args: nullcontext(), at_site=lambda *args, **kwargs: nullcontext(),
+                            channel_uses={"hidden": 8}, valid_payload_counts={"hidden": 4})
+    return state, request, model, loaded
+
+
+def test_full_observation_identity_binds_noise_checkpoint_and_site(monkeypatch):
+    from jscc.evaluation import codec_observation_identity
+    _, request, _, _ = observation_fixture(monkeypatch)
+    original = codec_observation_identity(request)
+    for field, value in (("checkpoint_sha256", "other"), ("scorer", "other"),
+                         ("source", "other"), ("noise", {"seed": 13, "namespace": "fixture"}), ("input_ids", [8])):
+        altered = {**request, field: value}
+        assert codec_observation_identity(altered) != original
+    with pytest.raises(ValueError, match="six conditions"):
+        codec_observation_identity({**request, "conditions": ["no_noise"]})
+
+
+def test_v2_initialization_gate_precedes_weights_and_preserves_split(monkeypatch, tmp_path):
+    from jscc.evaluation import evaluate_checkpoint
+    state, request, model, loaded = observation_fixture(monkeypatch)
+    request["target_role"] = "heldout_after_freeze"
+    with pytest.raises(ValueError, match="saved site"):
+        evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
+    assert loaded == []
+    assert not (tmp_path / "observation").exists()
+
+
+def test_six_condition_observation_retains_failure_and_restores_rng(monkeypatch, tmp_path):
+    import torch
+    from jscc import evaluation
+    state, request, model, loaded = observation_fixture(monkeypatch)
+    initial_rng = torch.get_rng_state().clone()
+
+    def adapter(model, processor, settings, output, condition, data_settings):
+        torch.rand(4)
+        if condition == 6:
+            raise RuntimeError("synthetic interrupted condition")
+        (output / f"compact_{condition}.jsonl").write_text(json.dumps(
+            {"sample_id": 7, "source_id": "source-7", "raw_scores": [1, 0], "denominators": [1, 1]}) + "\n")
+        return {"acc": 1.0}
+
+    monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
+    receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None,
+                                            output=tmp_path / "observation")
+    assert loaded == [{}]
+    assert torch.equal(initial_rng, torch.get_rng_state())
+    assert receipt["status"] == "incomplete"
+    assert len(receipt["conditions"]) == 6
+    failed = receipt["conditions"][3]
+    assert failed["completed"] == 0 and failed["failed"] is None
+    assert failed["denominator"] == 0 and failed["unobserved"] == 1
+    assert receipt["conditions"][0]["items"][0]["source_id"] == "source-7"
+    assert receipt["conditions"][-1]["completed"] == 1
+    assert json.loads((tmp_path / "observation" / "observation.json").read_text()) == receipt
+
+
+def test_shared_heldout_requires_bound_freeze_before_weight_load(monkeypatch, tmp_path):
+    from dataclasses import asdict
+    from jscc.evaluation import evaluate_checkpoint
+    from jscc.models.split_model import ResolvedSite
+    state, request, model, loaded = observation_fixture(monkeypatch)
+    site = ResolvedSite("after_layer", 14, "revision", 24, 8, "encoder.layers.14")
+    monkeypatch.setattr("jscc.models.split_model.resolve_encoder_site", lambda *args: site)
+    state.payload["kind"] = "shared_encoder_v2"
+    request["learner_kind"] = "shared_encoder_v2"
+    request.update(target_site=asdict(site), target_role="heldout_after_freeze")
+    state.payload["metadata"]["evaluation_sites"] = {
+        "enc_l14": {"site": asdict(site), "role": "heldout_after_freeze"}}
+    with pytest.raises(ValueError, match="freeze receipt"):
+        evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
+    assert loaded == []
+
+
+def test_legacy_entrypoint_rejects_versioned_checkpoint(monkeypatch, tmp_path):
+    from jscc import evaluation
+    monkeypatch.setattr(evaluation.torch, "load", lambda *args, **kwargs: {"schema": "experiment-state-v2"})
+    monkeypatch.setattr(evaluation, "build_model", lambda config: pytest.fail("must gate before model construction"))
+    with pytest.raises(ValueError, match="Versioned checkpoints require"):
+        evaluation.evaluate(tmp_path)
+
+
+def test_item_mismatch_retains_actual_denominator(monkeypatch, tmp_path):
+    from jscc import evaluation
+    state, request, model, _ = observation_fixture(monkeypatch)
+
+    def adapter(model, processor, settings, output, condition, data_settings):
+        (output / f"compact_{condition}.jsonl").write_text(json.dumps(
+            {"sample_id": 999, "source_id": "actual-source"}) + "\n")
+        return {"acc": 0.0}
+
+    monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
+    receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None,
+                                            output=tmp_path / "observation")
+    assert receipt["status"] == "incomplete"
+    for condition in receipt["conditions"]:
+        assert condition["completed"] == condition["denominator"] == 1
+        assert condition["items"][0]["sample_id"] == 999
+        assert condition["metrics"]["acc"] == 0.0
+
+
+def test_records_projection_identity_and_unavailable_measure(monkeypatch):
+    import hashlib
+    from jscc.evaluation import codec_observation_identity, observation_event_payload
+    _, request, _, _ = observation_fixture(monkeypatch)
+    receipt = {"request": request, "identity": codec_observation_identity(request),
+               "status": "incomplete", "reuse": None, "conditions": [
+                   {"condition": "no_noise", "requested": 1, "completed": 0, "failed": None,
+                    "denominator": 0, "metrics": {}, "items": [], "unobserved": 1,
+                    "error": {"message": "adapter interrupted"}}]}
+    payload = observation_event_payload(receipt)
+    expected = hashlib.sha256(b"codec-observation-v1\0" + json.dumps(
+        payload["request"], sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    assert expected == payload["identity"]
+    assert set(payload) == {"request", "identity", "status", "conditions", "reuse"}
+    projected = payload["request"]
+    assert projected["learner_kind"] == "initialization"
+    assert projected["site"] == "enc_l9"
+    assert json.loads(projected["details"]["outputs"].removeprefix("inline-execution-request-v1:")) == request
+    row = payload["conditions"][0]
+    assert row["failed"] is None
+    assert row["failure_reason"] == "Per-item failure count unavailable"
+    assert row["metrics"]["unobserved_items"] == {"value": 1, "reason": None}
+    assert row["metrics"]["task_score"] == {"value": None, "reason": "adapter interrupted"}
+
+
+def test_records_projection_retains_item_values(monkeypatch):
+    from jscc.evaluation import codec_observation_identity, observation_event_payload
+    _, request, _, _ = observation_fixture(monkeypatch)
+    item = {"sample_id": 7, "source_id": "family-7", "raw_scores": [-1.0, -2.0], "denominators": [2, 3]}
+    receipt = {"request": request, "identity": codec_observation_identity(request),
+               "status": "incomplete", "conditions": [
+                   {"condition": "no_noise", "requested": 1, "completed": 1, "failed": 0,
+                    "denominator": 1, "metrics": {"acc": 0.0, "num_samples": {"effective": 1}},
+                    "items": [item], "unobserved": 0}]}
+    row = observation_event_payload(receipt)["conditions"][0]
+    assert row["items"][0] == {**item, "item_id": "7"}
+    assert row["metrics"]["acc"] == {"value": 0.0, "reason": None}

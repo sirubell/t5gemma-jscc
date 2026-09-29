@@ -104,6 +104,8 @@ def _validate_functional_parent(path: Path, state: dict, config: dict, expected:
     """Accept a real fresh functional terminal receipt, without relabeling it as B."""
     from .config import load_config
 
+    if state.get("schema") == "experiment-state-v2":
+        raise ValueError("versioned state requires carry-state lifecycle, not legacy transfer")
     parent = state["config"]
     settings = parent["training"]
     step = state.get("step")

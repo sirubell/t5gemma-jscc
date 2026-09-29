@@ -27,11 +27,12 @@ class Codec(nn.Module):
         validate_codec_architecture(config)
         self.config = config
         self.film: nn.Sequential | None = None
-        if config.get("architecture", "residual_mlp") == "direct_affine":
+        if config.get("architecture", "residual_mlp") in ("direct_affine", "direct_outer_ln"):
             # Retain the public Sequential interface used by diagnostics. Each
             # half has exactly one biased Linear, with no hidden-width factor.
-            self.input_norm = nn.Identity()
-            self.output_norm = nn.Identity()
+            outer_ln = config["architecture"] == "direct_outer_ln"
+            self.input_norm = nn.LayerNorm(input_dim) if outer_ln else nn.Identity()
+            self.output_norm = nn.LayerNorm(input_dim) if outer_ln else nn.Identity()
             self.encoder = nn.Sequential(nn.Linear(input_dim, config["bottleneck_dim"]))
             self.decoder = nn.Sequential(nn.Linear(config["bottleneck_dim"], input_dim))
             return

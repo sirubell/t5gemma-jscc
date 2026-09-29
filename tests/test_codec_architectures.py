@@ -142,3 +142,140 @@ def test_named_designs_compose_for_both_tasks(name, task, tmp_path):
         assert sum(p.numel() for p in codec.parameters()) > 0
     assert resolved["split"] == {"stack": "enc", "where": "after_layer", "index": 9}
     assert resolved["channel"]["normalize_power"] is True
+
+
+@pytest.mark.parametrize("architecture,blocks", [("residual_mlp", 2), ("direct_affine", 0)])
+def test_four_cells_preserve_equal_core_initialization(architecture, blocks):
+    plain = settings(architecture, blocks)
+    normalized = {**plain, "layernorm": "both"}
+    if architecture == "direct_affine":
+        normalized["architecture"] = "direct_outer_ln"
+    torch.manual_seed(91)
+    left = Codec(16, plain)
+    torch.manual_seed(91)
+    right = Codec(16, normalized)
+    for key, value in left.state_dict().items():
+        torch.testing.assert_close(value, right.state_dict()[key], rtol=0, atol=0)
+    assert isinstance(right.input_norm, nn.LayerNorm)
+    assert isinstance(right.output_norm, nn.LayerNorm)
+    assert sum(isinstance(m, nn.LayerNorm) for m in right.modules()) == 2 + 2 * blocks
+    x = torch.randn(2, 3, 16)
+    right.decode(right.encode(x), None).square().mean().backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in right.parameters())
+
+
+def routed_model():
+    from jscc.models.channel import build_channel
+    from jscc.models.split_model import SplitModel
+    from model_helpers import tiny_backbone
+    base = tiny_backbone(num_hidden_layers=2)
+    config = {"type": "identity", "kwargs": {}, "normalize_power": False, "clean_film_snr": 18.0}
+    return SplitModel(base, Codec(16, settings("direct_affine", 0)), build_channel(config),
+                      {"stack": "enc", "where": "after_layer", "index": 0}, config)
+
+
+def test_encoder_routing_is_post_final_norm_single_and_exception_safe():
+    from jscc.models.split_model import resolve_encoder_site, stack_module
+    model = routed_model()
+    site = resolve_encoder_site(model.base, {"stack": "enc", "where": "after_final_norm"}, "tiny-v1")
+    authorization = {"sites": {"enc_fn": "trained"}}
+    stack = stack_module(model.base, "enc")
+    raw = []
+    handle = stack.norm.register_forward_pre_hook(lambda module, args: raw.append(args[0].detach()))
+    batch = {"input_ids": torch.tensor([[2, 4, 5]]), "attention_mask": torch.ones(1, 3, dtype=torch.long),
+             "labels": torch.tensor([[5, 6, 1]])}
+    original_split = model.split
+    codec = model.codec
+    with pytest.raises(RuntimeError, match="deliberate"):
+        with model.at_site(site, purpose="train", authorization=authorization), model.transmission():
+            output = model(**batch)
+            torch.testing.assert_close(model.activation, stack.norm.forward(raw[-1]))
+            assert model.channel_uses["hidden"] == 1 * 3 * 8
+            output.logits.square().mean().backward()
+            assert model.codec is codec
+            assert model.codec.encoder[0].weight.grad is not None
+            assert all(p.grad is None for p in model.base.parameters())
+            with pytest.raises(RuntimeError, match="nest"):
+                with model.at_site(site, purpose="capture", authorization=authorization):
+                    pass
+            raise RuntimeError("deliberate")
+    handle.remove()
+    assert model.split is original_split
+    assert model._encoder_valid_mask is None
+    with model.transmission():
+        model(**batch)
+        assert model.channel_uses["hidden"] == 24
+    assert len(stack.norm._forward_hooks) == 0
+    assert len(stack.layers[0]._forward_hooks) == 1
+
+
+@pytest.mark.parametrize("role,purpose,match", [
+    ("diagnostic", "train", "trained"), ("heldout", "capture", "freeze"),
+    (None, "evaluate", "declared"),
+])
+def test_encoder_routing_rejects_undeclared_or_unfrozen_roles(role, purpose, match):
+    from jscc.models.split_model import resolve_encoder_site
+    model = routed_model()
+    site = resolve_encoder_site(model.base, {"stack": "enc", "where": "after_layer", "index": 1}, "tiny-v1")
+    with pytest.raises(ValueError, match=match):
+        with model.at_site(site, purpose=purpose, authorization={"sites": {site.site_id: role}}):
+            pass
+
+
+def test_route_cannot_change_during_direct_encoder_forward_and_recovers_exception():
+    from jscc.models.split_model import resolve_encoder_site, stack_module
+    model = routed_model()
+    encoder = stack_module(model.base, "enc")
+    site = resolve_encoder_site(model.base, {"stack": "enc", "where": "after_final_norm"}, "tiny-v1")
+    authorization = {"sites": {site.site_id: "trained"}}
+
+    def fail_inside(module, args):
+        with model.at_site(site, purpose="capture", authorization=authorization):
+            pass
+
+    hook = encoder.layers[0].register_forward_pre_hook(fail_inside)
+    with pytest.raises(RuntimeError, match="during a forward"):
+        encoder(input_ids=torch.tensor([[2, 4, 5]]))
+    hook.remove()
+    assert model._forward_active == 0
+    with model.at_site(site, purpose="capture", authorization=authorization), model.transmission(bypass=True):
+        encoder(input_ids=torch.tensor([[2, 4, 5]]))
+    assert model._forward_active == 0
+
+
+def test_resolved_sites_distinguish_raw_final_and_normalized_and_reject_forgery():
+    from dataclasses import replace
+    from jscc.models.split_model import resolve_encoder_site
+    model = routed_model()
+    raw = resolve_encoder_site(model.base, {"stack": "enc", "where": "after_layer", "index": 1}, "tiny-v1")
+    final = resolve_encoder_site(model.base, {"stack": "enc", "where": "after_final_norm"}, "tiny-v1")
+    assert raw.module_path != final.module_path
+    assert raw.site_id == "enc_l1" and final.site_id == "enc_fn"
+    for spec in ({"stack": "enc", "where": "after_layer", "index": 2},
+                 {"stack": "enc", "where": "after_layer", "index": True},
+                 {"stack": "enc", "where": "after_final_norm", "index": 1},
+                 {"stack": "dec", "where": "after_final_norm"}):
+        with pytest.raises(ValueError):
+            resolve_encoder_site(model.base, spec, "tiny-v1")
+    with pytest.raises(ValueError, match="metadata"):
+        with model.at_site(replace(final, hidden_dim=32), purpose="capture",
+                           authorization={"sites": {"enc_fn": "trained"}}):
+            pass
+
+
+@pytest.mark.parametrize("task", ["coco", "hellaswag"])
+def test_direct_outer_ln_named_design_composes_without_promoting_default(task, tmp_path):
+    root = Path(__file__).parents[1] / "configs"
+    recipe = yaml.safe_load((root / "tasks" / f"{task}.yaml").read_text())
+    recipe["model_config"] = str(root / "models/codec_direct_outer_ln.yaml")
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(recipe))
+    config = load_config(path)
+    assert config["split"] == {"stack": "enc", "where": "after_final_norm"}
+    codec = Codec(16, config["codec"])
+    restored = Codec(16, config["codec"])
+    restored.load_state_dict(codec.state_dict(), strict=True)
+    x = torch.randn(2, 3, 16)
+    expected = codec.output_norm(codec.decoder(codec.encoder(codec.input_norm(x))))
+    torch.testing.assert_close(restored.decode(restored.encode(x), None), expected, rtol=0, atol=0)
+    assert load_config(root / "tasks" / f"{task}.yaml")["codec"].get("architecture", "residual_mlp") == "residual_mlp"
