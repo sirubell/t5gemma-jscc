@@ -4,9 +4,9 @@
 standard library. It never imports a model, tensor loader, GPU runtime or online
 tracker. This is an explicit new contract, `experiment-records-v1`; historical
 `metrics.jsonl` files are not silently interpreted or rewritten as this schema.
-The helper's CPU tests establish evidence mechanics. Learner integration,
-full-weight telemetry, GPU timing accuracy and scientific quality require their
-own acceptance receipts.
+The helper's CPU tests establish evidence mechanics. The versioned baseline runner integrates actual learner/evaluator production,
+artifact reconciliation and completion. Full-weight telemetry, GPU timing accuracy
+and scientific quality still require their own acceptance receipts.
 
 ## Events and measurements
 
@@ -297,3 +297,13 @@ checkpoint bytes are retained or only declared in omitted-tensor metadata. It
 does not infer bank membership, sum overlapping inventory aliases, or treat a
 smaller parameter bank as measured speedup. The fixture's eight-byte binary
 artifacts are synthetic byte-verification inputs, not serialized model tensors.
+
+## Connected baseline evidence
+
+See [encoder-final baseline](encfn-baseline.md) for strict producer integration.
+`tests/test_baseline_pipeline.py` exercises all four topologies through actual
+CPU updates, save/reload, six-condition model forwards, records and rendering.
+`tests/test_baseline_cadence.py` executes 1,000 tiny-model updates across complete
+400/200+200 trajectories. `tests/test_baseline_comparisons.py` verifies four actual
+short arms and 144 explicit condition/metric contrast rows. These are synthetic
+mechanics tests, with no pretrained download or real-data scientific claim.

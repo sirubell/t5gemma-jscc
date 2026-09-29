@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jscc.experiment_schedule import compile_baseline_plan
 
 
-def execute(manifest_path, output):
+def _execute(manifest_path, output, resource_guard=None):
     import copy
     import torch
     from jscc.activation_replay import canonical_digest, file_digest
@@ -40,6 +40,17 @@ def execute(manifest_path, output):
             or config["codec"]["bottleneck_dim"] != 512 or config["seed"] != 0
             or config["training"]["max_steps"] != 400):
         raise ValueError("prepared config differs from enc_fn/B512/seed0/400 protocol")
+    training = config["training"]
+    if (training["lr"] != 2e-4 or training["weight_decay"] != 0.01 or training["grad_clip"] != 1.0
+            or training["batch_size"] * training["gradient_accumulation"] != 64):
+        raise ValueError("prepared optimizer/effective batch differs from accepted baseline")
+    if (config["codec"]["snr_film"] or config["codec"]["dropout"] != 0
+            or config["channel"]["type"] != "awgn" or not config["channel"]["normalize_power"]):
+        raise ValueError("baseline requires dropout0/FiLMoff/masked normalized AWGN")
+    if config["codec"]["architecture"] == "residual_mlp" and (
+            config["codec"]["n_res_blocks"] != 2 or config["codec"]["hidden_dim"] != 1152
+            or config["codec"]["activation"] != "gelu"):
+        raise ValueError("baseline residual architecture requires two H1152/GELU blocks")
     if config["task"] != "hellaswag":
         raise ValueError("initial scientific baseline is HellaSwag; COCO uses separate protocol")
     plan = compile_baseline_plan(manifest.get("selected_cells", ()), manifest.get("owner_approval"))
@@ -81,6 +92,10 @@ def execute(manifest_path, output):
             if hashlib.sha256(bundle.read(name)).hexdigest() != digest:
                 raise ValueError("retained source bytes differ from executed inventory")
     metadata["source_archive"] = {"path": str(archive_path), "sha256": archive["sha256"]}
+    if metadata["data_identity"] != canonical_digest(manifest["data_ids"]):
+        raise ValueError("state data identity differs from prepared data IDs")
+    if resource_guard is not None:
+        resource_guard()
     seed_everything(0)
     processor, model = build_model(config)
     site = resolve_encoder_site(model.base, config["split"], config["model"]["revision"])
@@ -92,18 +107,19 @@ def execute(manifest_path, output):
     if file_digest(initial_path) != initial_ref["sha256"] or metadata["initialization_identity"] != initial_ref["sha256"]:
         raise ValueError("immutable initialization checksum mismatch")
     model.codec.load_state_dict(torch.load(initial_path, weights_only=True, map_location="cpu"), strict=True)
+    metadata["retained_inputs"] = {
+        "source.zip": {"path": str(archive_path), "sha256": archive["sha256"]},
+        "prepared.json": {"path": str(manifest_path), "sha256": file_digest(manifest_path)},
+        "initialization.pt": {"path": str(initial_path), "sha256": initial_ref["sha256"]}}
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError("run output must be fresh")
-    def event_sink(event):
-        with (output / "metrics.jsonl").open("a") as destination:
-            destination.write(json.dumps(event, allow_nan=False) + "\n")
     learner = BaselineLearner(model, run_id=manifest["run_id"], task=config["task"],
         identity={"source": metadata["source_identity"], "config": metadata["config_identity"],
                   "data": metadata["data_identity"], "parent": metadata["parent_identity"]},
         pairing_id=manifest["pairing_id"], lr=config["training"]["lr"],
         weight_decay=config["training"]["weight_decay"], grad_clip=config["training"]["grad_clip"],
-        event_sink=event_sink)
+        event_sink=None)
     replay = {}
     if segment.strategy != "both":
         for role, declaration in manifest["replays"].items():
@@ -125,14 +141,20 @@ def execute(manifest_path, output):
         if sum(len(b["labels"]) for b in batches) != 128:
             raise ValueError("objective validation requires exact prepared 128 sequences")
         return batches
+    from jscc.baseline_protocol import comparison_refs
+    kind = "combined" if segment.strategy in {"both", "staged"} else "local"
+    controls = comparison_refs(learner, metadata, kind)
     request = manifest["task_request"]
+    if request["comparison"] != controls:
+        raise ValueError("prepared task comparison differs from actual config/state")
     if request["expected_items"] != 256:
         raise ValueError("development assessment requires exact 256-item panel")
     task_data = load_data(config, processor, manifest["data_ids"], for_training=False) if config["task"] == "coco" else None
     def assess(state, directory):
         actual = {**request, "checkpoint_sha256": state.reference.sha256,
                   "step": state.payload["metadata"]["completed_updates"],
-                  "parent": state.payload["metadata"]["parent_identity"]}
+                  "parent": state.payload["metadata"]["parent_identity"],
+                  "comparison": state.payload["metadata"]["comparison_controls"]}
         return evaluate_checkpoint(state, actual, model=model, processor=processor, data=task_data, output=directory)
     parent = None
     if segment.start:
@@ -147,20 +169,182 @@ def execute(manifest_path, output):
         receipt_path = root / declaration["receipt"]["path"]
         if file_digest(receipt_path) != declaration["receipt"]["sha256"]:
             raise ValueError("reused assessment receipt checksum mismatch")
-        reused[int(step)] = {"state": reused_state, "receipt": json.loads(receipt_path.read_text())}
+        reused[int(step)] = {"state": reused_state, "receipt": json.loads(receipt_path.read_text()), "root": receipt_path.parent}
     result = run_baseline(learner, output=output, metadata=metadata, update_batches=updates,
-                         validation_batches=validation, assess=assess, segment=segment, parent=parent, reused_assessments=reused, task_request=request)
+                         validation_batches=validation, assess=assess, segment=segment, parent=parent, reused_assessments=reused, task_request=request, resource_guard=resource_guard, allocation_required=resource_guard is not None,
+                         on_output_created=getattr(resource_guard, "on_output_created", None))
     return result
+
+
+def execute(manifest_path, output):
+    """Charge the entire prepared command before model construction on a GPU."""
+    from jscc.activation_replay import file_digest
+    from jscc.config import load_config
+    from jscc.experiment_schedule import AllocationLedger
+    output = Path(output).resolve()
+    if output.exists():
+        raise FileExistsError("run output must be fresh")
+    manifest_path = Path(manifest_path).resolve()
+    manifest = json.loads(manifest_path.read_text())
+    config_path = manifest_path.parent / manifest["config"]["path"]
+    if file_digest(config_path) != manifest["config"]["sha256"]:
+        raise ValueError("prepared config checksum mismatch")
+    config = load_config(config_path)
+    if config["model"]["device"] == "cpu":
+        return _execute(manifest_path, output)
+    allocation = manifest["allocation"]
+    if allocation["cap_device_seconds"] != 7200:
+        raise ValueError("baseline whole-pilot cap is exactly two aggregate GPU hours")
+    measurement = manifest_path.parent / allocation["measurement"]["path"]
+    if file_digest(measurement) != allocation["measurement"]["sha256"]:
+        raise ValueError("allocation measurements differ from retained receipt")
+    measured = json.loads(measurement.read_text())
+    for key in ("max_duration_seconds", "mandatory_reserve_device_seconds", "devices", "identities"):
+        if allocation[key] != measured[key]:
+            raise ValueError("allocation differs from measured preparation")
+    identities = allocation["identities"]
+    if identities != {"source": manifest["state_metadata"]["source_identity"],
+                      "config": manifest["state_metadata"]["config_identity"],
+                      "input": manifest["state_metadata"]["stream_identity"]}:
+        raise ValueError("allocation identities differ from prepared command")
+    journal = Path(allocation["campaign_journal"])
+    if not journal.is_absolute() or measured["campaign_journal"] != str(journal):
+        raise ValueError("stable absolute campaign journal must be bound in preparation")
+    reservation = Path(str(journal) + ".claim")
+    reservation.mkdir()  # A surviving reservation requires explicit recovery, never replay.
+    from jscc.experiment_records import write_json_atomic
+    terminal_written = False
+    output_ownership = {"created": False}
+    started = False
+    ledger = None
+    prior_hash = None
+    def publish(status, error=None):
+        nonlocal terminal_written
+        write_json_atomic(journal, {"schema": "baseline-campaign-journal-v1",
+            "campaign_id": allocation["campaign_id"], "command_id": allocation["command_id"],
+            "status": status, "prior_sha256": prior_hash, "output": str(Path(output).resolve()),
+            "ledger": ledger.snapshot() if ledger is not None else None,
+            "error": None if error is None else {"type": type(error).__name__, "message": str(error)}})
+        terminal_written = status in {"complete", "failed"}
+    try:
+        prior = 0.0
+        prior_commands = []
+        reference = allocation.get("prior_ledger")
+        if journal.exists():
+            if reference is None:
+                raise ValueError("existing campaign requires exact current prior journal reference")
+            path = (manifest_path.parent / reference["path"]).resolve()
+            if path != journal.resolve() or file_digest(journal) != reference["sha256"]:
+                raise ValueError("prior campaign journal identity is missing or stale")
+            prior_hash = reference["sha256"]
+            previous_journal = json.loads(journal.read_text())
+            if previous_journal["status"] != "complete" or previous_journal["campaign_id"] != allocation["campaign_id"]:
+                raise ValueError("failed or active campaign cannot automatically continue")
+            previous = previous_journal["ledger"]
+            if previous["campaign_id"] != allocation["campaign_id"] or previous["cap_device_seconds"] != 7200:
+                raise ValueError("prior ledger campaign/cap mismatch")
+            if previous["terminal_reason"] or any(a["status"] != "completed" for a in previous["allocations"]):
+                raise ValueError("failed or active campaign cannot automatically continue")
+            prior = previous["charged_device_seconds"]
+            prior_commands = previous.get("prior_command_ids", []) + [a["command_id"] for a in previous["allocations"]]
+            if allocation["command_id"] in prior_commands:
+                raise ValueError("duplicate campaign command; automatic retry prohibited")
+        elif reference is not None:
+            raise ValueError("prior campaign journal is missing")
+        started = True
+        publish("reserved")
+        ledger = AllocationLedger(Path(str(output) + ".allocation.json"), allocation["campaign_id"], 7200,
+                                  prior_device_seconds=prior, prior_command_ids=prior_commands)
+        ledger.start(allocation["command_id"], stage=allocation["stage"], devices=allocation["devices"],
+                     max_duration_seconds=allocation["max_duration_seconds"],
+                     mandatory_reserve_device_seconds=allocation["mandatory_reserve_device_seconds"],
+                     measurement_receipt=allocation["measurement"]["sha256"], identities=identities)
+        publish("running")
+        def guard():
+            ledger.check()
+            publish("running")
+        setattr(guard, "on_output_created", lambda: output_ownership.update(created=True))
+        result = _execute(manifest_path, output, guard)
+        ledger.stop(allocation["command_id"], status="completed")
+        publish("pending_records")
+        status = bind_allocation_result(output, ledger.snapshot())
+        if status["status"] != "complete":
+            raise RuntimeError("allocation-bound records remain incomplete")
+        publish("complete")
+        return {**result, **status}
+    except BaseException as error:
+        if started:
+            try:
+                if ledger is not None and any(a["status"] == "allocated" for a in ledger.snapshot()["allocations"]):
+                    ledger.stop(allocation["command_id"], status="failed")
+            finally:
+                publish("failed", error)
+                if ledger is not None and output_ownership["created"]:
+                    try:
+                        bind_allocation_result(output, ledger.snapshot(), error)
+                    except Exception:
+                        # Required allocation artifact/receipt remains absent or incomplete;
+                        # the failed campaign journal prevents continuation independently.
+                        pass
+        raise
+    finally:
+        if not started or terminal_written:
+            reservation.rmdir()
+        # Ambiguous journal writes intentionally retain the exclusive reservation.
+
+
+
+def bind_allocation_result(output, receipt, failure=None):
+    """Include physical allocation outcome in the same recomputed completion."""
+    from datetime import datetime, timezone
+    from jscc.experiment_records import (append_event, artifact_ref, completion_status,
+                                        measure, read_events, write_json_atomic)
+    output = Path(output)
+    write_json_atomic(output / "allocation.json", receipt)
+    events = read_events(output / "metrics.jsonl") if (output / "metrics.jsonl").exists() else []
+    if not events:
+        # No successful record production means no claim of completed work.
+        status = {"status": "incomplete", "error": str(failure)}
+        write_json_atomic(output / "completion.json", status)
+        return status
+    template = {key: value for key, value in events[-1].items() if key not in {"event_type", "payload"}}
+    template["timestamp"] = datetime.now(timezone.utc).isoformat()
+    seconds = sum(a["charged_device_seconds"] for a in receipt["allocations"])
+    append_event(output / "metrics.jsonl", {**template, "event_type": "cost", "payload": {
+        "category": "gpu_allocation", "seconds": measure(seconds), "attribution": "first_use", "site_id": "enc_fn",
+        "scope": "aggregate_physical_device_seconds_current_command; prior separately in allocation.json",
+        "concurrency": "explicit_ledger", "device_count": sum(a["devices"] for a in receipt["allocations"])}})
+    if failure is not None or receipt["terminal_reason"]:
+        append_event(output / "metrics.jsonl", {**template, "event_type": "failure", "payload": {
+            "reason": str(failure or receipt["terminal_reason"]), "reference": "allocation.json"}})
+    manifest = json.loads((output / "manifest.json").read_text())
+    if "allocation.json" not in manifest["expected_artifacts"]:
+        manifest["expected_artifacts"].append("allocation.json")
+    write_json_atomic(output / "manifest.json", manifest)
+    inventory = {"schema": "experiment-records-v1", "mode": "tensor-complete", "omitted_tensors": [],
+                 "artifacts": [artifact_ref(path, output, "tensor" if path.suffix == ".pt" else "metadata")
+                               for path in sorted(output.rglob("*")) if path.is_file()
+                               and path.name not in {"inventory.json", "completion.json"}]}
+    write_json_atomic(output / "inventory.json", inventory)
+    status = completion_status(manifest, read_events(output / "metrics.jsonl"), inventory, output)
+    write_json_atomic(output / "completion.json", status)
+    return status
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--comparisons", type=Path, help="write exact contrasts for a complete four-cell campaign")
     parser.add_argument("--execute", type=Path, help="prepared immutable manifest; otherwise preview only")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--selected-cell", action="append", default=[])
     parser.add_argument("--owner-approval")
     args = parser.parse_args()
-    if args.execute:
+    if args.comparisons:
+        if args.execute or args.output or args.selected_cell or args.owner_approval:
+            parser.error("--comparisons cannot be combined with execution or preview arguments")
+        from jscc.baseline_protocol import write_baseline_comparisons
+        result = write_baseline_comparisons(args.comparisons)
+    elif args.execute:
         if args.output is None:
             parser.error("--execute requires a fresh --output directory")
         result = execute(args.execute, args.output)

@@ -51,9 +51,11 @@ protocol/parent identities and explicit lineage. The initialization reference
 is the immutable actual codec state dictionary, not a seed-only assertion.
 Preparation must copy the same core tensor snapshot between each family's norm
 variants. The runner checks initialization bytes and exact topology on load.
-The comparison mapping explicitly binds architecture, initialization, training data,
-objective, exposure and schedule control references; it never infers equivalence
-from shape or cell names.
+The comparison mapping is derived with `baseline_protocol.comparison_refs` from
+the actual codec configuration, immutable initialization, data and stream
+identities, evaluated objective, effective batch and global schedule/pairing.
+A declared mapping must equal these derived controls. Optimizer preparation
+requires LR2e-4, weight decay0.01, clip1 and effective batch64.
 
 Conditional local segments additionally require role-keyed `replays` with v2
 consumer requirements and an applicable parity receipt. `parent_checkpoint`
@@ -97,13 +99,67 @@ failure, invalid save or missing mandatory assessment stops that learner.
 Attempted exposure remains charged; no extra replacement update is scheduled.
 The zero-LR first AdamW call still advances moments and completed updates.
 
-The learner emits plain `experiment-records-v1` update, failure, objective, cost
-and per-site footprint mappings through
-an optional callback. `evaluation.observation_event_payload` projects executable
-requests into the agreed `codec-observation-v1` identity and plain observation
-mapping, preserving the full original request. Final durable records/plots and
-completion-inventory integration belongs to the CPU integration stage. CPU
-receipts and a normal exit cannot substitute for that gate.
+`run_baseline` validates and durably writes every event through the strict
+`experiment-records-v1` helper, including when an additional observer callback
+is supplied. It declares checkpoint/panel expectations before acquisition,
+retains source ZIP/prepared input/initialization bytes for prepared commands,
+and produces `manifest.json`, `inventory.json`, `baseline-result.json` and a
+recomputed `completion.json`. Completion requires ordered updates, all declared
+observations and verified tensor/artifact bytes. Failure receipts remain
+independent of a potentially failed event writer. No synthetic assessment with
+only a success flag can satisfy completion.
+
+`evaluation.observation_event_payload` retains full execution requests and
+actual per-item evidence. Evaluation restores prior codec weights, training
+mode and RNG; a failed condition stops further conditions. Reused task receipts
+must match their saved `observation.json`, exact output inventory/hashes and
+parsed adapter items. The consumer retains a verified local copy and the
+original acquisition identity, with explicit reuse and acquisition-cost refs.
+
+GPU prepared commands additionally require an `allocation` declaration with
+`campaign_id`, `command_id`, `stage`, `devices`, `cap_device_seconds: 7200`,
+an absolute stable `campaign_journal` path, `max_duration_seconds`,
+`mandatory_reserve_device_seconds`, source/config/input
+`identities`, and a hash-bound `measurement` JSON containing the same measured
+bounds and journal path. A hash-bound `prior_ledger` reference is mandatory once
+that campaign journal exists; it must match the current journal bytes and path.
+Completed charge and prior command IDs carry forward; missing/stale references,
+duplicate commands and failed/active journals cannot automatically continue.
+An exclusive journal reservation serializes CLI commands; a reservation left by
+interruption requires explicit recovery. Output-directory changes cannot reset
+accounting. The output path must be fresh before reservation/allocation. Failure
+records are bound only after this invocation successfully creates its run
+directory, preserving prior or concurrently created evidence. The fresh command ledger is created beside the run before model
+construction and mirrored to the stable journal. It charges allocated
+wall time, checks monotonic deadlines/reserves between bounded operations, and
+binds the final allocation outcome into run completion. The initial run manifest
+already requires allocation evidence; core completion stays incomplete until the
+wrapper durably binds it. Binding failure terminally fails the campaign. Packaging must supply an
+external hard process/allocation timer and verify its behavior on the target;
+this cooperative CPU implementation cannot interrupt a hung GPU call.
+
+Costs preserve measured host-wall training/data/validation/task/checkpoint scopes;
+unknown precommand acquisition, queue and GPU-active durations remain unavailable.
+Allocation device-seconds and overlapping command/subphase time are separate.
+CUDA memory fields use learner-lifetime allocated/reserved high-water marks;
+CPU records explicitly mark GPU memory unavailable. Full-weight timing and
+memory remain runtime acceptance requirements.
+
+After all four explicitly named initial arms complete, create comparisons and
+render saved evidence without model loading:
+
+```bash
+uv run --offline --no-sync python scripts/encfn_baseline.py --comparisons /campaign
+uv run --offline --no-sync python scripts/render_experiment_report.py \
+  --records /campaign --output /new/local-report
+```
+
+The comparison manifest binds architecture contrasts at 0/200/400 by exact
+observation digests. It requires all four tensor-complete arms; the renderer
+still verifies input/scoring/noise/exposure controls and blocks incompatible
+contrasts. Allowed architecture/initialization differences never imply adoption.
+The baseline task grid remains distinct from separately acquired vanilla bypass
+observations supported by the ordinary task evaluation/reporting workflow.
 
 ## Verification boundaries
 

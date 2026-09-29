@@ -181,3 +181,227 @@ class ExposureLedger:
                 receipt=receipt,
             )
         )
+
+
+class AllocationStopped(RuntimeError):
+    """The cumulative budget or a terminal attempt prevents further commands."""
+
+
+class AllocationLedger:
+    """Durable device-allocation accounting, independent of GPU-active time.
+
+    Poll ``check`` while allocated; the execution host must additionally enforce
+    hard allocation limits. This CPU ledger does not kill a process or claim
+    interruption recovery. Existing files are never resumed or overwritten.
+    Reserve and duration measurements are caller-supplied preparation evidence.
+    """
+
+    def __init__(
+        self,
+        path,
+        campaign_id,
+        cap_device_seconds,
+        *,
+        prior_device_seconds: float | int = 0,
+        prior_command_ids=(),
+        clock=None,
+    ):
+        from pathlib import Path
+        import time
+
+        self.path = Path(path)
+        self.clock = clock or time.monotonic
+        self._validate_seconds(cap_device_seconds, positive=True)
+        self._validate_seconds(prior_device_seconds)
+        if not campaign_id or prior_device_seconds > cap_device_seconds:
+            raise ValueError("invalid campaign or prior allocation")
+        if len(set(prior_command_ids)) != len(prior_command_ids) or any(
+            not isinstance(command, str) or not command.strip() for command in prior_command_ids
+        ):
+            raise ValueError("unique prior command identities required")
+        self.state: dict = dict(
+            schema=1,
+            campaign_id=campaign_id,
+            cap_device_seconds=cap_device_seconds,
+            prior_device_seconds=prior_device_seconds,
+            prior_command_ids=list(prior_command_ids),
+            allocations=[],
+            terminal_reason=None,
+        )
+        self._last_time = self.clock()
+        self._validate_seconds(self._last_time)
+        # Exclusive creation prevents ambiguous replay of prior attempts.
+        with self.path.open("x") as output:
+            self._write(output)
+
+    @staticmethod
+    def _validate_seconds(value, positive=False):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (float, int))
+            or not math.isfinite(value)
+            or value < 0
+            or (positive and value == 0)
+        ):
+            raise ValueError("seconds must be finite and nonnegative")
+
+    def _write(self, output):
+        import os
+
+        json.dump(self.state, output, sort_keys=True, allow_nan=False)
+        output.flush()
+        os.fsync(output.fileno())
+
+    def _persist(self):
+        import os
+        import tempfile
+
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=self.path.parent, delete=False
+            ) as output:
+                temporary = output.name
+                self._write(output)
+            os.replace(temporary, self.path)
+            descriptor = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except Exception:
+            self.state["terminal_reason"] = "record_write_failure"
+            raise
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _accrue(self):
+        now = self.clock()
+        if not math.isfinite(now) or now < self._last_time:
+            self.state["terminal_reason"] = "invalid_monotonic_clock"
+            self._persist()
+            raise AllocationStopped("invalid monotonic clock")
+        self._last_time = now
+        for allocation in self.state["allocations"]:
+            if allocation["status"] == "allocated":
+                allocation["elapsed_seconds"] = now - allocation["started_monotonic"]
+                allocation["charged_device_seconds"] = (
+                    allocation["elapsed_seconds"] * allocation["devices"]
+                )
+        return now
+
+    def snapshot(self):
+        """Return a detached accounting view; use check to sample active time."""
+        result = json.loads(json.dumps(self.state))
+        result["charged_device_seconds"] = result["prior_device_seconds"] + sum(
+            a["charged_device_seconds"] for a in result["allocations"]
+        )
+        result["remaining_device_seconds"] = max(
+            0, result["cap_device_seconds"] - result["charged_device_seconds"]
+        )
+        return result
+
+    def check(self):
+        self._accrue()
+        active = [a for a in self.state["allocations"] if a["status"] == "allocated"]
+        if any(a["elapsed_seconds"] >= a["max_duration_seconds"] for a in active):
+            self.state["terminal_reason"] = "allocation_deadline"
+        view = self.snapshot()
+        if view["charged_device_seconds"] >= view["cap_device_seconds"]:
+            self.state["terminal_reason"] = "cumulative_deadline"
+        if active and view["remaining_device_seconds"] < max(
+            a["mandatory_reserve_device_seconds"] for a in active
+        ):
+            self.state["terminal_reason"] = "mandatory_reserve_exhausted"
+        self._persist()
+        if self.state["terminal_reason"]:
+            raise AllocationStopped(self.state["terminal_reason"])
+        return self.snapshot()
+
+    def start(
+        self,
+        command_id,
+        *,
+        stage,
+        devices,
+        max_duration_seconds,
+        mandatory_reserve_device_seconds,
+        measurement_receipt,
+        identities=None,
+    ):
+        self.check()
+        self._validate_seconds(max_duration_seconds, positive=True)
+        self._validate_seconds(mandatory_reserve_device_seconds)
+        if type(devices) is not int or devices <= 0:
+            raise ValueError("positive physical device count required")
+        if not command_id or not stage or not measurement_receipt:
+            raise ValueError("command, stage and measured preparation receipt required")
+        if not isinstance(identities, dict) or any(
+            not isinstance(identities.get(key), str) or not identities[key].strip()
+            for key in ("source", "config", "input")
+        ):
+            raise ValueError("exact source/config/input identity references required")
+        if command_id in self.state["prior_command_ids"] or any(a["command_id"] == command_id for a in self.state["allocations"]):
+            raise AllocationStopped("duplicate command; automatic retry prohibited")
+        committed = sum(
+            (a["max_duration_seconds"] - a["elapsed_seconds"]) * a["devices"]
+            for a in self.state["allocations"]
+            if a["status"] == "allocated"
+        )
+        reserve = max(
+            [mandatory_reserve_device_seconds]
+            + [
+                a["mandatory_reserve_device_seconds"]
+                for a in self.state["allocations"]
+                if a["status"] == "allocated"
+            ]
+        )
+        if (
+            committed + devices * max_duration_seconds + reserve
+            > self.snapshot()["remaining_device_seconds"]
+        ):
+            self.state["terminal_reason"] = "insufficient_measured_reserve"
+            self._persist()
+            raise AllocationStopped(self.state["terminal_reason"])
+        allocation = dict(
+            command_id=command_id,
+            stage=stage,
+            devices=devices,
+            max_duration_seconds=max_duration_seconds,
+            mandatory_reserve_device_seconds=mandatory_reserve_device_seconds,
+            measurement_receipt=measurement_receipt,
+            identities=identities or {},
+            started_monotonic=self._last_time,
+            stopped_monotonic=None,
+            elapsed_seconds=0,
+            charged_device_seconds=0,
+            status="allocated",
+        )
+        self.state["allocations"].append(allocation)
+        self._persist()
+        return json.loads(json.dumps(allocation))
+
+    def stop(self, command_id, *, status="completed"):
+        if status not in {"completed", "failed", "interrupted"}:
+            raise ValueError("invalid terminal allocation status")
+        failure = None
+        try:
+            self.check()
+        except AllocationStopped as error:
+            failure = error
+        matches = [
+            a
+            for a in self.state["allocations"]
+            if a["command_id"] == command_id and a["status"] == "allocated"
+        ]
+        if len(matches) != 1:
+            raise AllocationStopped("unknown or already stopped allocation")
+        matches[0]["status"] = status if failure is None else "interrupted"
+        matches[0]["stopped_monotonic"] = self._last_time
+        if status != "completed":
+            self.state["terminal_reason"] = self.state["terminal_reason"] or status
+        self._persist()
+        if failure:
+            raise failure
+        return self.snapshot()

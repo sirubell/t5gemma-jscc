@@ -372,6 +372,29 @@ def _comparisons(observations: list[dict]) -> tuple[list[dict], list[dict]]:
     return results, blocked
 
 
+def _comparison_details(request: dict) -> dict:
+    """Keep input/scoring controls while separating immutable result identity.
+
+    Versioned task adapters retain the entire execution request in outputs. Its
+    checkpoint and learner controls identify an observation but need not match
+    an explicitly declared contrast; the contrast checks those controls itself.
+    Unknown execution fields remain part of comparability, conservatively.
+    """
+    details = dict(request.get("details", {}))
+    outputs = details.get("outputs")
+    prefix = "inline-execution-request-v1:"
+    if isinstance(outputs, str) and outputs.startswith(prefix):
+        execution = json.loads(outputs[len(prefix):])
+        if not isinstance(execution, dict):
+            raise ValueError("inline execution request must be an object")
+        excluded = {"checkpoint_sha256", "config", "parent", "comparison",
+                    "learner_kind", "step", "site_step"}
+        details["outputs"] = {"namespace": prefix,
+                              "execution": {key: value for key, value in execution.items()
+                                            if key not in excluded}}
+    return details
+
+
 def _explicit_comparisons(events: list[dict], manifest: dict) -> tuple[list[dict], list[dict]]:
     """Resolve requested scientific contrasts by exact observation digests."""
     if not isinstance(manifest, dict) or set(manifest) != {"schema", "contrasts"} or manifest["schema"] != "experiment-comparisons-v1" or not isinstance(manifest["contrasts"], list):
@@ -404,8 +427,9 @@ def _explicit_comparisons(events: list[dict], manifest: dict) -> tuple[list[dict
             lq, rq = lp["request"], rp["request"]
             if any(p["status"] != "complete" or p["request"]["purpose"] != "task" for p in (lp, rp)):
                 raise ValueError("requested contrast requires complete task observations")
-            common = ("task", "source", "data", "panel", "site", "role", "site_step", "protocol", "noise", "scorer", "layout", "precision", "backend", "expected_items", "conditions", "details")
-            if any(lq[k] != rq[k] for k in common):
+            common = ("task", "source", "data", "panel", "site", "role", "site_step", "protocol", "noise", "scorer", "layout", "precision", "backend", "expected_items", "conditions")
+            if (any(lq[k] != rq[k] for k in common)
+                    or _comparison_details(lq) != _comparison_details(rq)):
                 raise ValueError("requested contrast input/scoring/noise/site/exposure identity mismatch")
             if "initialization" not in allowed and lq["parent"] != rq["parent"]:
                 raise ValueError("requested contrast parent differs without initialization allowance")

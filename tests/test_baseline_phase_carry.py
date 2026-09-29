@@ -90,10 +90,10 @@ def test_real_cpu_200_to_201_of_400_full_state_carry(tmp_path):
             assert torch.equal(tensor, restored[1].state_dict()["state"][key][name])
 
 
-def test_real_local_prefix_online_branch_preserves_pairing_and_update(tmp_path):
+def test_real_local_prefix_online_branch_preserves_pairing_and_update(monkeypatch, tmp_path):
     import copy
     import pytest
-    from jscc.baseline_protocol import BaselineLearner, run_baseline, CONDITIONS
+    from jscc.baseline_protocol import BaselineLearner, run_baseline
     from jscc.experiment_schedule import Segment
     from jscc.experiment_state import save_state, open_state
     from jscc.runtime import model_inputs
@@ -115,9 +115,12 @@ def test_real_local_prefix_online_branch_preserves_pairing_and_update(tmp_path):
     local = {**b, "activation": captured[0], "site_id": "enc_fn"}
     for _ in range(200):
         continuous.update([local], kind="local")
-    metadata = dict(source_identity="s", config_identity="c", parent_identity=None,
+    metadata: dict = dict(source_identity="s", config_identity="c", parent_identity=None,
                     initialization_identity="i", stream_identity="stream", protocol_identity="p", lineage=[],
                     phase="reconstruction-prefix", completed_updates=200, noise_identity=continuous.noise_identity)
+    from test_baseline_pipeline import setup_pipeline
+    _, integration_meta, _, _, _ = setup_pipeline(monkeypatch, model=model, final_step=400)
+    metadata.update(data_identity="d", site=integration_meta["site"], model_state_contract="codec-only-stateless-channel-v1")
     reference = save_state(tmp_path / "parent.pt", model=model.codec, optimizer=continuous.optimizer,
         scheduler=continuous.scheduler, scaler=continuous.scaler, metadata=metadata,
         stream_state={"completed_updates": 200, "offset": 12800, "source_valid_tokens": continuous.valid_tokens})
@@ -132,17 +135,27 @@ def test_real_local_prefix_online_branch_preserves_pairing_and_update(tmp_path):
     with pytest.raises(ValueError, match="pairing/noise"):
         run_baseline(mismatched, output=tmp_path / "rejected", metadata=metadata,
                      update_batches=lambda *_: [b], validation_batches=lambda _: [b], assess=lambda *_: None,
-                     segment=segment, parent=parent)
+                     segment=segment, parent=parent, task_request={})
     assert not (tmp_path / "rejected").exists()
     branched = make(clone_model())
     expected = continuous.update([b], kind="combined")
     expected_weights = copy.deepcopy(model.codec.state_dict())
+    from jscc.baseline_protocol import comparison_refs
+    _, _, request, _, _ = setup_pipeline(monkeypatch, model=branched.model, final_step=400)
+    request.update(source="s", config="c", data="d", protocol="p", comparison=comparison_refs(branched, metadata, "combined"))
+    # Callback binds the actual saved request, including parent identity.
+    from jscc.evaluation import evaluate_checkpoint
+    def assess(state, output):
+        actual_request = {**request, "checkpoint_sha256": state.reference.sha256,
+                          "step": state.payload["metadata"]["completed_updates"],
+                          "parent": state.payload["metadata"]["parent_identity"],
+                          "comparison": state.payload["metadata"]["comparison_controls"]}
+        return evaluate_checkpoint(state, actual_request, model=branched.model, processor=None, output=output)
     events = []
     branched.event_sink = events.append
     run_baseline(branched, output=tmp_path / "branch", metadata=metadata,
         update_batches=lambda *_: [b], validation_batches=lambda _: [b],
-        assess=lambda *_: {"status": "complete", "conditions": [{"condition": c} for c in CONDITIONS]},
-        segment=segment, parent=parent)
+        assess=assess, task_request=request, segment=segment, parent=parent)
     actual = next(event for event in events if event["event_type"] == "update")
     assert actual["payload"]["snr"] == expected["payload"]["snr"]
     assert actual["payload"]["lr_used"] == expected["payload"]["lr_used"]

@@ -119,45 +119,32 @@ def test_unequal_microbatch_denominators_and_gradients():
         torch.testing.assert_close(p.grad, q.grad)
 
 
-def test_runner_executes_updates_saves_and_mandatory_measurements(tmp_path):
-    from jscc.baseline_protocol import run_baseline, CONDITIONS
-    model = toy_model(where="after_final_norm")
-    model.codec.film = None
-    obj = BaselineLearner(model, run_id="runner", task="hellaswag",
-        identity={"source": "s", "config": "c", "data": "d", "parent": None},
-        pairing_id="pair", synthetic=True, effective_batch=64, final_step=4)
-    b = {k: v.repeat(32, 1) for k, v in batch().items()}
-    meta = dict(source_identity="s", config_identity="c", parent_identity=None,
-                initialization_identity="i", stream_identity="stream", protocol_identity="p", lineage=[])
-    calls = []
-    def assess(state, output):
-        calls.append(state.payload["metadata"]["completed_updates"])
-        return {"status": "complete", "conditions": [{"condition": c} for c in CONDITIONS]}
+def test_runner_executes_updates_saves_and_mandatory_measurements(monkeypatch, tmp_path):
+    from jscc.baseline_protocol import run_baseline
+    from test_baseline_pipeline import setup_pipeline
+    obj, meta, request, b, assess = setup_pipeline(monkeypatch)
     result = run_baseline(obj, output=tmp_path / "run", metadata=meta,
-        update_batches=lambda step, kind: [b], validation_batches=lambda kind: [b], assess=assess)
+        update_batches=lambda step, kind: [b], validation_batches=lambda kind: [b],
+        assess=assess, task_request=request)
     assert result["completed_updates"] == 4
     assert len(result["checkpoints"]) == 5
-    assert calls == [0, 2, 4]
+    assert [a["step"] for a in result["task_assessments"]] == [0, 2, 4]
     assert all((tmp_path / "run" / f"objective_{step:06d}.json").exists() for step in range(5))
 
 
-def test_runner_missing_assessment_stops_before_training(tmp_path):
+def test_runner_missing_assessment_stops_before_training(monkeypatch, tmp_path):
     from jscc.baseline_protocol import run_baseline
+    from test_baseline_pipeline import setup_pipeline
     import json
-    model = toy_model(where="after_final_norm")
-    model.codec.film = None
-    obj = BaselineLearner(model, run_id="runner", task="hellaswag",
-        identity={"source": "s", "config": "c", "data": "d", "parent": None},
-        pairing_id="pair", synthetic=True, effective_batch=64, final_step=4)
-    meta = dict(source_identity="s", config_identity="c", parent_identity=None,
-                initialization_identity="i", stream_identity="stream", protocol_identity="p", lineage=[])
-    with pytest.raises(RuntimeError, match="assessment incomplete"):
-        run_baseline(obj, output=tmp_path / "run", metadata=meta,
+    obj, meta, request, b, _ = setup_pipeline(monkeypatch)
+    with pytest.raises(ValueError, match="identity differs"):
+        run_baseline(obj, output=tmp_path / "run", metadata=meta, task_request=request,
                      update_batches=lambda *_: pytest.fail("no training allowed"),
-                     validation_batches=lambda _: [batch()], assess=lambda *_: {"status": "incomplete"})
+                     validation_batches=lambda _: [b], assess=lambda *_: {"status": "incomplete"})
     result = json.loads((tmp_path / "run/completion.json").read_text())
-    assert result["status"] == "incomplete" and result["completed_updates"] == 0
-    assert len(result["checkpoints"]) == 1
+    assert result["status"] == "incomplete"
+    result = json.loads((tmp_path / "run/baseline-result.json").read_text())
+    assert result["completed_updates"] == 0 and len(result["checkpoints"]) == 1
 
 
 def test_site_provenance_does_not_change_paired_draws():

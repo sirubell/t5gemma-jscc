@@ -402,7 +402,7 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
     has a fresh directory; partial evidence and failures remain in the receipt.
     No count here certifies scientific quality or a validation threshold.
     """
-    from .experiment_state import isolated_rng as state_isolated_rng, open_state
+    from .experiment_state import capture_rng, restore_rng, isolated_rng as state_isolated_rng, open_state
     identity = codec_observation_identity(request)
     reopened = open_state(validated_state.reference, expected=validated_state.payload["metadata"])
     if not _state_payload_equal(validated_state.payload, reopened.payload):
@@ -431,10 +431,12 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
         temporary.replace(output / "observation.json")
 
     persist()
-    model.codec.load_state_dict(validated_state.payload["model"])
+    previous_state = copy.deepcopy(model.codec.state_dict())
+    previous_rng = capture_rng()
     previous_training = model.training
-    model.eval()
     try:
+        model.codec.load_state_dict(validated_state.payload["model"])
+        model.eval()
         for condition in BASELINE_CONDITIONS:
             condition_output = output / str(condition)
             condition_output.mkdir()
@@ -463,6 +465,7 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
                            channel_uses_allocated=dict(getattr(model, "channel_uses_allocated", model.channel_uses)),
                            channel_uses_valid=(dict(model.valid_payload_counts)
                                                if model.valid_payload_counts is not None else None))
+                observation_event_payload({**receipt, "conditions": [*receipt["conditions"], row]})
             except Exception as error:
                 # Adapters may have durably emitted a strict subset before failing.
                 if not row["items"]:
@@ -472,15 +475,21 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
                                    unobserved=max(0, request["expected_items"] - len(partial)))
                     except (OSError, ValueError, KeyError):
                         pass
-                row.update(error={"type": type(error).__name__, "message": str(error)},
+                row.update(status="incomplete", error={"type": type(error).__name__, "message": str(error)},
                            failure_scope="condition; per-item failure count unavailable", failed=None)
             row["elapsed_seconds"] = time.perf_counter() - started
             row["output_hashes"] = {path.name: file_digest(path) for path in sorted(condition_output.iterdir())
                                     if path.is_file()}
             receipt["conditions"].append(row)
             persist()
+            if row["status"] != "complete":
+                break
     finally:
-        model.train(previous_training)
+        try:
+            model.codec.load_state_dict(previous_state)
+            model.train(previous_training)
+        finally:
+            restore_rng(previous_rng)
     receipt["status"] = ("complete" if all(row["status"] == "complete" for row in receipt["conditions"])
                          else "incomplete")
     persist()
@@ -500,8 +509,10 @@ def validate_evaluation_target(validated_state, request, model):
     metadata = payload["metadata"]
     if request["learner_kind"] != payload["kind"]:
         raise ValueError("Observation learner kind mismatch")
-    if "data_identity" in metadata and request["data"] != metadata["data_identity"]:
+    if request["data"] != metadata.get("data_identity"):
         raise ValueError("Observation data identity mismatch")
+    if request["comparison"] != metadata.get("comparison_controls"):
+        raise ValueError("Observation comparison controls differ from checkpoint")
     if metadata.get("model_state_contract") != "codec-only-stateless-channel-v1":
         raise ValueError("Unsupported checkpoint codec/channel state contract")
     if any(True for _ in model.channel.parameters()):
@@ -638,6 +649,11 @@ def observation_event_payload(receipt):
                 if any(key not in item for key in required):
                     raise ValueError("HellaSwag item lacks actual token/prediction/correctness evidence")
                 prediction = item["normalized_prediction"]
+                if (type(prediction) is not int or prediction < 0
+                        or prediction >= len(item["normalized_scores"])
+                        or any(type(item[key]) not in (int, float, bool) or item[key] not in (0, 1)
+                               for key in ("raw_correct", "normalized_correct"))):
+                    raise ValueError("Invalid actual HellaSwag prediction/correctness evidence")
                 normalized.update(raw_correct=int(item["raw_correct"]),
                                   normalized_correct=int(item["normalized_correct"]),
                                   prediction=str(prediction), score=item["normalized_scores"][prediction])
@@ -660,8 +676,11 @@ def observation_event_payload(receipt):
                                               row.get("error", {}).get("message")),
                            "denominator": row["denominator"], "metrics": metrics,
                            "items": items, "objectives": {}})
-    return {"request": observation_record_request(receipt["request"]), "identity": receipt["identity"],
-            "status": receipt["status"], "conditions": conditions, "reuse": receipt.get("reuse")}
+    payload = {"request": observation_record_request(receipt["request"]), "identity": receipt["identity"],
+               "status": receipt["status"], "conditions": conditions, "reuse": receipt.get("reuse")}
+    from .experiment_records import validate_observation
+    validate_observation(payload)
+    return payload
 
 
 
@@ -680,3 +699,49 @@ def _state_payload_equal(left, right):
         return (type(left) is type(right) and len(left) == len(right)
                 and all(_state_payload_equal(a, b) for a, b in zip(left, right)))
     return type(left) is type(right) and left == right
+
+
+def verify_observation_artifacts(receipt, root):
+    """Verify external receipt bytes and adapter evidence before any result reuse.
+
+    Paths are rooted beneath the receipt directory. The exact per-condition file
+    inventory, digests and parsed item contents must agree, including token joins.
+    This verifies retained evidence, not provenance beyond the execution binding.
+    """
+    root = Path(root).resolve(strict=True)
+    saved = root / "observation.json"
+    if saved.is_symlink() or json.loads(saved.read_text()) != receipt:
+        raise ValueError("Observation receipt differs from saved artifact")
+    if receipt.get("schema") != "codec-observation-v1":
+        raise ValueError("Unsupported observation receipt schema")
+    observation_event_payload(receipt)
+    request = receipt["request"]
+    rows = receipt["conditions"]
+    if [row["condition"] for row in rows] != request["conditions"][:len(rows)]:
+        raise ValueError("Observation conditions are not an ordered execution prefix")
+    for index, row in enumerate(rows):
+        condition = row["condition"]
+        directory = root / str(condition)
+        if directory.is_symlink() or directory.resolve(strict=True).parent != root:
+            raise ValueError("Observation condition escapes artifact root")
+        paths = list(directory.iterdir())
+        if any(path.is_symlink() or not path.is_file() for path in paths):
+            raise ValueError("Observation evidence must be regular local files")
+        actual_hashes = {path.name: file_digest(path) for path in paths}
+        if actual_hashes != row.get("output_hashes"):
+            raise ValueError("Observation output hashes or inventory mismatch")
+        try:
+            items, ids, families = _observation_items(directory, request["task"], condition)
+        except ValueError:
+            if row.get("status") == "complete" or row["items"]:
+                raise
+            items, ids, families = [], [], []
+        if items != row["items"]:
+            raise ValueError("Observation items differ from actual adapter evidence")
+        if row.get("status") == "complete":
+            if ids != request["input_ids"] or families != request["source_family_ids"]:
+                raise ValueError("Observation adapter membership differs from request")
+        elif index != len(rows) - 1:
+            raise ValueError("Observation continued after a failed condition")
+        if row.get("unobserved") != request["expected_items"] - len(items):
+            raise ValueError("Observation unobserved count differs from actual evidence")

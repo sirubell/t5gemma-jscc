@@ -132,7 +132,9 @@ def observation_fixture(monkeypatch, tmp_path):
                 "site": asdict(site), "config_identity": "config", "source_identity": "source",
                 "protocol_identity": "protocol", "parent_identity": None,
                 "initialization_identity": "init", "stream_identity": "stream",
-                "phase": "both", "lineage": []}
+                "phase": "both", "lineage": [], "data_identity": "data",
+                "comparison_controls": {key: "synthetic-" + key for key in
+                    ("architecture", "initialization", "training_data", "objective", "exposure", "schedule")}}
     codec = torch.nn.Linear(1, 1)
     optimizer = torch.optim.AdamW(codec.parameters())
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
@@ -152,7 +154,7 @@ def observation_fixture(monkeypatch, tmp_path):
                "comparison": {key: "synthetic-" + key for key in
                               ("architecture", "initialization", "training_data", "objective", "exposure", "schedule")}}
     loaded = []
-    model = SimpleNamespace(base=object(), codec=SimpleNamespace(load_state_dict=loaded.append),
+    model = SimpleNamespace(base=object(), codec=SimpleNamespace(load_state_dict=loaded.append, state_dict=codec.state_dict),
                             training=True, eval=lambda: None, train=lambda value: None,
                             channel=SimpleNamespace(replay=lambda *args: nullcontext(), parameters=lambda: iter(())),
                             transmission=lambda *args: nullcontext(), at_site=lambda *args, **kwargs: nullcontext(),
@@ -193,21 +195,23 @@ def test_six_condition_observation_retains_failure_and_restores_rng(monkeypatch,
         if condition == 6:
             raise RuntimeError("synthetic interrupted condition")
         (output / f"compact_{condition}.jsonl").write_text(json.dumps(
-            {"sample_id": 7, "source_id": "source-7", "raw_scores": [1, 0], "denominators": [1, 1]}) + "\n")
+            {"sample_id": 7, "source_id": "source-7", "raw_scores": [1, 0], "denominators": [1, 1],
+             "tokens": [4], "normalized_prediction": 0, "normalized_scores": [1, 0],
+             "raw_correct": 1, "normalized_correct": 1}) + "\n")
         return {"acc": 1.0}
 
     monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
     receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None,
                                             output=tmp_path / "observation")
-    assert len(loaded) == 1 and set(loaded[0]) == {"weight", "bias"}
+    assert len(loaded) == 2 and set(loaded[0]) == {"weight", "bias"}
     assert torch.equal(initial_rng, torch.get_rng_state())
     assert receipt["status"] == "incomplete"
-    assert len(receipt["conditions"]) == 6
+    assert len(receipt["conditions"]) == 4
     failed = receipt["conditions"][3]
     assert failed["completed"] == 0 and failed["failed"] is None
     assert failed["denominator"] == 0 and failed["unobserved"] == 1
     assert receipt["conditions"][0]["items"][0]["source_id"] == "source-7"
-    assert receipt["conditions"][-1]["completed"] == 1
+    assert receipt["conditions"][-1]["completed"] == 0
     assert json.loads((tmp_path / "observation" / "observation.json").read_text()) == receipt
 
 
@@ -351,3 +355,81 @@ def test_records_coco_projection_uses_actual_generation_fields(monkeypatch, tmp_
     assert row["items"][0] == {**item, "item_id": "7", "source_id": "7", "tokens": [0, 4, 1],
                                "caption_raw": "Cat\nother", "caption_clean": "Cat", "cap_hit": False}
     assert row["metrics"]["cider"] == {"value": 0.4, "reason": None}
+
+
+def test_checkpoint_evaluation_restores_codec_and_stops_after_failure(monkeypatch, tmp_path):
+    import random
+    import numpy as np
+    import torch
+    from jscc import evaluation
+    state, request, model, _ = observation_fixture(monkeypatch, tmp_path)
+    model.codec = torch.nn.Linear(1, 1)
+    with torch.no_grad():
+        model.codec.weight.fill_(42)
+        model.codec.bias.fill_(-7)
+    original = {key: value.clone() for key, value in model.codec.state_dict().items()}
+    from jscc.experiment_state import capture_rng
+    rng = capture_rng()
+    seen = []
+
+    def adapter(*args):
+        seen.append(args[4])
+        random.random()
+        np.random.rand()
+        torch.rand(2)
+        with torch.no_grad():
+            model.codec.weight.add_(10)
+        raise RuntimeError("adapter stopped")
+
+    monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
+    receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None,
+                                            output=tmp_path / "observation")
+    assert seen == ["no_noise"]
+    assert len(receipt["conditions"]) == 1
+    assert evaluation._state_payload_equal(original, model.codec.state_dict())
+    assert evaluation._state_payload_equal(rng, capture_rng())
+    evaluation.verify_observation_artifacts(receipt, tmp_path / "observation")
+
+
+@pytest.mark.parametrize("tamper", ["bytes", "items", "inventory", "count"])
+def test_external_observation_verifies_actual_artifacts(monkeypatch, tmp_path, tamper):
+    from jscc import evaluation
+    state, request, model, _ = observation_fixture(monkeypatch, tmp_path)
+
+    def adapter(model, processor, settings, output, condition, data_settings):
+        item = {"sample_id": 7, "source_id": "source-7", "raw_scores": [-1., -2.],
+                "denominators": [1, 1], "normalized_scores": [-1., -2.],
+                "normalized_prediction": 0, "raw_correct": 1, "normalized_correct": 1,
+                "tokens": [4]}
+        (output / f"compact_{condition}.jsonl").write_text(json.dumps(item) + "\n")
+        return {"acc": 1.0}
+
+    monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
+    root = tmp_path / "observation"
+    receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None, output=root)
+    evaluation.verify_observation_artifacts(receipt, root)
+    if tamper == "bytes":
+        (root / "no_noise" / "compact_no_noise.jsonl").write_text("{}\n")
+    elif tamper == "inventory":
+        (root / "no_noise" / "extra.json").write_text("{}")
+    elif tamper == "items":
+        receipt["conditions"][0]["items"][0]["tokens"] = [9]
+    else:
+        receipt["conditions"][0]["completed"] = 0
+    (root / "observation.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError):
+        evaluation.verify_observation_artifacts(receipt, root)
+
+
+@pytest.mark.parametrize("field", ["source", "config", "parent", "data", "comparison"])
+def test_evaluation_rejects_unbound_controls_before_load(monkeypatch, tmp_path, field):
+    from jscc.evaluation import evaluate_checkpoint
+    state, request, model, loaded = observation_fixture(monkeypatch, tmp_path)
+    if field == "comparison":
+        request[field]["architecture"] = "different"
+    else:
+        request[field] = "different"
+    with pytest.raises(ValueError, match="identity mismatch|comparison controls"):
+        evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
+    assert loaded == []
+    assert not (tmp_path / "observation").exists()

@@ -135,3 +135,24 @@ Use recorded source revisions when reproducing older recipe/protocol labels.
 CPU coverage includes residual checkpoint-key/initialization compatibility, one-affine-layer-per-side codec shapes and gradients, zero-block factorization, compression/expansion widths, unsupported-design rejection, and both task compositions. Functional-parent tests execute real tiny-model first/second stages and verify exact parent initialization plus fresh optimizer/scheduler state and terminal/source/data rejection gates. COCO trajectory tests cover actually visited prefixes, native cached/raw-logit capture and full-forward comparisons, receiver memory, finite values and partial evidence. Shared encoder S0 tests use a real tiny20-layer backbone for clean multi-site capture, six no-noise/AWGN online-replay gradient comparisons, manifest integrity and a hard child-process timeout.
 
 Integrated local validation on September29:558 tests passed, Ruff/Pyright passed, and both task configuration checks passed. This is CPU/software evidence. Full-weight GPU fit, cache/full BF16 numerical results, shared task quality and iteration speed remain separately measured experimental outcomes.
+
+## Connected encoder-final baseline CPU gate
+
+The versioned pipeline tests perform actual tiny CPU forward/backward updates,
+immutable checkpoint recovery, six-condition evaluation, strict durable records,
+completion reconciliation and report rendering for all four codec topologies.
+The full-cadence test executes a400-update combined arm, a200-update local prefix
+and both200-update continuations, preserving global optimizer/LR/exposure state.
+Prepared-command guards and fake-clock allocation tests cover failed writes,
+ambiguous optimizer outcomes, failed assessments, reserve/deadline exhaustion,
+parallel allocation sums and no automatic retry. Explicit comparison tests use
+actual emitted execution requests rather than metadata-only fixture success.
+
+Run `tests/test_baseline_pipeline.py`, `tests/test_baseline_cadence.py`,
+`tests/test_baseline_comparisons.py`, `tests/test_baseline_prepared.py` and
+`tests/test_campaign_failures.py` before the complete project checks above.
+CPU tests do not certify actual dataset memberships, pretrained BF16 numerics,
+GPU fit, external hard timer enforcement, measured remaining-work reserves or
+scientific quality. Those checks must bind the final source package on its
+authorized runtime. Existing ordinary COCO/HellaSwag and receiver-memory tests
+remain part of the full suite.

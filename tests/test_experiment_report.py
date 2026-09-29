@@ -271,3 +271,55 @@ def test_missing_condition_retains_correct_metric_family(task, purpose):
     missing = [row for row in rows if row["condition"] == 18]
     assert {row["metric"] for row in missing} == expected
     assert all(row["value"] is None and "missing condition" in row["reason"] for row in missing)
+
+
+def _with_execution_requests(left, right, manifest):
+    """Model the evaluator's full immutable request nested in records outputs."""
+    from jscc.experiment_records import observation_identity
+    for side, event in (("left", left), ("right", right)):
+        request = event["payload"]["request"]
+        execution = {**{key: value for key, value in request.items() if key not in ("details", "checkpoint")},
+                     "checkpoint_sha256": side + "-checkpoint", "config": side + "-config",
+                     "parent": side + "-parent", "learner_kind": "single_site_v2",
+                     "input_ids": [7, 8], "source_family_ids": ["family7", "family8"],
+                     "settings": {"batch_size": 1, "num_fewshot": 5},
+                     "noise": {"seed": 0, "namespace": "task-v1"},
+                     "data_settings": {"name": "fixture", "revision": "pinned"}}
+        request["details"]["outputs"] = "inline-execution-request-v1:" + json.dumps(execution)
+        event["payload"]["identity"] = observation_identity(request)
+        manifest["contrasts"][0][side + "_observation"] = event["payload"]["identity"]
+
+
+def test_explicit_contrast_compares_actual_inline_inputs_not_checkpoint_identity():
+    import copy
+    left, right, manifest = _explicit_fixture()
+    _with_execution_requests(left, right, manifest)
+    before = copy.deepcopy([left, right])
+    rows, blocked = report._explicit_comparisons([left, right], manifest)
+    assert not blocked and len(rows) == 12
+    assert [left, right] == before  # Identity-bearing requests remain untouched.
+    assert left["payload"]["identity"] != right["payload"]["identity"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("noise", {"seed": 2, "namespace": "task-v1"}),
+    ("settings", {"batch_size": 2, "num_fewshot": 5}),
+    ("input_ids", [8, 7]),
+    ("source_family_ids", ["changed", "family8"]),
+    ("data_settings", {"name": "fixture", "revision": "changed"}),
+    ("unknown_future_control", "conservatively-retained"),
+])
+def test_explicit_contrast_retains_all_inline_execution_controls(field, value):
+    from jscc.experiment_records import observation_identity
+    left, right, manifest = _explicit_fixture()
+    _with_execution_requests(left, right, manifest)
+    request = right["payload"]["request"]
+    prefix = "inline-execution-request-v1:"
+    execution = json.loads(request["details"]["outputs"].removeprefix(prefix))
+    execution[field] = value
+    request["details"]["outputs"] = prefix + json.dumps(execution)
+    right["payload"]["identity"] = observation_identity(request)
+    manifest["contrasts"][0]["right_observation"] = right["payload"]["identity"]
+    rows, blocked = report._explicit_comparisons([left, right], manifest)
+    assert not rows and len(blocked) == 1
+    assert "input/scoring/noise/site/exposure identity mismatch" in blocked[0]["reason"]
