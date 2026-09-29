@@ -122,3 +122,9 @@ within the preregistered tolerance. Old PAD-prefix results remain historical,
 and no native-v2 task-quality improvement has been measured. Existing training
 labels/context and five-shot evaluator prompts are not claimed to be identical.
 Use recorded source revisions when reproducing older recipe/protocol labels.
+
+## Codec simplification and next diagnostics
+
+CPU coverage includes residual checkpoint-key/initialization compatibility, one-affine-layer-per-side codec shapes and gradients, zero-block factorization, compression/expansion widths, unsupported-design rejection, and both task compositions. Functional-parent tests execute real tiny-model first/second stages and verify exact parent initialization plus fresh optimizer/scheduler state and terminal/source/data rejection gates. COCO trajectory tests cover actually visited prefixes, native cached/raw-logit capture and full-forward comparisons, receiver memory, finite values and partial evidence. Shared encoder S0 tests use a real tiny20-layer backbone for clean multi-site capture, six no-noise/AWGN online-replay gradient comparisons, manifest integrity and a hard child-process timeout.
+
+Integrated local validation on September29:558 tests passed, Ruff/Pyright passed, and both task configuration checks passed. This is CPU/software evidence. Full-weight GPU fit, cache/full BF16 numerical results, shared task quality and iteration speed remain separately measured experimental outcomes.
