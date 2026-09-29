@@ -1,4 +1,4 @@
-"""Explicit HellaSwag enc_l9 A/B/C/D preparation and bounded phase execution.
+"""Explicit HellaSwag enc_l9 A/B/C/D and optional E reset-control preparation and bounded phase execution.
 
 No command schedules jobs. ``check`` and ``plan`` read recipes only. Capture,
 local, and functional are separate opt-in commands with exact update budgets.
@@ -81,15 +81,35 @@ def check_plan(paths: dict[str, str]) -> dict:
             if left != right:
                 raise ValueError(f"A/B/C/D {key} recipes differ")
     declared = c["training"].get("phase_transfer")
-    if not isinstance(declared, dict) or declared.get("parent_recipe_sha256") != parent_recipe_sha256(b) or declared.get("parent_step") != b["training"]["max_steps"]:
+    if not isinstance(declared, dict) or declared.get("parent_kind", "local") != "local" or declared.get("parent_recipe_sha256") != parent_recipe_sha256(b) or declared.get("parent_step") != b["training"]["max_steps"]:
         raise ValueError("C declaration does not bind the planned B recipe and terminal step")
+    if ("E1" in configs) != ("E" in configs):
+        raise ValueError("reset control requires both E1 and E recipes")
+    if "E" in configs:
+        e1, e = configs["E1"], configs["E"]
+        for arm, reference in (("E1", b), ("E", c)):
+            candidate = copy.deepcopy(configs[arm])
+            reference = copy.deepcopy(reference)
+            for recipe in (candidate, reference):
+                recipe.pop("run", None)
+                recipe["codec"].pop("input_dim", None)
+                recipe["training"].pop("phase_transfer", None)
+            if candidate != reference:
+                raise ValueError(f"{arm} must match {'B first-stage' if arm == 'E1' else 'C phase-two'} recipe")
+        declaration = e["training"].get("phase_transfer", {})
+        if (declaration.get("parent_kind") != "functional"
+                or declaration.get("parent_recipe_sha256") != parent_recipe_sha256(e1)
+                or declaration.get("parent_step") != e1["training"]["max_steps"]):
+            raise ValueError("E declaration does not bind the planned functional E1 terminal recipe")
+        if e1["training"].get("phase_transfer"):
+            raise ValueError("E1 must start fresh")
     return {"arms": budgets, "comparison": "A and C match nominal updates; D matches C phase two",
             "cost_accounting": "C inherits B capture and local cost once"}
 
 
 def prepare_plan(base_path: str, output_dir: str | Path, *, total_updates: int,
                  local_updates: int, functional_updates: int,
-                 functional_lr: float | None = None) -> dict:
+                 functional_lr: float | None = None, include_reset_control: bool = False) -> dict:
     """Export a coherent four-arm plan; all budget numbers are caller supplied."""
     if min(total_updates, local_updates, functional_updates) < 1 or total_updates != local_updates + functional_updates:
         raise ValueError("require positive explicit U, L and F with U = L + F")
@@ -133,6 +153,18 @@ def prepare_plan(base_path: str, output_dir: str | Path, *, total_updates: int,
         path = output / f"{arm.lower()}.yaml"
         path.write_text(yaml.safe_dump(config, sort_keys=False))
         arm_paths[arm] = str(path)
+    if include_reset_control:
+        e1 = load_config(arm_paths["B"])
+        e1["run"]["name"] = "hellaswag-enc_l9-e1"
+        e = load_config(arm_paths["C"])
+        e["run"]["name"] = "hellaswag-enc_l9-e"
+        e["training"]["phase_transfer"] = {
+            "parent_kind": "functional", "parent_recipe_sha256": parent_recipe_sha256(e1),
+            "parent_step": local_updates}
+        for arm, config in (("E1", e1), ("E", e)):
+            path = output / f"{arm.lower()}.yaml"
+            path.write_text(yaml.safe_dump(config, sort_keys=False))
+            arm_paths[arm] = str(path)
     result = check_plan(arm_paths)
     result["recipes"] = arm_paths
     result["base_recipe"] = str(Path(base_path).resolve())
@@ -149,6 +181,8 @@ def main() -> None:
     plan = commands.add_parser("plan", help="read all four recipes without loading a model")
     for arm in "ABCD":
         plan.add_argument(f"--{arm.lower()}", required=True)
+    plan.add_argument("--e1", help="optional fresh functional first-stage recipe")
+    plan.add_argument("--e", help="optional functional reset-control second-stage recipe")
     prepare = commands.add_parser("prepare", help="export a fresh A/B/C/D plan without loading a model")
     prepare.add_argument("--base", required=True)
     prepare.add_argument("--output-dir", required=True)
@@ -156,6 +190,8 @@ def main() -> None:
     prepare.add_argument("--l", type=int, required=True, help="B local updates")
     prepare.add_argument("--f", type=int, required=True, help="C/D functional updates")
     prepare.add_argument("--functional-lr", type=float, help="shared fresh phase-two LR; defaults to base recipe")
+    prepare.add_argument("--include-reset-control", action="store_true",
+                         help="also export E1 functional L and E functional F with fresh phase-two state")
     capture = commands.add_parser("capture", help="capture full encoder sequences for B")
     capture.add_argument("--config", required=True)
     capture.add_argument("--cache-dir", required=True)
@@ -168,17 +204,21 @@ def main() -> None:
     local.add_argument("--max-seconds", type=float, required=True, help="soft wall cap including setup")
     functional = commands.add_parser("functional", help="execute one bounded A, C or D functional phase")
     functional.add_argument("--config", required=True)
-    functional.add_argument("--arm", choices=("A", "C", "D"), required=True)
-    functional.add_argument("--parent", help="terminal B checkpoint, required for C")
+    functional.add_argument("--arm", choices=("A", "C", "D", "E1", "E"), required=True)
+    functional.add_argument("--parent", help="terminal B checkpoint for C or functional E1 checkpoint for E")
+    functional.add_argument("--parent-sha256", help="required declared terminal checkpoint SHA-256 for E")
     functional.add_argument("--max-seconds", type=float, required=True, help="soft wall cap including setup")
     args = parser.parse_args()
     if args.command == "plan":
-        print(json.dumps(check_plan({arm: getattr(args, arm.lower()) for arm in "ABCD"}), indent=2))
+        paths = {arm: getattr(args, arm.lower()) for arm in "ABCD"}
+        paths.update({arm: getattr(args, arm.lower()) for arm in ("E1", "E") if getattr(args, arm.lower())})
+        print(json.dumps(check_plan(paths), indent=2))
         return
     if args.command == "prepare":
         print(json.dumps(prepare_plan(args.base, args.output_dir, total_updates=args.u,
                                       local_updates=args.l, functional_updates=args.f,
-                                      functional_lr=args.functional_lr), indent=2))
+                                      functional_lr=args.functional_lr,
+                                      include_reset_control=args.include_reset_control), indent=2))
         return
     if args.command != "check" and (not math.isfinite(args.max_seconds) or args.max_seconds <= 0):
         raise ValueError("--max-seconds must be finite and positive")
@@ -218,8 +258,23 @@ def main() -> None:
         from jscc.local_reconstruction import run_local
         print(run_local(config, args.cache_dir, deadline=deadline))
     else:
-        if (args.arm == "C") != bool(args.parent):
-            raise ValueError("C requires --parent; A and D must start fresh")
+        if (args.arm in ("C", "E")) != bool(args.parent):
+            raise ValueError("C/E require --parent; A, D and E1 must start fresh")
+        transfer = config["training"].get("phase_transfer")
+        if args.arm == "E":
+            if not isinstance(transfer, dict) or transfer.get("parent_kind") != "functional":
+                raise ValueError("E requires an explicit functional parent declaration")
+            if not args.parent_sha256:
+                raise ValueError("E requires --parent-sha256 to bind exact terminal weights")
+            if transfer.get("parent_checkpoint_sha256", args.parent_sha256) != args.parent_sha256:
+                raise ValueError("E CLI parent digest differs from recipe declaration")
+            transfer["parent_checkpoint_sha256"] = args.parent_sha256
+        elif args.parent_sha256:
+            raise ValueError("--parent-sha256 is only supported for E")
+        elif args.arm == "C" and isinstance(transfer, dict) and transfer.get("parent_kind", "local") != "local":
+            raise ValueError("C requires a local B parent")
+        elif args.arm in ("A", "D", "E1") and transfer:
+            raise ValueError("fresh functional arms cannot declare phase transfer")
         from jscc.training import train
         print(train(config, initial_checkpoint=args.parent, deadline=deadline))
 

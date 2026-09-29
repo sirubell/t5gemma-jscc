@@ -141,3 +141,7 @@ Configuration validation currently permits `flash_math` only for COCO because
 HellaSwag harness adapters call the backbone directly and do not yet scope this
 policy. An `auto` wrapper preserves any explicitly supplied outer SDPA context,
 which lets diagnostics force math-only execution without changing dispatch globally.
+
+### Explicit functional phase reset
+
+The HellaSwag two-stage planner can opt into `--include-reset-control`, adding fresh functional E1 and weight-only child E to A/B/C/D. E1 uses the local-stage recipe with functional execution; E uses C's phase-two recipe. The E command requires its exact terminal parent checkpoint and `--parent-sha256`. Functional-parent transfer validates complete native functional receipts, current source, saved recipe, data IDs, exact presentation boundary and checkpoint bytes. It creates fresh optimizer/scheduler/scaler state rather than resuming training. Historical B-local transfer stays separate and unchanged. CPU lifecycle tests establish these semantics; full-weight GPU acceptance is recorded separately.

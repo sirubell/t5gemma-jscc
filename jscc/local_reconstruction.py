@@ -38,9 +38,15 @@ def parent_recipe_sha256(config: dict) -> str:
 
 
 def validate_phase_transfer(checkpoint: str | Path, config: dict) -> dict:
-    """Approve only a declared B terminal state; never import optimizer state."""
+    """Approve a declared local or functional terminal state; never import optimizer state."""
     path = Path(checkpoint).resolve()
     state = torch.load(path, map_location="cpu", weights_only=True)
+    expected = config["training"].get("phase_transfer")
+    parent_kind = expected.get("parent_kind", "local") if isinstance(expected, dict) else "local"
+    if parent_kind == "functional":
+        return _validate_functional_parent(path, state, config, expected)
+    if parent_kind != "local":
+        raise ValueError("phase transfer parent_kind must be local or functional")
     record = state.get("phase_record")
     if not isinstance(record, dict) or record.get("phase") != "B-local-reconstruction":
         raise ValueError("phase transfer requires a completed B local checkpoint")
@@ -87,6 +93,84 @@ def validate_phase_transfer(checkpoint: str | Path, config: dict) -> dict:
                 "cache_identity_sha256": record["cache_identity_sha256"],
                 "parent_source_sha256": record["source_sha256"],
                 "phase_two_presentations": config["training"]["presentation_stream"],
+                "optimizer_state_loaded": False, "scheduler_state_loaded": False,
+                "scaler_state_loaded": False}
+    return {"state": state, "metadata": metadata}
+
+
+
+def _validate_functional_parent(path: Path, state: dict, config: dict, expected: dict) -> dict:
+    """Accept a real fresh functional terminal receipt, without relabeling it as B."""
+    from .config import load_config
+
+    parent = state["config"]
+    settings = parent["training"]
+    step = state.get("step")
+    if (state.get("phase_record") is not None or state.get("phase_transfer") is not None
+            or settings.get("phase_transfer")):
+        raise ValueError("functional parent must be a fresh functional first stage")
+    if (not isinstance(expected.get("parent_recipe_sha256"), str)
+            or type(expected.get("parent_step")) is not int
+            or expected["parent_recipe_sha256"] != parent_recipe_sha256(parent)
+            or expected["parent_step"] != step or step != settings["max_steps"]):
+        raise ValueError("declared functional parent recipe or terminal step differs from checkpoint")
+    if expected.get("cache_identity_sha256") is not None:
+        raise ValueError("functional parent cannot declare a local replay cache identity")
+    for key in ("task", "protocol", "seed", "model", "split", "channel", "data", "evaluation"):
+        if parent[key] != config[key]:
+            raise ValueError(f"phase-two {key} differs from declared functional recipe")
+    old_codec, new_codec = copy.deepcopy(parent["codec"]), copy.deepcopy(config["codec"])
+    old_codec.pop("input_dim", None)
+    new_codec.pop("input_dim", None)
+    if old_codec != new_codec:
+        raise ValueError("phase-two communication design differs from functional parent")
+    stream, next_stream = settings.get("presentation_stream"), config["training"].get("presentation_stream")
+    if not isinstance(stream, dict) or not isinstance(next_stream, dict):
+        raise ValueError("functional transfer requires exact presentation streams")
+    presentations = step * settings["batch_size"] * settings["gradient_accumulation"]
+    if (stream.get("policy") != "epoch-permutations-v1" or next_stream.get("policy") != stream["policy"]
+            or stream.get("start_presentation", 0) != 0
+            or stream.get("total_presentations") != presentations
+            or next_stream.get("start_presentation", 0) != presentations
+            or next_stream.get("seed") != stream.get("seed")):
+        raise ValueError("functional phase-two stream must follow the parent's exact presentations")
+    required = ("completion.json", "run.json", "config.yaml", "data_ids.json")
+    if any(not path.with_name(name).is_file() for name in required):
+        raise ValueError("functional parent lacks completion, source, recipe or data receipt")
+    completion = json.loads(path.with_name("completion.json").read_text())
+    run = json.loads(path.with_name("run.json").read_text())
+    digest = file_digest(path)
+    if expected.get("parent_checkpoint_sha256") != digest:
+        raise ValueError("declared functional parent checkpoint SHA-256 differs from weights")
+    final = completion.get("final_checkpoint", {})
+    if (completion.get("status") != "FULL_BUDGET_COMPLETED"
+            or completion.get("reason") != "max_steps"
+            or completion.get("source_verified") is not True
+            or completion.get("presentation_budget_verified") is not True
+            or completion.get("step") != step or completion.get("optimizer_updates") != step
+            or completion.get("presentations") != presentations
+            or final != {"file": path.name, "step": step, "sha256": digest}):
+        raise ValueError("functional parent is partial or terminal completion receipt does not match")
+    if run.get("training_source_sha256") != training_source_digest():
+        raise ValueError("functional parent source differs from current source")
+    if run.get("resume_from") is not None or run.get("phase_transfer") is not None:
+        raise ValueError("functional parent must start fresh")
+    saved_config = path.with_name("config.yaml")
+    if (run.get("resolved_config_sha256") != file_digest(saved_config)
+            or parent_recipe_sha256(load_config(saved_config)) != parent_recipe_sha256(parent)):
+        raise ValueError("functional parent resolved recipe receipt differs from checkpoint")
+    if json.loads(path.with_name("data_ids.json").read_text()) != state["data_ids"]:
+        raise ValueError("functional parent data IDs differ from receipt")
+    metadata = {"policy": "communication-weights-only-fresh-optimizer-scheduler-scaler-v1",
+                "parent_kind": "functional", "parent_checkpoint": str(path),
+                "parent_checkpoint_sha256": digest,
+                "parent_recipe_sha256": expected["parent_recipe_sha256"],
+                "parent_step": step, "parent_presentations": presentations,
+                "parent_source_sha256": run["training_source_sha256"],
+                "parent_data_ids_sha256": canonical_digest(state["data_ids"]),
+                "parent_completion_sha256": file_digest(path.with_name("completion.json")),
+                "parent_run_sha256": file_digest(path.with_name("run.json")),
+                "phase_two_presentations": next_stream,
                 "optimizer_state_loaded": False, "scheduler_state_loaded": False,
                 "scaler_state_loaded": False}
     return {"state": state, "metadata": metadata}
