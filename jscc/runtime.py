@@ -5,11 +5,12 @@ from pathlib import Path
 import json
 import os
 import random
-import subprocess
 import uuid
 
 import numpy as np
 import torch
+
+from .provenance import git_source_state
 
 
 def configure_training_determinism(settings):
@@ -56,17 +57,7 @@ def source_state():
     metadata is intentionally best-effort. A missing repository is recorded as
     unknown instead of being inferred from a directory name.
     """
-    root = Path(__file__).resolve().parents[1]
-    try:
-        revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL, text=True
-        ).strip()
-        dirty = bool(subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=root, stderr=subprocess.DEVNULL, text=True
-        ).strip())
-        return {"revision": revision, "dirty": dirty}
-    except (OSError, subprocess.CalledProcessError):
-        return {"revision": None, "dirty": None}
+    return git_source_state(Path(__file__).resolve().parents[1])
 
 
 def append_metrics(path, values):

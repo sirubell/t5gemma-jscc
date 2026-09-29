@@ -18,6 +18,13 @@ The suite uses CPU tensors and tiny real T5Gemma-2 modules without pretrained do
 
 Pyright and Ruff are pinned project dev dependencies in pyproject.toml and uv.lock. Use the project uv commands above rather than a machine's Mason/global executables. Third-party dynamic registry/dataset boundaries are explicitly typed; missing-import diagnostics are not globally disabled.
 
+Source-provenance tests use real temporary Git repositories to check clean/dirty
+checkouts, linked worktrees, symlinked roots, and inherited Git environment
+redirects for both runtime and study manifests. Source archives nested under a
+different repository record null revision/dirty values instead of attributing
+the enclosing checkout. These checks establish metadata attribution, not source
+archive integrity or acceptance of any deployed experiment.
+
 | Area | Coverage |
 |---|---|
 | COCO | Data separation, multimodal forward/backward/generation, image channel routing after vision scatter, receiver-only memory transmission |

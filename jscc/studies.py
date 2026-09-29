@@ -4,12 +4,12 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-import subprocess
 from typing import Any
 
 import yaml
 
 from .config import load_config, save_config, validate_config
+from .provenance import git_source_state
 
 
 @dataclass
@@ -97,13 +97,7 @@ def expand_study(path, task=None):
 
 
 def _source_state():
-    root = Path(__file__).resolve().parents[1]
-    try:
-        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL, text=True).strip()
-        dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip())
-        return {"revision": revision, "dirty": dirty}
-    except (OSError, subprocess.CalledProcessError):
-        return {"revision": None, "dirty": None}
+    return git_source_state(Path(__file__).resolve().parents[1])
 
 
 def export_study(plan, output):
