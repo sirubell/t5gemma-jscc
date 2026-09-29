@@ -80,6 +80,8 @@ class PromptBuilder:
                 "attention_mask": [mask[-cap:] for mask in inputs["attention_mask"]],
                 "label_ids": labels["input_ids"], "prompt_row_id": row_ids,
                 "demo_ids": [demos for _, demos in prompts],
+                "source_id": [doc.get("source_id") for doc in documents],
+                "demo_source_ids": [[self.documents[key].get("source_id") for key in demos] for _, demos in prompts],
                 "source_length": [len(tokens) for tokens in inputs["input_ids"]],
                 "input_length": [len(tokens) for tokens in token_ids],
                 "source_hash": [digest(doc) for doc in documents],
@@ -89,7 +91,7 @@ class PromptBuilder:
 
 
 def evidence(dataset):
-    columns = ("prompt_row_id", "demo_ids", "source_length", "input_length",
+    columns = ("prompt_row_id", "demo_ids", "source_id", "demo_source_ids", "source_length", "input_length",
                "source_hash", "text_hash", "input_hash", "target_hash")
     rows = list(dataset.select_columns(columns))
     lengths = [row["source_length"] for row in rows]

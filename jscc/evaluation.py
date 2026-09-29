@@ -30,39 +30,137 @@ def clean_caption(text):
     return text.split(". ")[0] + "." if ". " in text else text
 
 
-@torch.no_grad()
-def evaluate_coco(model, processor, data, settings, output, condition):
+def coco_generation_inputs(processor, data, batch, device, dtype):
+    """Native processor batching preserves variable image crops and pads text only."""
     prompt = caption_prompt(data.demo_captions)
-    parameter = next(model.base.parameters())
-    references, captions, records = {}, {}, []
-    for start in tqdm(range(0, len(data.report), settings["batch_size"]), desc=str(condition)):
-        batch = [data.report[i] for i in range(start, min(start + settings["batch_size"], len(data.report)))]
-        inputs = [processor(images=data.demo_images + [row["image"].convert("RGB")], text=prompt,
-                            return_tensors="pt") for row in batch]
-        kwargs = {key: torch.cat([item[key] for item in inputs], dim=0).to(parameter.device)
-                  for key in ("input_ids", "attention_mask", "pixel_values")}
-        kwargs["pixel_values"] = kwargs["pixel_values"].to(parameter.dtype)
-        generated = model.generate(**kwargs, max_new_tokens=settings["max_new_tokens"],
-                                   do_sample=False, num_beams=1)
-        for row, token_ids in zip(batch, generated):
-            image_id = int(row["file_name"].rsplit("_", 1)[1].split(".")[0])
-            raw = processor.tokenizer.decode(token_ids, skip_special_tokens=True)
-            caption = clean_caption(raw)
-            references[image_id] = [{"caption": caption.lower().strip()} for caption in row["answer"]]
-            captions[image_id] = [{"caption": caption.lower().strip()}]
-            # Seq2seq output begins with the decoder start token; do not count it as EOS.
-            emitted = token_ids.tolist()[1:]
-            eos = processor.tokenizer.eos_token_id in emitted
-            records.append({"image_id": image_id, "raw_caption": raw, "caption": caption,
-                            "token_ids": token_ids.tolist(), "eos": eos, "empty": not bool(caption),
-                            "truncated": not eos and len(emitted) >= settings["max_new_tokens"]})
+    inputs = processor(
+        images=[data.demo_images + [row["image"].convert("RGB")] for row in batch],
+        text=[prompt] * len(batch), return_tensors="pt", padding=True,
+        truncation=False,
+    )
+    # Keep the original production input contract; processor owns image crop
+    # expansion and its correspondence to the expanded image tokens.
+    return {key: inputs[key].to(device=device, dtype=dtype if key == "pixel_values" else None)
+            for key in ("input_ids", "attention_mask", "pixel_values")}
+
+
+def coco_payload_records(events, emitted_lengths, stack):
+    """Separate exact execution counts from EOS-aware useful decoder payload."""
+    records: list[dict[str, Any]] = [{"allocated": {"hidden": 0, "memory": 0},
+                "mask_valid": {"hidden": 0, "memory": 0},
+                "generation_valid": {"hidden": 0, "memory": 0}}
+               for _ in emitted_lengths]
+    decoder_step = 0
+    semantic_supported = True
+    for event in events:
+        if len(event["allocated"]) != len(records):
+            raise ValueError("Payload observer batch differs from generated image batch")
+        decoder_hidden = event["stream"] == "hidden" and stack == "dec"
+        if decoder_hidden and event["shape"][1] != 1:
+            semantic_supported = False
+        for index, record in enumerate(records):
+            stream = event["stream"]
+            record["allocated"][stream] += event["allocated"][index]
+            record["mask_valid"][stream] += event["mask_valid"][index]
+            if not decoder_hidden or decoder_step < emitted_lengths[index]:
+                record["generation_valid"][stream] += event["mask_valid"][index]
+        if decoder_hidden:
+            decoder_step += 1
+    for record in records:
+        record["policy"] = "per-row-observed-latents-v1"
+        record["generation_valid_policy"] = "one-token-cached-decoder-through-first-eos-v1"
+        if not semantic_supported:
+            record["generation_valid"] = None
+            record["generation_valid_policy"] = "unavailable-non-single-token-decoder-events"
+    return records
+
+
+def score_coco_captions(references, captions):
+    """Return CIDEr plus frozen PTB tokens, allowing recomputation without Java."""
     from pycocoevalcap.cider.cider import Cider
     from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
-    tokenizer = PTBTokenizer()  # Bundled COCO tokenizer requires Java.
-    score, per_image = Cider().compute_score(tokenizer.tokenize(references), tokenizer.tokenize(captions))
+    tokenizer = PTBTokenizer()
+    reference_tokens, caption_tokens = tokenizer.tokenize(references), tokenizer.tokenize(captions)
+    score, per_image = Cider().compute_score(reference_tokens, caption_tokens)
+    return score, per_image, reference_tokens, caption_tokens
+
+
+@torch.no_grad()
+def evaluate_coco(model, processor, data, settings, output, condition, data_settings=None):
+    from importlib.metadata import version
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    parameter = next(model.base.parameters())
+    references, captions, records, batch_records = {}, {}, [], []
+    for start in tqdm(range(0, len(data.report), settings["batch_size"]), desc=str(condition)):
+        batch = [data.report[i] for i in range(start, min(start + settings["batch_size"], len(data.report)))]
+        kwargs = coco_generation_inputs(processor, data, batch, parameter.device, parameter.dtype)
+        with model.observe_payload() as events:
+            generated = model.generate(**kwargs, max_new_tokens=settings["max_new_tokens"],
+                                       do_sample=False, num_beams=1, use_cache=True)
+        batch_ids, emitted_lengths = [], []
+        for index, (row, token_ids) in enumerate(zip(batch, generated)):
+            image_id = int(row["file_name"].rsplit("_", 1)[1].split(".")[0])
+            if image_id in references:
+                raise ValueError(f"Duplicate COCO report image ID: {image_id}")
+            batch_ids.append(image_id)
+            raw = processor.tokenizer.decode(token_ids, skip_special_tokens=True)
+            caption = clean_caption(raw)
+            reference_texts = list(row["answer"])
+            references[image_id] = [{"caption": text.lower().strip()} for text in reference_texts]
+            captions[image_id] = [{"caption": caption.lower().strip()}]
+            # Seq2seq output starts with decoder-start; EOS and padded tail are
+            # separated from generated content for latency and payload evidence.
+            emitted = token_ids.tolist()[1:]
+            eos_id = processor.tokenizer.eos_token_id
+            eos = eos_id in emitted
+            emitted_length = emitted.index(eos_id) + 1 if eos else len(emitted)
+            emitted_lengths.append(emitted_length)
+            reference_lengths = [len(processor.tokenizer(text, add_special_tokens=True)["input_ids"])
+                                 for text in reference_texts]
+            records.append({"image_id": image_id, "file_name": row["file_name"],
+                            "references": reference_texts, "reference_token_lengths": reference_lengths,
+                            "raw_caption": raw, "caption": caption, "batch_index": len(batch_records),
+                            "source_valid_tokens": int(kwargs["attention_mask"][index].sum().item()),
+                            "source_allocated_tokens": int(kwargs["input_ids"].shape[1]),
+                            "source_truncation": False,
+                            "token_ids": token_ids.tolist(), "generated_tokens_through_eos": emitted_length,
+                            "eos": eos, "empty": not bool(caption),
+                            "truncated": not eos and emitted_length >= settings["max_new_tokens"]})
+        payloads = coco_payload_records(events, emitted_lengths, model.split["stack"])
+        for record, payload in zip(records[-len(batch):], payloads):
+            record["payload"] = payload
+        batch_records.append({"image_ids": batch_ids, "payload_events": events,
+                              "input_shapes": {key: list(value.shape) for key, value in kwargs.items()}})
+    if not records:
+        raise ValueError("COCO report set is empty")
+    score, per_image, reference_tokens, caption_tokens = score_coco_captions(references, captions)
     for record, value in zip(records, per_image):
-        append_metrics(output / f"captions_{condition}.jsonl", {**record, "cider": float(value)})
+        image_id = record["image_id"]
+        append_metrics(output / f"captions_{condition}.jsonl", {
+            **record, "ptb_references": reference_tokens[image_id],
+            "ptb_caption": caption_tokens[image_id], "cider": float(value)})
+    identity = {"processor_class": type(processor).__name__,
+                "tokenizer_class": type(processor.tokenizer).__name__,
+                "tokenizer_name_or_path": getattr(processor.tokenizer, "name_or_path", None),
+                "model_name_or_path": getattr(model.base.config, "_name_or_path", None),
+                "model_commit_hash": getattr(model.base.config, "_commit_hash", None),
+                "packages": {name: version(name) for name in ("transformers", "torch", "pycocoevalcap")},
+                "scorer": "pycocoevalcap.Cider(n=4,sigma=6.0); PTBTokenizer",
+                "caption_policy": "first-line-first-period-space; lowercase-strip-before-PTB",
+                "data_settings": data_settings, "data_ids": data.ids,
+                "prompt": caption_prompt(data.demo_captions), "demo_captions": data.demo_captions,
+                "generation": {"max_new_tokens": settings["max_new_tokens"], "do_sample": False,
+                               "num_beams": 1, "use_cache": True}, "batches": batch_records}
+    (output / f"coco_evidence_{condition}.json").write_text(json.dumps(identity, indent=2) + "\n")
+    generation_valid = (None if any(row["payload"]["generation_valid"] is None for row in records)
+                        else {stream: sum(row["payload"]["generation_valid"][stream] for row in records)
+                              for stream in ("hidden", "memory")})
     return {"cider": float(score), "num_samples": len(records),
+            "channel_uses_generation_valid": generation_valid,
+            "generation_valid_policy": "per-row-observed-cached-decoder-through-first-eos-v1",
+            "mask_valid_limitation": "Execution mask counts can include already-finished generation rows",
+            "evidence": f"coco_evidence_{condition}.json",
             **{f"{key}_rate": sum(record[key] for record in records) / len(records)
                for key in ("eos", "empty", "truncated")}}
 
@@ -106,6 +204,8 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
         from lm_eval.api.task import ConfigurableTask
         task = ConfigurableTask(config=task_config)
         fewshots = record_fewshots(task)
+    if compact and isinstance(settings.get("num_samples"), int):
+        adapter.forward_request_limit = 4 * settings["num_samples"]
     harness_options: dict[str, Any] = {"bootstrap_iters": 0} if compact else {}
     result = simple_evaluate(
         model=adapter, tasks=[task], task_manager=task_manager, log_samples=True, num_fewshot=settings["num_fewshot"],
@@ -137,7 +237,8 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
                         stream.write(json.dumps({"task": task, **sample},
                                                 default=handle_non_serializable) + "\n")
     metrics = result["results"]["hellaswag"]
-    return {**evidence, "acc": metrics["acc,none"], "acc_norm": metrics["acc_norm,none"],
+    return {**evidence, **({"candidate_forward_requests": adapter.forward_request_count} if compact else {}),
+            "acc": metrics["acc,none"], "acc_norm": metrics["acc_norm,none"],
             "num_fewshot": settings["num_fewshot"],
             "num_samples": result.get("n-samples", {}).get("hellaswag", {})}
 
@@ -168,7 +269,7 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     processor, model = build_model(config)
-    if settings.get("scoring_policy") == "fp32-v1":
+    if config["task"] == "coco" or settings.get("scoring_policy") == "fp32-v1":
         prepare_trainable_parameters(model)
     if conditions != ["vanilla"]:
         model.load_communication_state(state)
@@ -199,7 +300,7 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
                        if "noise_seed" in settings else nullcontext())
         with isolated_rng(config["seed"]), noise_scope, model.transmission(snr, bypass=condition == "vanilla"):
             if config["task"] == "coco":
-                metrics = evaluate_coco(model, processor, data, settings, output, condition)
+                metrics = evaluate_coco(model, processor, data, settings, output, condition, config["data"])
             else:
                 metrics = evaluate_hellaswag(model, processor, settings, output, condition, config["data"])
         allocated = dict(getattr(model, "channel_uses_allocated", model.channel_uses))

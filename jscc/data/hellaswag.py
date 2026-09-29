@@ -76,6 +76,16 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
                 assert builder is not None
                 return builder.tokenize(batch, [indices[position] for position in positions], tokenizer)
             dataset = rows.map(tokenize_prompts, batched=True, with_indices=True, remove_columns=rows.column_names)
+            # Older token caches have the identical token policy but predate source metadata.
+            # Join original rows by the already-fixed row order rather than retokenizing.
+            if len(dataset) != len(rows):
+                raise ValueError("Prompt cache row count differs from source selection")
+            if "source_id" not in dataset.column_names:
+                dataset = dataset.add_column("source_id", list(rows["source_id"]))
+            if "demo_source_ids" not in dataset.column_names:
+                dataset = dataset.add_column("demo_source_ids", [
+                    [builder.documents[key].get("source_id") for key in demos]
+                    for demos in dataset["demo_ids"]])
             assert prompt_evidence is not None
             prompt_evidence["train" if training else "selection"] = evidence(dataset)
         stream = config["training"].get("presentation_stream") if training else None

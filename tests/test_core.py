@@ -103,7 +103,13 @@ def test_task_recipes_share_a_film_off_model(directory, suffix):
     coco = load_config(root / directory / f"coco{suffix}.yaml")
     hellaswag = load_config(root / directory / f"hellaswag{suffix}.yaml")
     baseline = load_config(root / "tasks" / "coco.yaml")
-    assert coco["model"] == hellaswag["model"]
+    assert coco["model"]["sdpa_backend_policy"] == "flash_math"
+    assert hellaswag["model"].get("sdpa_backend_policy", "auto") == "auto"
+    # Only task-specific attention dispatch may differ; model identity and
+    # every other execution setting must remain shared.
+    assert {k: v for k, v in coco["model"].items() if k != "sdpa_backend_policy"} == {
+        k: v for k, v in hellaswag["model"].items() if k != "sdpa_backend_policy"
+    }
     for section in ("split", "codec", "channel"):
         assert coco[section] == hellaswag[section] == baseline[section]
     assert coco["codec"]["snr_film"] is False

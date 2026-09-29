@@ -20,6 +20,9 @@ def main():
         import yaml
         print(yaml.safe_dump(config, sort_keys=False))
         return
+    if args.run_path_file:
+        from pathlib import Path
+        Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
     from jscc.training import train
     run = train(config, resume=args.resume)
     if args.run_path_file:

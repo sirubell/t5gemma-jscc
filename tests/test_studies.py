@@ -27,7 +27,12 @@ def test_supplied_studies_expand_for_both_tasks(name, count):
     hs = [run for run in plan.runs if run.task == "hellaswag"]
     for left, right in zip(coco, hs):
         assert (left.experiment, left.seed) == (right.experiment, right.seed)
-        for section in ("model", "split", "codec", "channel"):
+        assert left.config["model"]["sdpa_backend_policy"] == "flash_math"
+        assert right.config["model"].get("sdpa_backend_policy", "auto") == "auto"
+        assert {k: v for k, v in left.config["model"].items() if k != "sdpa_backend_policy"} == {
+            k: v for k, v in right.config["model"].items() if k != "sdpa_backend_policy"
+        }
+        for section in ("split", "codec", "channel"):
             assert left.config[section] == right.config[section]
 
 

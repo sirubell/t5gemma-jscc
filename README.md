@@ -28,6 +28,8 @@ uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
 
 The check commands parse and print the configuration without loading weights or data. Model weights and datasets are downloaded on first use when online, then reused from the local cache. See [running on other machines](docs/running.md) for environment setup and Slurm.
 
+The primary workflow is one task configuration per training run: `train.py` creates a run under the configured output directory, and `evaluate.py --run` evaluates that specific run. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
+
 ## Train an experiment
 
 The configuration files have distinct responsibilities:
@@ -53,7 +55,7 @@ Edit model.yaml to change the common design for both tasks. For a separate model
 
 CPU smoke files use `runtime: {device: cpu, dtype: float32}` to override only execution settings. After loading, the run receives a complete resolved configuration with no dependency on the source YAML files. Legacy flat configurations remain readable.
 
-## Plan multiple experiments
+## Optionally plan multiple experiments
 
 Studies list task recipes, seeds and named model overrides. Both tasks use the same variation list. Previewing is the default and does not load a model or submit jobs:
 
@@ -63,7 +65,7 @@ uv run --locked python study.py --config configs/studies/splits.yaml --task coco
 uv run --locked python study.py --config configs/studies/bottleneck.yaml
 ```
 
-Use `--output runs/studies/NEW_NAME` to write complete YAMLs and a train/eval index manifest. Export uses a new directory and never starts training. Prepared plans can be moved to the execution host before use. See [config layout](configs/README.md) and [study execution](docs/studies.md) for counts, paths and separate Slurm train/eval arrays.
+Only when a multi-run plan is needed, use `--output runs/studies/NEW_NAME` to write complete YAMLs and a train/eval index manifest. This `runs/studies/` layer is a chosen export location, not a prerequisite for `train.py` or `evaluate.py`. Export uses a new directory and never starts training. Prepared plans can be moved to the execution host before use. See [config layout](configs/README.md) and [study execution](docs/studies.md) for counts, paths and separate Slurm train/eval arrays.
 
 | Setting | Meaning |
 |---|---|
@@ -93,7 +95,7 @@ Each training invocation prints its new run directory:
 runs/<time>-<name>-<id>/
   config.yaml          # Resolved experiment configuration
   data_ids.json        # Selected dataset rows/IDs
-  run.json                 # Source revision/dirty state, runtime and budget metadata
+  run.json             # Runtime and budget metadata
   metrics.jsonl        # Training/validation metrics and logged timing/memory
   best.pt              # Best checkpoint under the configured improvement rule
   last.pt              # Most recent validation checkpoint
@@ -175,9 +177,11 @@ Earlier full-weight checks completed HellaSwag training/evaluation and COCO smal
 - [Migration decisions and compatibility](docs/migration.md)
 - [Custom wireless channel integration](docs/channel-integration.md)
 - [Environment template](docs/environment.example.md)
+- [Script catalog and historical reproduction tools](scripts/README.md)
+- [Portable main-weight regression fixtures](tests/fixtures/main_weight_screen/README.md)
 
-Git tracks source, YAML, uv.lock and portable documentation. Personal machine/account settings and experiment paths belong in ignored `docs/local/`; credentials stay in their existing SSH or authentication tools. Model weights, datasets, run outputs and virtual environments are also ignored.
+Source, tests, portable regression fixtures, YAML, uv.lock and portable documentation belong in Git. `docs/local/` is ignored local working state; historical research evidence and source snapshots live in the separate MTK archive outside this project. Personal machine/account settings and experiment paths belong in `docs/local/`; credentials stay in their existing SSH or authentication tools. Model weights, datasets, run outputs and virtual environments are also ignored.
 
 A collaborator can clone the repository and use the standard commands above. Machine-specific setup is optional until remote execution is needed; copy the environment template locally and fill in your own details. Channel collaboration has its own guide and does not change the project's normal research workflow.
 
-Record the source revision before an experiment. Currently run.json does not automatically record the Git commit. Use branches and pull requests for shared changes; publishing a GitHub remote is a separate step from local version control.
+`run.json` records the Git revision and dirty state when Git information is available. Bind uncommitted file contents separately when exact source reproduction is required; the commit and dirty flag alone do not identify those bytes. Use branches and pull requests for shared changes; publishing a GitHub remote is a separate step from local version control.

@@ -1,5 +1,6 @@
 """Compose one model design with task settings; save a complete resolved config."""
 import copy
+import math
 from pathlib import Path
 
 import yaml
@@ -45,8 +46,8 @@ def load_config(path):
             raise ValueError("Put model/split/codec/channel settings in model_config, not in the task YAML")
         config.update(design)
     runtime = config.pop("runtime", {})
-    if set(runtime) - {"device", "dtype"}:
-        raise ValueError("runtime overrides are limited to device and dtype")
+    if set(runtime) - {"device", "dtype", "sdpa_backend_policy"}:
+        raise ValueError("runtime overrides are limited to device, dtype and sdpa_backend_policy")
     if runtime:
         config["model"].update(runtime)
     for section, key in (("run", "output_dir"),):
@@ -57,11 +58,27 @@ def load_config(path):
     return config
 
 
+def validate_sdpa_backend_policy(policy):
+    if policy not in ("auto", "flash_math"):
+        raise ValueError("model.sdpa_backend_policy must be auto or flash_math")
+
+
 def validate_config(config):
     """Checks shared by file loading and study expansion."""
     if config["task"] not in ("coco", "hellaswag"):
         raise ValueError("task must be coco or hellaswag")
+    validate_sdpa_backend_policy(config.get("model", {}).get("sdpa_backend_policy", "auto"))
+    if config["task"] != "coco" and config.get("model", {}).get("sdpa_backend_policy", "auto") != "auto":
+        raise ValueError("flash_math is currently supported only for task=coco")
     training = config["training"]
+    if "loss_weights" in training:
+        weights = training["loss_weights"]
+        if not isinstance(weights, dict) or set(weights) != {"kl", "hidden", "memory"}:
+            raise ValueError("training.loss_weights requires exactly kl, hidden, memory")
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in weights.values()):
+            raise ValueError("loss_weights must be finite nonnegative numbers")
+        # Explicit weights take precedence; legacy values are retained for provenance.
+
     for key in ("max_steps", "batch_size", "gradient_accumulation", "eval_every"):
         if training[key] < 1:
             raise ValueError(f"training.{key} must be positive")

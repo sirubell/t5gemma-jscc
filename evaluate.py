@@ -20,6 +20,8 @@ def main():
             parser.error("evaluation output link already exists")
     if args.expected_step is not None and not args.checkpoint:
         parser.error("expected-step requires an explicit checkpoint")
+    if args.output_path_file:
+        Path(args.output_path_file).parent.mkdir(parents=True, exist_ok=True)
     from jscc.evaluation import evaluate
     output = evaluate(args.run, args.checkpoint, args.config, expected_step=args.expected_step)
     if args.output_path_file:

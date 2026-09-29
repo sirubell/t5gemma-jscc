@@ -78,3 +78,14 @@ def test_ambiguous_actual_lengths_fail_instead_of_guessing_from_pad():
                                  (("x", "b"), [2, 4], [4, 0])], 16)
     with pytest.raises(ValueError, match='ambiguous'):
         index.mask(torch.tensor([[2, 4]]), torch.ones(1, 2), torch.tensor([[4, 0]]))
+
+
+def test_candidate_budget_prevents_extra_forward():
+    tokenizer, model = fixture_model()
+    adapter = make_adapter(model, tokenizer)
+    adapter.forward_request_limit = 1
+    requests = [(("c1", "a"), [2, 4, 1], [4, 1]),
+                (("c2", "b"), [2, 4, 1], [1])]
+    with pytest.raises(ValueError, match='candidate request budget'):
+        adapter._loglikelihood_tokens(requests, disable_tqdm=True)
+    assert adapter.forward_request_count == 0

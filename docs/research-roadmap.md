@@ -1,6 +1,6 @@
-# Research synthesis and open questions
+# Research scope and open questions
 
-The immediate objective is a presentation-led experiment and results catalog, not a paper narrative yet. Start with experiments actually reported, trace their figures to raw artifacts and configurations, and evaluate their scientific value before deciding what to recover or rerun. The main research question is how split location changes task quality and communication cost across COCO and HellaSwag. There is no hard deadline or request to launch a full sweep.
+The September report and project cleanup are complete. This document records research questions and possible comparisons, not an approved experiment plan or report deadline. The next direction is pending discussion with the owner. The main research question remains how split location changes task quality and communication cost across COCO and HellaSwag. New model runs require an agreed question, protocol and budget.
 
 ## Current working baseline
 
@@ -8,7 +8,7 @@ The [shared baseline](architecture.md#shared-baseline) lives in configs/model.ya
 
 An initial architecture can be a research prototype without being an optimized design. Rigor comes from a clear system model, justified comparisons, controlled protocols and conclusions bounded by the evidence. Exhaustively testing every hyperparameter is not required.
 
-## Organize existing evidence first
+## Interpret existing evidence
 
 For each useful figure or experiment, record:
 
@@ -22,9 +22,9 @@ For each useful figure or experiment, record:
 | Comparability | Which other runs used the same relevant conditions? |
 | Evidence gap | Can the claim be supported now, is reevaluation enough, or is new training necessary? |
 
-Keep personal artifact paths and the report-to-result map in ignored docs/local/research/. Classify results as usable comparisons, diagnostic observations, or unresolved evidence. Historical defects qualify conclusions; they do not justify silently reinterpreting old scores. Missing artifacts may warrant retraining when a reported comparison is important. Early Llama work is a separate stage, not a direct T5Gemma baseline. Keep one active experiment project; archive report-linked evidence before retiring historical project directories.
+Keep personal artifact paths and the report-to-result map in ignored `docs/local/research/`; the completed historical evidence and source snapshots are in the MTK archive outside this Git project. Classify results as usable comparisons, diagnostic observations, or unresolved evidence. Historical defects qualify conclusions; they do not justify silently reinterpreting old scores. Missing artifacts may warrant retraining when a comparison matters and the owner agrees to its scope. Early Llama work is a separate stage, not a direct T5Gemma baseline.
 
-## Paper outline
+## Possible paper outline
 
 1. Problem and motivation: task performance under constrained communication resources.
 2. System model: model split, transmitted symbols, channel assumptions and available SNR information.
@@ -33,7 +33,7 @@ Keep personal artifact paths and the report-to-result map in ignored docs/local/
 5. Results: comparisons supported by consistent protocols, including negative or inconclusive findings.
 6. Limitations and open questions: missing controls, modeling assumptions and untested settings.
 
-Write the outline and attach existing evidence before deciding which missing experiments are worth running.
+This outline is a possible way to present supported findings; it does not set a writing or experiment deadline.
 
 ## Questions for later experiments
 
@@ -58,6 +58,6 @@ FiLM and SNR-adaptive JSCC are established ideas; adding conditioning alone does
 - [FiLM: Visual Reasoning with a General Conditioning Layer](https://arxiv.org/abs/1709.07871)
 - [SNR-adaptive deep joint source-channel coding for wireless image transmission](https://arxiv.org/abs/2102.00202)
 
-## Collaboration priority
+## Future design discussion
 
-Keep the shared codec and FiLM-off baseline stable while defining the physical channel's tensor, power, SNR and state conventions. Introduce FiLM or other architectural variations as separate, explicitly named experiments after the integration baseline is understood. Choose the next research direction from the evidence inventory rather than from an assumption that another module must improve the result.
+The shared codec and FiLM-off baseline provide a reference for comparisons. Physical-channel tensor, power, SNR and state conventions, FiLM, and other architectural variations remain candidate topics. Select any new experiment only after comparing the relevant historical source, configuration, data, prompt, transmission and evaluation semantics with the owner; no candidate here is approved for execution.

@@ -57,6 +57,11 @@ def test_wrapper_vanilla_options(tmp_path):
 def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
     import hashlib
     from jscc.outer_ln_gate import check
+    from jscc.identity_compatibility import identity_digest
+    identity = {"task_config": {"hellaswag": {
+        "fewshot_config": {"process_docs": "<function process_docs at 0x1234>"},
+        "process_docs": "def process_docs(dataset):\n    return dataset\n"}}}
+    identity_hash = identity_digest(identity)
     (tmp_path/'links').mkdir()
     entries = []
     pairs = []
@@ -78,9 +83,11 @@ def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
             ev = run/'eval'
             ev.mkdir()
             conditions = [{'condition':c,'num_samples':{'effective':10042},'compact_num_samples':10042,
-                           'finite_scores':True,'acc':0.,'acc_norm':0.,'evaluation_identity':'same',
+                           'finite_scores':True,'acc':0.,'acc_norm':0.,'evaluation_identity':identity_hash,
                            'channel_uses_valid':{'hidden':10,'memory':10 if route.startswith('dec') else 0}}
                           for c in ['no_noise',-6,6,18]]
+            for condition in conditions:
+                (ev / f"identity_{condition['condition']}.json").write_text(json.dumps(identity))
             (ev/'results.json').write_text(json.dumps({'optimizer_step':5000,'checkpoint':str(ckpt),'conditions':conditions}))
             (tmp_path/'links'/f'{name}.txt').write_text(str(run))
             (tmp_path/'links'/f'{name}-eval.txt').write_text(str(ev))
@@ -88,13 +95,19 @@ def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
         pairs.append({'reference':'ref_'+route,'candidate':'outer_none_'+route,'pair_id':route})
     vanilla = tmp_path/'vanilla'
     vanilla.mkdir()
-    (vanilla/'results.json').write_text(json.dumps({'conditions':[{'condition':'vanilla','evaluation_identity':'same',
+    (vanilla/'results.json').write_text(json.dumps({'conditions':[{'condition':'vanilla','evaluation_identity':identity_hash,
         'compact_num_samples':10042,'finite_scores':True,'channel_uses_valid':{'hidden':0,'memory':0}}]}))
+    (vanilla/'identity_vanilla.json').write_text(json.dumps(identity))
     (tmp_path/'links/vanilla.txt').write_text(str(vanilla))
     manifest = tmp_path/'manifest.json'
     manifest.write_text(json.dumps({'runs':entries,'pairs':pairs,'plan_hash':'plan'}))
     check(manifest,tmp_path/'gate.json')  # low scores do not block a healthy result
     assert json.loads((tmp_path/'gate.json').read_text())['status'].startswith('PASS')
+    identity_file = tmp_path/'ref_enc_fn/eval/identity_no_noise.json'
+    identity_file.write_text(json.dumps({'tampered': True}))
+    with pytest.raises(ValueError, match='identity hash mismatch'):
+        check(manifest, tmp_path/'tampered-gate.json')
+    identity_file.write_text(json.dumps(identity))
     bad = tmp_path/'ref_enc_fn/completion.json'
     value = json.loads(bad.read_text())
     value['step'] = 4999

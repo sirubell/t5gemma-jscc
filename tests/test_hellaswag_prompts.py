@@ -115,3 +115,31 @@ def test_paired_presentation_stream_unchanged(monkeypatch):
         orders.append([row_id for batch in loaded.train for row_id in batch["row_ids"].tolist()])
     assert orders[0] == orders[1]
     assert len(orders[0]) == 12
+
+
+def test_source_metadata_does_not_change_prompt_tokens():
+    raw, ids, config = fixture()
+    builder = PromptBuilder(raw['train'], ids, config['data']['prompt_policy'])
+    docs = raw['train'].select([0, 1]).to_dict()
+    encoded = builder.tokenize(docs, [0, 1], Tokenizer())
+    assert encoded['source_id'] == ['0', '0']
+    for source, demos in zip(encoded['source_id'], encoded['demo_source_ids']):
+        assert len(demos) == 5 and source not in demos
+
+
+def test_old_token_cache_gets_source_metadata_without_token_changes(monkeypatch):
+    raw, ids, config = fixture()
+    original_map = Dataset.map
+
+    def old_cache(self, *args, **kwargs):
+        mapped = original_map(self, *args, **kwargs)
+        return mapped.remove_columns(['source_id', 'demo_source_ids'])
+
+    monkeypatch.setattr('datasets.load_dataset', lambda *a, **k: raw)
+    monkeypatch.setattr(Dataset, 'map', old_cache)
+    data = load_data(config, Tokenizer(), saved_ids=ids)
+    evidence = getattr(data, 'prompt_evidence')
+    for section in ['train', 'selection']:
+        for row in evidence[section]['rows']:
+            assert row['source_id'] == str(row['prompt_row_id'] // 2)
+            assert row['source_id'] not in row['demo_source_ids']

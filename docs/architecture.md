@@ -55,6 +55,9 @@ Each microbatch runs a no-grad teacher with codec/channel bypassed, then a stude
 
 Loss is kl_weight × KL(teacher || student) + mse_weight × nMSE:
 
+An optional `training.loss_weights: {kl: 1.0, hidden: 0.05, memory: 0.05}` explicitly weights the three components. When present, this mapping takes precedence over legacy `kl_weight` and `mse_weight`; the reconstruction terms are not averaged again. It requires all three finite nonnegative coefficients. For decoder runs with both streams, `{kl: 1.0, hidden: 0.05, memory: 0.05}` matches the legacy `kl_weight: 1.0, mse_weight: 0.1` objective. The same weights apply to training, selection and component logging. Compare unweighted components and task scores across weight variants, rather than ranking different weighted totals. Defaults are unchanged.
+
+
 - KL uses positions whose labels are not −100, computes probabilities in float32 and applies the configured temperature.
 - In the legacy helper call without a mask, nMSE divides global hidden-state reconstruction MSE by the original representation's global mean squared value. The corrected baseline passes a stream-specific valid-position mask and computes a per-sample nMSE, excluding padding before averaging samples.
 - With receiver memory coding, corrected-baseline nMSE is the equal mean of the hidden-stream and memory-stream per-sample masked nMSE means, keeping the configured reconstruction weight unchanged. KL gradients train both codecs.
@@ -102,3 +105,27 @@ meaning. New HellaSwag result metadata identifies `actual-harness-continuation-l
 Allocated coordinates, valid coordinates and deduplicated physical traffic are
 separate quantities. CPU tiny-model tests cover real harness mixed-length batches;
 full-weight target-hardware acceptance remains separately recorded.
+
+### Scoped SDPA backend policy
+
+`model.sdpa_backend_policy` defaults to `auto`, preserving existing recipes.
+The opt-in `flash_math` policy allows PyTorch Flash Attention and math SDPA,
+excluding efficient and cuDNN SDPA within `SplitModel.forward()` and
+`SplitModel.generate()` (including generation's encoder pass). PyTorch selects
+an eligible backend; this setting does not guarantee Flash Attention is used.
+The context restores the caller's backend flags on exit, including exceptions.
+Direct calls to `model.base` do not inherit it: diagnostics or adapters using
+those paths must explicitly enter `with model.attention_context():`.
+
+This policy was introduced after a long-prefix COCO diagnostic on WS RTX 5090
+with PyTorch 2.10 CUDA 12.8 isolated an efficient-SDPA discrepancy. It is not a
+claim that H200 or other framework versions exhibit the same issue. New target
+hardware still requires correctness and throughput preflight. This policy does
+not change model precision, masks, power normalization or codec routing.
+
+Current COCO task and smoke recipes opt in via `runtime.sdpa_backend_policy`,
+leaving the shared model recipe and historical HellaSwag settings unchanged.
+Configuration validation currently permits `flash_math` only for COCO because
+HellaSwag harness adapters call the backbone directly and do not yet scope this
+policy. An `auto` wrapper preserves any explicitly supplied outer SDPA context,
+which lets diagnostics force math-only execution without changing dispatch globally.

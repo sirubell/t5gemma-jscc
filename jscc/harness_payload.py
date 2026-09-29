@@ -45,6 +45,8 @@ def payload_harness_class(harness_class: type[Any]) -> type[Any]:
             self.request_evidence = {}
             self.context_tokens = {}
             self.forward_logits_dtypes = set()
+            self.forward_request_count = 0
+            self.forward_request_limit = None
 
         def _loglikelihood_tokens(self, requests, disable_tqdm=False, override_bs=None):
             if self.record_requests:
@@ -63,6 +65,10 @@ def payload_harness_class(harness_class: type[Any]) -> type[Any]:
                 self._payload_lengths = previous
 
         def _model_call(self, inps, attn_mask=None, labels=None):
+            attempted = self.forward_request_count + len(inps)
+            if self.forward_request_limit is not None and attempted > self.forward_request_limit:
+                raise ValueError("Evaluation candidate request budget exceeded")
+            self.forward_request_count = attempted
             if self._payload_lengths is None:
                 raise ValueError("Decoder payload forward has no actual request lengths")
             mask = self._payload_lengths.mask(inps, attn_mask, labels)

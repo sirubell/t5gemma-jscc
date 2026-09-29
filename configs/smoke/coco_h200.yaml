@@ -49,3 +49,6 @@ evaluation:
   num_samples: 2
   max_new_tokens: 64
   vanilla: true
+
+runtime:
+  sdpa_backend_policy: flash_math

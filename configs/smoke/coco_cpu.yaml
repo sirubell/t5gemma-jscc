@@ -7,6 +7,7 @@ run:
   output_dir: ../../runs/smoke
   wandb_project: null
 runtime:
+  sdpa_backend_policy: flash_math
   device: cpu
   dtype: float32
 data:

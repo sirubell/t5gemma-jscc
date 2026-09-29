@@ -1,11 +1,11 @@
 """Insert codec -> channel -> codec at one frozen encoder/decoder layer."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 from torch import nn
 
-from ..config import resolve_codec_configs
-from .channel import AWGNChannel, build_channel, normalize_power, valid_payload_count
+from ..config import resolve_codec_configs, validate_sdpa_backend_policy
+from .channel import AWGNChannel, _token_mask, build_channel, normalize_power, valid_payload_count
 from .codec import Codec
 
 
@@ -19,8 +19,10 @@ def stack_module(base, stack):
 
 
 class SplitModel(nn.Module):
-    def __init__(self, base, codec, channel, split, channel_config):
+    def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto"):
         super().__init__()
+        validate_sdpa_backend_policy(sdpa_backend_policy)
+        self.sdpa_backend_policy = sdpa_backend_policy
         self.base = base.requires_grad_(False).eval()
         self.codec = codec
         self.channel = channel
@@ -45,6 +47,7 @@ class SplitModel(nn.Module):
         self._decoder_mask_representation = None
         self._active_encoder_mask_representation = None
         self._encoder_mask_handle = None
+        self._payload_observer = None
         stack = stack_module(base, split["stack"])
         # Capture the original encoder attention mask before Transformers
         # expands it into an internal attention mask.  This also covers
@@ -137,6 +140,22 @@ class SplitModel(nn.Module):
         finally:
             self._decoder_valid_mask, self._decoder_mask_representation = previous
 
+    @contextmanager
+    def observe_payload(self):
+        """Opt-in exact per-row execution counts; never changes channel numerics.
+
+        A generation row that has already emitted EOS may still execute while
+        other rows finish. These mask-valid counts intentionally include that
+        execution. Consumers can separately derive useful autoregressive counts.
+        """
+        previous = self._payload_observer
+        events = []
+        self._payload_observer = events
+        try:
+            yield events
+        finally:
+            self._payload_observer = previous
+
     @property
     def channel_uses_allocated(self):
         """Allocated latent coordinates sent through each stream."""
@@ -194,6 +213,17 @@ class SplitModel(nn.Module):
             self.channel_uses_valid[stream] += valid_payload_count(
                 z, valid_mask, mask_representation=mask_representation
             )
+            if self._payload_observer is not None:
+                # Reduce the actual mask per row on device, then transfer one
+                # vector. Avoid one CUDA synchronization per row/token step.
+                mask = _token_mask(z, valid_mask, representation=mask_representation)
+                allocated = [int(z[0].numel())] * z.shape[0]
+                counts = (allocated if mask is None else
+                          (mask.reshape(z.shape[0], -1).sum(dim=1) * z.shape[-1]).tolist())
+                self._payload_observer.append({
+                    "stream": stream, "shape": list(z.shape),
+                    "allocated": allocated, "mask_valid": counts,
+                })
             if self.channel_config["normalize_power"]:
                 z = normalize_power(
                     z, valid_mask, token_wise=token_wise,
@@ -297,13 +327,21 @@ class SplitModel(nn.Module):
             self._decoder_valid_mask = kwargs["decoder_attention_mask"]
             self._decoder_mask_representation = self._infer_mask_representation(kwargs["decoder_attention_mask"])
 
+    def attention_context(self):
+        """Scope SDPA dispatch; direct ``base`` calls must enter this explicitly."""
+        if self.sdpa_backend_policy == "auto":
+            return nullcontext()
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        return sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.MATH])
+
     def forward(self, **kwargs):
         previous = (self._encoder_valid_mask, self._decoder_valid_mask,
                     self._active_encoder_valid_mask, self._encoder_mask_representation,
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
         try:
-            return self.base(**kwargs)
+            with self.attention_context():
+                return self.base(**kwargs)
         finally:
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
@@ -320,7 +358,8 @@ class SplitModel(nn.Module):
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
         try:
-            return self.base.generate(**kwargs)
+            with self.attention_context():
+                return self.base.generate(**kwargs)
         finally:
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
@@ -328,9 +367,13 @@ class SplitModel(nn.Module):
 
 
 def build_model(config):
+    model_config = config["model"]
+    policy = model_config.get("sdpa_backend_policy", "auto")
+    validate_sdpa_backend_policy(policy)
+    if policy != "auto" and config["task"] != "coco":
+        raise ValueError("flash_math is currently supported only for task=coco")
     # Imports are delayed so --check and tensor-only tests need no Transformers.
     from transformers import AutoModelForSeq2SeqLM, AutoProcessor, AutoTokenizer
-    model_config = config["model"]
     kwargs = {"revision": model_config["revision"]}
     processor_cls = AutoProcessor if config["task"] == "coco" else AutoTokenizer
     processor = processor_cls.from_pretrained(model_config["name"], **kwargs)
@@ -342,7 +385,7 @@ def build_model(config):
     config["codec"]["input_dim"] = input_dim
     codec = Codec(input_dim, config["codec"])
     wrapper = SplitModel(base, codec, build_channel(config["channel"]),
-                         config["split"], config["channel"])
+                         config["split"], config["channel"], sdpa_backend_policy=policy)
     # Keep the frozen backbone at the requested execution dtype, while the
     # trainable communication modules remain FP32.  Calling ``wrapper.to``
     # with ``dtype`` here would silently cast codec parameters (and any

@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from .config import save_config
 from .data import load_data
+from .data.coco import coco_input_evidence
 from .losses import (
     aggregate_stream_numerators,
     distillation_loss_stats,
@@ -127,8 +128,10 @@ def batch_losses(model, batch, training, snr_db, *, return_stats=False,
             streams.append(memory_stats)
         kl = kl_numerator / kl_denominator.clamp_min(1).to(kl_numerator.dtype)
         nmse = aggregate_stream_numerators(streams)
-        loss = training["kl_weight"] * kl + training["mse_weight"] * nmse
-    values = {"loss": loss, "kl": kl, "nmse": nmse}
+        components = objective_components(kl, hidden_stats[0] / hidden_stats[1].clamp_min(1),
+            memory_stats[0] / memory_stats[1].clamp_min(1) if memory_stats is not None else None, training)
+        loss = components["loss"]
+    values = {"loss": loss, "kl": kl, "nmse": nmse, **components}
     if return_stats:
         values.update({
             "kl_numerator": kl_numerator,
@@ -139,6 +142,24 @@ def batch_losses(model, batch, training, snr_db, *, return_stats=False,
             "memory_denominator": memory_stats[1] if memory_stats is not None else None,
         })
     return cast(BatchValues, values)
+
+
+def objective_components(kl, hidden, memory, settings, *, stream_count=None):
+    """Explicit weights override legacy kl/mse; no second stream averaging."""
+    count = stream_count if stream_count is not None else (2 if memory is not None else 1)
+    explicit = settings.get("loss_weights")
+    weights = explicit or {"kl": settings["kl_weight"],
+                           "hidden": settings["mse_weight"] / count,
+                           "memory": settings["mse_weight"] / count}
+    memory_value = memory if memory is not None else torch.zeros_like(hidden)
+    terms = {"weighted_kl": weights["kl"] * kl,
+             "weighted_hidden": weights["hidden"] * hidden,
+             "weighted_memory": weights["memory"] * memory_value}
+    return {**terms, "hidden": hidden, "memory": memory_value,
+            "weight_kl": kl.new_tensor(weights["kl"]),
+            "weight_hidden": kl.new_tensor(weights["hidden"]),
+            "weight_memory": kl.new_tensor(weights["memory"]),
+            "loss": terms["weighted_kl"] + terms["weighted_hidden"] + terms["weighted_memory"]}
 
 
 def _valid_sample_count(mask: torch.Tensor) -> torch.Tensor:
@@ -193,8 +214,8 @@ def scaled_batch_loss(values: BatchValues, training, denominators) -> torch.Tens
         memory_denominator = cast(torch.Tensor, denominators["memory"]).clamp_min(1).to(
             dtype=memory_numerator.dtype)
         streams.append(memory_numerator / memory_denominator)
-    nmse = torch.stack(streams).mean()
-    return training["kl_weight"] * kl + training["mse_weight"] * nmse
+    return objective_components(kl, streams[0], streams[1] if len(streams) > 1 else None,
+                                training, stream_count=denominators["stream_count"])["loss"]
 
 
 def detached_batch_values(values: BatchValues) -> BatchValues:
@@ -239,7 +260,9 @@ def aggregate_batch_losses(values: list[BatchValues], training) -> dict[str, tor
         streams.append((sum((item[0] for item in memory[1:]), memory[0][0]),
                         sum((item[1] for item in memory[1:]), memory[0][1])))
     nmse = aggregate_stream_numerators(streams)
-    result = {"loss": training["kl_weight"] * kl + training["mse_weight"] * nmse,
+    components = objective_components(kl, streams[0][0] / streams[0][1].clamp_min(1),
+        streams[1][0] / streams[1][1].clamp_min(1) if memory else None, training)
+    result = {**components,
               "kl": kl, "nmse": nmse, "kl_numerator": kl_numerator,
               "kl_denominator": kl_denominator,
               "hidden_numerator": streams[0][0], "hidden_denominator": streams[0][1]}
@@ -249,7 +272,7 @@ def aggregate_batch_losses(values: list[BatchValues], training) -> dict[str, tor
 
 
 @torch.no_grad()
-def validate(model, loader, config):
+def validate(model, loader, config, *, evidence_path=None, step=None):
     settings = config["training"]
     was_training = model.training
     model.eval()
@@ -261,6 +284,10 @@ def validate(model, loader, config):
             for batch_index, batch in enumerate(loader):
                 if settings["validation_batches"] and batch_index >= settings["validation_batches"]:
                     break
+                if evidence_path is not None:
+                    append_metrics(evidence_path, {"phase": "selection", "step": step,
+                                   "microbatch": batch_index, "snr_db": snr,
+                                   **coco_input_evidence(batch)})
                 details.append(batch_losses(
                     model, batch, settings, snr, return_stats=True,
                     valid_only_kl=settings.get("valid_only_kl", False),
@@ -268,7 +295,7 @@ def validate(model, loader, config):
             if not details:
                 raise ValueError("validation dataset is empty")
             aggregated = aggregate_batch_losses(details, settings)
-            records.append({key: aggregated[key].item() for key in ("loss", "kl", "nmse")})
+            records.append({key: aggregated[key].item() for key in ("loss", "kl", "nmse", "hidden", "memory", "weighted_kl", "weighted_hidden", "weighted_memory", "weight_kl", "weight_hidden", "weight_memory")})
     model.train(was_training)
     return {key: sum(record[key] for record in records) / len(records) for key in records[0]}
 
@@ -414,7 +441,9 @@ def train(config, resume: str | Path | None = None):
         "precision": precision_telemetry(model, optimizer),
         "objective": {
             "kl": "global valid-label token mean over the effective batch",
-            "nmse": "equal mean of per-sample masked stream nMSE means",
+            "nmse": "equal mean of per-sample masked stream nMSE means (diagnostic)",
+            "loss_weights": settings.get("loss_weights"),
+            "weight_policy": "explicit loss_weights overrides legacy kl_weight/mse_weight; absent retains legacy",
             "snr": "one sampled SNR per training sample",
         },
         "determinism": determinism,
@@ -509,6 +538,11 @@ def train(config, resume: str | Path | None = None):
                 context = (cast(AWGNChannel, model.channel).replay(paired["seed"], f"train:{step}:{micro_index}", capture=capture)
                            if paired else nullcontext())
                 snr = snr_for_batch(batch)
+                if config["task"] == "coco" and settings.get("record_coco_presentations", False):
+                    append_metrics(run / "coco_presentations.jsonl", {"phase": "training",
+                                   "step": step, "microbatch": micro_index,
+                                   "snr_db": snr.detach().cpu().flatten().tolist() if torch.is_tensor(snr) else snr,
+                                   **coco_input_evidence(batch)})
                 with context:
                     result = batch_losses(model, batch, settings, snr, return_stats=True,
                                           valid_only_kl=settings.get("valid_only_kl", False))
@@ -576,7 +610,7 @@ def train(config, resume: str | Path | None = None):
                        if config["model"]["device"] == "cuda" else None,
                        "loss": totals["loss"].item(), "kl": totals["kl"].item(),
                        "nmse": totals["nmse"].item()}
-                row.update({key: value.detach().item() for key, value in totals.items() if key.endswith(("_numerator", "_denominator"))})
+                row.update({key: value.detach().item() for key, value in totals.items() if key.endswith(("_numerator", "_denominator")) or key.startswith(("weighted_", "weight_")) or key in ("hidden", "memory")})
                 row.update(counters)
                 row["source_padding_fraction"] = 1 - counters["source_tokens_valid"] / max(1, counters["source_tokens_allocated"])
                 row["target_padding_fraction"] = 1 - counters["target_tokens_valid"] / max(1, counters["target_tokens_allocated"])
@@ -596,9 +630,13 @@ def train(config, resume: str | Path | None = None):
                 record_feature_summary(model, data, config, run, step)
             time_limit = settings.get("max_minutes")
             timed_out = time_limit is not None and time.monotonic() - started >= time_limit * 60
-            if step % settings["eval_every"] == 0 or step == settings["max_steps"] or timed_out:
+            if (step in settings["selection_steps"] if "selection_steps" in settings else step % settings["eval_every"] == 0) or step == settings["max_steps"] or timed_out:
                 validation_started = time.monotonic()
-                metrics = validate(model, data.validation, config)
+                if config["task"] == "coco" and settings.get("record_coco_presentations", False):
+                    metrics = validate(model, data.validation, config,
+                                       evidence_path=run / "coco_presentations.jsonl", step=step)
+                else:
+                    metrics = validate(model, data.validation, config)
                 validation_finished = time.monotonic()
                 validation_row = {"elapsed_seconds": validation_finished - started,
                                   "validation_seconds": validation_finished - validation_started, **metrics}

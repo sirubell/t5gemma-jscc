@@ -1,4 +1,6 @@
 """COCO 4-shot captions, with disjoint train, demos, validation and report IDs."""
+import hashlib
+import json
 import random
 from typing import Any, cast
 
@@ -13,11 +15,12 @@ def caption_prompt(captions):
 
 
 class CaptionDataset(Dataset):
-    def __init__(self, rows, processor, demo_images, demo_captions, config, training):
+    def __init__(self, rows, processor, demo_images, demo_captions, config, training, *, record_presentations=False):
         self.rows, self.processor = rows, processor
         self.demo_images = demo_images
         self.prompt = caption_prompt(demo_captions)
         self.config, self.training = config, training
+        self.record_presentations = record_presentations
 
     def __len__(self):
         return len(self.rows)
@@ -37,9 +40,37 @@ class CaptionDataset(Dataset):
         )
         labels = tokens["input_ids"][0].clone()
         labels[tokens["attention_mask"][0] == 0] = -100
-        return {"input_ids": inputs["input_ids"][0],
+        result = {"input_ids": inputs["input_ids"][0],
                 "attention_mask": inputs["attention_mask"][0],
                 "pixel_values": inputs["pixel_values"], "labels": labels}
+        if self.record_presentations:
+            result["coco_image_id"] = int(row["file_name"].rsplit("_", 1)[1].split(".")[0])
+            full_target = self.processor.tokenizer(
+                target, return_tensors="pt", padding=False, truncation=False,
+            )["input_ids"]
+            result["coco_target_text"] = target
+            result["coco_target_untruncated_length"] = full_target.shape[-1]
+            result["coco_target_truncated"] = full_target.shape[-1] > int(tokens["attention_mask"].sum())
+        return result
+
+
+def coco_input_evidence(batch):
+    """Record consumed CPU inputs, without pictures or changing any RNG state.
+
+    A record describes a forward attempt, not proof of a completed update.
+    Hashes cover ordered valid source token IDs, serialized as compact JSON.
+    """
+    image_ids = batch["coco_image_id"].tolist()  # Missing IDs must fail explicitly.
+    sources = [ids[mask.bool()].tolist()
+               for ids, mask in zip(batch["input_ids"], batch["attention_mask"], strict=True)]
+    return {"image_ids": image_ids,
+            "target_text": list(batch["coco_target_text"]),
+            "target_untruncated_lengths": batch["coco_target_untruncated_length"].tolist(),
+            "target_truncated": batch["coco_target_truncated"].tolist(),
+            "target_token_ids": batch["labels"].tolist(),  # Retain -100 padding exactly.
+            "source_valid_lengths": [len(ids) for ids in sources],
+            "source_valid_sha256": [hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
+                                    for ids in sources]}
 
 
 def partition_ids(raw, val_ids, test_ids, restval_ids, config):
@@ -99,7 +130,8 @@ def load_data(config, processor, saved_ids=None, *, for_training=True):
                       demo_captions=demo_captions)
     if for_training:
         def loader(key, training):
-            dataset = CaptionDataset(rows(key), processor, demo_images, demo_captions, data, training)
+            dataset = CaptionDataset(rows(key), processor, demo_images, demo_captions, data, training,
+                                     record_presentations=config["training"].get("record_coco_presentations", False))
             return DataLoader(dataset, batch_size=config["training"]["batch_size"], shuffle=training,
                               num_workers=data["num_workers"], pin_memory=config["model"]["device"] == "cuda")
         result.train = loader("train_ids", True)
