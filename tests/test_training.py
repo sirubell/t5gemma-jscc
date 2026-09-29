@@ -16,7 +16,7 @@ from test_core import batch, toy_model
 
 @pytest.mark.parametrize("stack", ["enc", "dec"])
 def test_training_checkpoint_and_resume(tmp_path, monkeypatch, stack):
-    config = load_config(Path(__file__).parents[1] / "configs/tasks/hellaswag.yaml")
+    config = load_config(Path(__file__).parents[1] / "configs/smoke/hellaswag_cpu.yaml")
     config["run"].update(output_dir=str(tmp_path), name="test")
     config["model"].update(device="cpu", dtype="float32")
     config["training"].update(max_steps=2, eval_every=1, gradient_accumulation=2,

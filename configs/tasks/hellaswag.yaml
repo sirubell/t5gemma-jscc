@@ -1,23 +1,31 @@
-# Same backbone, split, codec and channel baseline as COCO.
+# Current default: completed September recipe, with portable output location.
+# Execution is separate from configuration adoption; see docs/current-defaults.md.
 model_config: ../model.yaml
+protocol: corrected-baseline-v2-native-decoder-inputs
 task: hellaswag
 seed: 0
 run:
-  name: hellaswag
+  name: hellaswag-enc_l9
   output_dir: ../../runs
   wandb_project: null
 data:
   name: Rowan/hellaswag
   revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
-  num_train: null                # All training rows except the selection holdout.
+  num_train: null
   num_validation: 512
-  selection_seed: 0              # Same holdout across model/training seeds.
+  selection_seed: 0
   max_length: 512
-  num_workers: 4
+  num_workers: 0
+  prompt_policy:
+    version: prompt-alignment-v1
+    mode: five_shot
+    seed: 20260920
+    source_max_length: 2048
 training:
-  max_steps: 20000
-  batch_size: 16
-  gradient_accumulation: 2
+  max_steps: 10000
+  schedule_steps: 10000
+  batch_size: 64
+  gradient_accumulation: 1
   lr: 0.0002
   weight_decay: 0.01
   warmup_ratio: 0.05
@@ -26,18 +34,50 @@ training:
   temperature: 1.0
   kl_weight: 1.0
   mse_weight: 0.1
-  eval_every: 500
-  validation_snrs: [no_noise]
-  validation_batches: null       # Evaluate the full fixed selection holdout.
+  eval_every: 2000
+  validation_snrs:
+  - no_noise
+  validation_batches: null
   monitor: loss
-  patience: null                # Fixed optimizer-update budget across splits.
-  min_steps: 1000
+  patience: null
+  min_steps: 2000
   min_delta: 0.005
   log_every: 50
-  save_steps: []
+  save_steps:
+  - 1000
+  - 5000
+  - 10000
+  streamed_backward: true
+  valid_only_kl: true
+  low_sync_logging: false
+  deterministic_algorithms: true
+  expected_attention_backend: sdpa
+  presentation_stream:
+    seed: 0
+    total_presentations: 640000
+    policy: epoch-permutations-v1
+  paired_randomness:
+    seed: 0
+    policy: step-microbatch-stream-v1
+    audit_steps:
+    - 1
+    - 2000
+    - 5000
+    - 10000
+  feature_summary: null
 evaluation:
-  snrs: [no_noise, -6, -3, 0, 3, 6, 9, 12, 15, 18]
-  batch_size: 8
+  snrs:
+  - no_noise
+  - -6
+  - 6
+  - 18
+  batch_size: 64
   num_samples: 10042
   num_fewshot: 5
-  vanilla: true
+  vanilla: false
+  scoring_policy: fp32-v1
+  evidence_mode: compact-v1
+  mode: codec_only
+  noise_seed: 0
+  deterministic_algorithms: true
+  attention_backend: sdpa

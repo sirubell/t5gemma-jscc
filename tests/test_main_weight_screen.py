@@ -89,7 +89,7 @@ def test_discarded_preflight_executes_two_nonzero_updates_and_fp32_adam(tmp_path
     from jscc.data import TaskData
     from scripts.experiments import main_weight_screen_train as runner
 
-    cfg = load_config(Path(__file__).parents[1] / "configs/tasks/hellaswag.yaml")
+    cfg = load_config(Path(__file__).parents[1] / "configs/smoke/hellaswag_cpu.yaml")
     cfg["run"].update(output_dir=str(tmp_path / "out" / "runs"), name="cpu-preflight", wandb_project=None)
     cfg["model"].update(device="cpu", dtype="float32")
     cfg["training"].update(max_steps=2, schedule_steps=10000, batch_size=64, gradient_accumulation=1,

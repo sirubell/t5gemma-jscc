@@ -1,9 +1,10 @@
-# Paths are relative to this file. A step = one optimizer update.
+# Current default: completed September recipe, with portable output location.
+# Execution is separate from configuration adoption; see docs/current-defaults.md.
 model_config: ../model.yaml
 task: coco
 seed: 0
 run:
-  name: coco
+  name: coco-enc_l9
   output_dir: ../../runs
   wandb_project: null
 data:
@@ -19,10 +20,10 @@ data:
   max_target_length: 64
   num_workers: 4
 training:
-  record_coco_presentations: true # Actual captions/IDs; records are forward attempts, not update receipts.
-  max_steps: 6000                # 12,000 microbatches with accumulation=2.
+  record_coco_presentations: true
+  max_steps: 500
   batch_size: 16
-  gradient_accumulation: 2
+  gradient_accumulation: 4
   lr: 0.0002
   weight_decay: 0.01
   warmup_ratio: 0.05
@@ -31,21 +32,34 @@ training:
   temperature: 1.0
   kl_weight: 1.0
   mse_weight: 0.1
-  eval_every: 1000
-  validation_snrs: [0, 6, 12]
-  validation_batches: null       # All validation batches.
+  eval_every: 500
+  validation_snrs:
+  - 0
+  - 6
+  - 12
+  validation_batches: null
   monitor: kl
-  patience: null                 # Fixed budget; set an integer for early stopping.
+  patience: null
   min_steps: 0
   min_delta: 0.005
   log_every: 50
-  save_steps: [2000, 4000, 6000]
+  save_steps:
+  - 500
+  schedule_steps: 500
+  selection_steps:
+  - 500
+  streamed_backward: true
+  valid_only_kl: true
 evaluation:
-  snrs: [no_noise, -6, -3, 0, 3, 6, 9, 12, 15, 18]
-  batch_size: 8
+  snrs:
+  - no_noise
+  - -6
+  - 6
+  - 18
+  batch_size: 16
   num_samples: 2000
   max_new_tokens: 64
-  vanilla: true
-
+  vanilla: false
+  mode: codec_only
 runtime:
   sdpa_backend_policy: flash_math

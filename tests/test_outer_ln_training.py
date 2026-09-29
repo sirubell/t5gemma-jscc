@@ -77,7 +77,7 @@ def test_outer_norm_does_not_change_core_initialization(tmp_path):
 
 
 def test_fixed_stream_train_records_consumed_ids_noise_features_and_counts(tmp_path, monkeypatch):
-    config = load_config(Path(__file__).parents[1] / "configs/tasks/hellaswag.yaml")
+    config = load_config(Path(__file__).parents[1] / "configs/smoke/hellaswag_cpu.yaml")
     config["run"].update(output_dir=str(tmp_path), name="stream")
     config["model"].update(device="cpu", dtype="float32")
     config["training"].update(max_steps=2, schedule_steps=2, batch_size=2, eval_every=2,

@@ -32,17 +32,17 @@ The COCO regression checks that image pixels affect transmitted representations,
 
 ## Real-weight execution
 
-Historical observations below retain the recipes used at execution time. The later study-array smoke validates the current shared encoder-final-norm / LayerNorm-both / FiLM-off baseline on full weights; it does not relabel historical results as belonging to that baseline.
+Historical observations below retain the recipes used at execution time. The earlier study-array smoke validated the then-current encoder-final-norm / LayerNorm-both / FiLM-off baseline on full weights; it does not relabel historical results as belonging to that baseline.
 
 | Environment/task | Observed result |
 |---|---|
 | CPU workstation, both tasks | Small real-weight training, checkpoint reload and task evaluation passed |
-| RTX 5090 CUDA/BF16 | Both tasks passed current-baseline full-weight smoke: four updates, batch 1, accumulation two, validation, checkpoint reload and all three small evaluation conditions; training peak allocated memory was 4.80/4.34 GiB for COCO/HellaSwag |
+| RTX 5090 CUDA/BF16 | Both tasks passed the then-current enc_fn/LN-both full-weight smoke: four updates, batch 1, accumulation two, validation, checkpoint reload and all three small evaluation conditions; training peak allocated memory was 4.80/4.34 GiB for COCO/HellaSwag |
 | H200 BF16, both tasks | Short real-weight train/validation/evaluation passed |
 | H200 HellaSwag research recipe | Early stopping at step 16000; best checkpoint at 13500 evaluated on all 10042 examples, five-shot, 11 conditions |
 | H200 COCO research recipe | Training log reached step 5293/6000 before scheduler timeout; last/best saved at 5000; full task evaluation did not start |
 | H200 short check after type cleanup | Both tasks completed four updates, accumulation two, validation, checkpoint reload and all three small evaluation conditions in one 1 min 37 sec job |
-| H200 current-baseline study arrays | Separate train/evaluate jobs for both tasks all completed with exit 0; each trained four updates and evaluated no-noise / 0 dB / vanilla on two samples, using the matching step-4 checkpoint; overall execution interval was 1 min 30 sec |
+| H200 historical enc_fn baseline study arrays | Separate train/evaluate jobs for both tasks all completed with exit 0; each trained four updates and evaluated no-noise / 0 dB / vanilla on two samples, using the matching step-4 checkpoint; overall execution interval was 1 min 30 sec |
 
 The H200 runs used PyTorch 2.10.0+cu128 and reported BF16 support with compute capability (9, 0). COCO generation/CIDEr passed small-scale checks, but the final long-run COCO codec was not evaluated. The owner elected to end the executability check rather than continue it.
 
@@ -61,7 +61,7 @@ The RTX 5090 check used driver 570.211.01, PyTorch 2.10.0+cu128, capability (12,
 
 1. Config/plan tests verify expansion, names, paths and train/eval pairing without GPU work.
 2. Sweep-route tests run all 26 split entries and six bottleneck entries on small 26-layer Transformers models. They preserve selected indices and bottleneck widths, but reduce hidden size, vocabulary and image resolution. They test computation paths, not GPU memory or statistical performance.
-3. A full-weight smoke on the target GPU checks kernels, data/processor integration, memory at the selected batch, checkpoint reload and actual task metrics. Shared-baseline smoke has passed on H200 and RTX 5090, but does not cover every variant or larger-batch memory fit. Include memory-heavy configurations before a large sweep.
+3. A full-weight smoke on the target GPU checks kernels, data/processor integration, memory at the selected batch, checkpoint reload and actual task metrics. The cited H200 and RTX 5090 shared-baseline smokes used the then-current encoder-final-norm / external LayerNorm-both design. Historical enc_l9 full-weight results also exist, but these smokes do not establish full-weight acceptance or target-hardware fit for the current implementation and new two-stage paths. Include memory-heavy configurations before a large sweep.
 4. Full-duration multi-seed sweeps collect research evidence. They are not required just to check the software and should only run for an explicit research question.
 
 Private job IDs, machine/account details, full metrics and artifact paths remain in ignored docs/local/experiments.md and docs/local/ws-validation.md on the owner's checkout.

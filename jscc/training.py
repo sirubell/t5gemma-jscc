@@ -343,7 +343,8 @@ def make_scheduler(optimizer, settings):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
-def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step, best, bad):
+def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step, best, bad,
+                    *, phase_transfer=None, phase_record=None):
     torch.save({"codec": model.codec.state_dict(), "channel": model.channel.state_dict(),
                 "memory_codec": model.memory_codec.state_dict() if model.memory_codec is not None else None,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
@@ -351,15 +352,26 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step
                 "step": step, "best": best, "bad_evaluations": bad,
                 "python_rng": random.getstate(),
                 "torch_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}, path)
+                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                "phase_transfer": phase_transfer, "phase_record": phase_record}, path)
 
 
-def train(config, resume: str | Path | None = None):
+def train(config, resume: str | Path | None = None,
+          initial_checkpoint: str | Path | None = None,
+          deadline: float | None = None):
     setup_started = time.monotonic()
+    if deadline is not None and setup_started >= deadline:
+        raise TimeoutError("functional phase wall deadline reached before setup")
+    if resume and initial_checkpoint:
+        raise ValueError("resume and weight-only phase transfer are mutually exclusive")
     if resume and config["training"].get("presentation_stream"):
         raise ValueError("fixed presentation study is fresh-only; exact resume unsupported")
     resume_path = Path(resume) if resume is not None else None
     state = torch.load(resume_path, map_location="cpu", weights_only=True) if resume_path else None
+    transfer = None
+    if initial_checkpoint is not None:
+        from .local_reconstruction import validate_phase_transfer
+        transfer = validate_phase_transfer(initial_checkpoint, config)
     if state:
         # Resume the saved recipe. The supplied YAML chooses output location/device only.
         destination, device = config["run"], config["model"]["device"]
@@ -380,7 +392,12 @@ def train(config, resume: str | Path | None = None):
         if actual_backend != expected_backend:
             raise ValueError(f"Attention backend mismatch: {actual_backend}")
     prepare_trainable_parameters(model)
-    data = load_data(config, processor, state["data_ids"] if state else None)
+    data = load_data(config, processor,
+                     state["data_ids"] if state else transfer["state"]["data_ids"] if transfer else None)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("functional phase wall deadline reached during setup")
+    if transfer:
+        model.load_communication_state(transfer["state"])
     run = new_run(config["run"]["output_dir"], config["run"]["name"])
     save_config(config, run / "config.yaml")
     (run / "data_ids.json").write_text(json.dumps(data.ids, indent=2) + "\n")
@@ -430,6 +447,7 @@ def train(config, resume: str | Path | None = None):
             best, bad = float("inf"), 0
     run_metadata = {
         "resume_from": str(Path(resume).resolve()) if resume else None,
+        "phase_transfer": transfer["metadata"] if transfer else None,
         "torch_version": str(torch.__version__),
         "source": source_state(),
         "training_source_sha256": training_source_digest(),
@@ -473,7 +491,8 @@ def train(config, resume: str | Path | None = None):
     def save(name, step):
         checkpoint_started = time.monotonic()
         save_checkpoint(run / name, model, optimizer, scheduler, scaler, config, data.ids,
-                        step, best, bad)
+                        step, best, bad,
+                        phase_transfer=transfer["metadata"] if transfer else None)
         if stream_options:
             append_metrics(run / "checkpoint_timing.jsonl", {"step": step, "file": name,
                            "seconds": time.monotonic() - checkpoint_started, **counters})
@@ -481,6 +500,8 @@ def train(config, resume: str | Path | None = None):
         if settings.get("feature_summary") and 0 in settings["feature_summary"]["steps"]:
             record_feature_summary(model, data, config, run, 0)
         for step in progress:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("functional phase wall deadline reached before next update")
             step_started = time.monotonic()
             optimizer.zero_grad(set_to_none=True)
             values = []
@@ -628,8 +649,11 @@ def train(config, resume: str | Path | None = None):
                 last_log_time, last_log_step = logged_at, step
             if settings.get("feature_summary") and step in settings["feature_summary"]["steps"]:
                 record_feature_summary(model, data, config, run, step)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("functional phase wall deadline reached before validation")
             time_limit = settings.get("max_minutes")
-            timed_out = time_limit is not None and time.monotonic() - started >= time_limit * 60
+            timed_out = ((time_limit is not None and time.monotonic() - started >= time_limit * 60)
+                         or (deadline is not None and time.monotonic() >= deadline))
             if (step in settings["selection_steps"] if "selection_steps" in settings else step % settings["eval_every"] == 0) or step == settings["max_steps"] or timed_out:
                 validation_started = time.monotonic()
                 if config["task"] == "coco" and settings.get("record_coco_presentations", False):
@@ -682,7 +706,10 @@ def train(config, resume: str | Path | None = None):
         raise
     run_metadata["precision"] = precision_telemetry(model, optimizer)
     (run / "run.json").write_text(json.dumps(run_metadata, indent=2) + "\n")
-    completion = {"step": step, "reason": stop_reason,
+    if tracker:
+        tracker.finish()
+    deadline_exceeded = deadline is not None and time.monotonic() >= deadline
+    completion = {"step": step, "reason": "wall_deadline_overrun" if deadline_exceeded else stop_reason,
                   "elapsed_seconds": time.monotonic() - started, **counters,
                   "optimizer_updates": completed_updates,
                   "presentation_budget_verified": (counters["presentations"] == stream_options["total_presentations"]) if stream_options else None}
@@ -691,7 +718,7 @@ def train(config, resume: str | Path | None = None):
         source_verified = (source_state() == run_metadata["source"]
                            and training_source_digest() == run_metadata["training_source_sha256"]
                            and hashlib.sha256((run / "config.yaml").read_bytes()).hexdigest() == run_metadata["resolved_config_sha256"])
-        completed = (stop_reason == "max_steps" and completed_updates == settings["max_steps"]
+        completed = (not deadline_exceeded and stop_reason == "max_steps" and completed_updates == settings["max_steps"]
                      and completion["presentation_budget_verified"] and final_path.is_file() and source_verified)
         completion.update(status="FULL_BUDGET_COMPLETED" if completed else "PARTIAL",
                           source_verified=source_verified, exact_resume_supported=False,
@@ -703,7 +730,22 @@ def train(config, resume: str | Path | None = None):
                     digest.update(chunk)
             completion["final_checkpoint"] = {"file": final_path.name, "step": settings["max_steps"],
                                                "sha256": digest.hexdigest()}
-    (run / "completion.json").write_text(json.dumps(completion, indent=2) + "\n")
-    if tracker:
-        tracker.finish()
+    completion_path = run / "completion.json"
+    temporary_completion = run / "completion.tmp"
+    temporary_completion.write_text(json.dumps(completion, indent=2) + "\n")
+    if deadline is not None and time.monotonic() >= deadline:
+        completion["reason"] = "wall_deadline_overrun"
+        if stream_options:
+            completion["status"] = "PARTIAL"
+        completion["elapsed_seconds"] = time.monotonic() - started
+        temporary_completion.write_text(json.dumps(completion, indent=2) + "\n")
+    temporary_completion.replace(completion_path)
+    if deadline is not None and time.monotonic() >= deadline and completion.get("status") == "FULL_BUDGET_COMPLETED":
+        completion["reason"] = "wall_deadline_overrun"
+        completion["status"] = "PARTIAL"
+        completion["elapsed_seconds"] = time.monotonic() - started
+        temporary_completion.write_text(json.dumps(completion, indent=2) + "\n")
+        temporary_completion.replace(completion_path)
+    if completion["reason"] == "wall_deadline_overrun":
+        raise TimeoutError(f"Functional phase exceeded its wall deadline; partial evidence: {run}")
     return run

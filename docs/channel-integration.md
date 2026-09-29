@@ -2,7 +2,7 @@
 
 This guide is for collaborators implementing a physical wireless simulator. The project's normal research workflow is in the [README](../README.md). Integration starts by replacing the channel between codec encoding and decoding.
 
-Both tasks reference the same `configs/model.yaml`: an encoder-final-norm residual-codec baseline with SNR-FiLM disabled. All supplied training and smoke recipes reference it. Start channel integration with this baseline. The simulator still accepts SNR to model noise; it does not need to implement or coordinate FiLM. FiLM is reserved for an explicit later experiment.
+Both tasks reference the same `configs/model.yaml`: an encoder-after-layer-9 residual-codec baseline with external LayerNorm `none` and SNR-FiLM disabled. All supplied training and smoke recipes reference it. Start channel integration with this baseline. The simulator still accepts SNR to model noise; it does not need to implement or coordinate FiLM. FiLM is reserved for an explicit later experiment.
 
 An H200 account is not needed to develop the channel. The tensor checker and automated tests run on CPU; full model checks can run on a compatible standalone CUDA GPU such as RTX 5090. Follow the [workstation guide](running.md#standalone-gpu-workstations-including-rtx-5090), starting with a small batch. The static analysis tools are installed with `uv sync --locked --extra dev`.
 

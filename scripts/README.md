@@ -4,6 +4,8 @@ Run commands from the repository root with the locked uv environment. The primar
 
 | Scripts | Purpose |
 |---|---|
+| [`coco_query_endpoint_diagnostic.py`](coco_query_endpoint_diagnostic.py) | Verify local COCO checkpoint/source identities, then explicitly execute a bounded query-image and endpoint diagnostic. Preparation/check modes do not load models. See the [diagnostic guide](../docs/coco-query-endpoint-diagnostic.md). |
+| [`hellaswag_two_stage.py`](hellaswag_two_stage.py) | Prepare/check a four-arm enc_l9 plan; separate explicit capture, local reconstruction and functional phase commands. See the [two-stage guide](../docs/hellaswag-two-stage.md). No command submits a job. |
 | `compare_evidence_json.py`, `recompute_coco.py` | Reusable offline evidence comparison and COCO CIDEr recomputation utilities. The latter consumes exported per-image JSONL evidence. |
 | `index_*.py`, `extract_compact_samples.py`, `verify_manifest.py`, `recompute_*.py` | Evidence indexing, extraction, verification and recomputation for specific saved artifact formats. Check each script's inputs before reuse. |
 | Other root-level diagnostic, preflight, policy, closeout and Slurm scripts | Reproduce or inspect bounded historical work. Some start training, evaluation or scheduler jobs; their old source bindings and approvals are historical evidence, not current execution authorization. |

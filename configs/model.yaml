@@ -1,4 +1,5 @@
-# Shared model design for both tasks. Task YAMLs reference this file.
+# Shared enc_l9 design adopted from the completed September recipes.
+# Historical checkpoints retain their saved model design.
 model:
   name: google/t5gemma-2-1b-1b
   revision: dd0a2683227859151b1730ca3a63087df5b5f39b
@@ -6,22 +7,25 @@ model:
   dtype: bfloat16
 split:
   stack: enc
-  where: after_final_norm
+  where: after_layer
+  index: 9
 codec:
   hidden_dim: 1152
   bottleneck_dim: 512
   n_res_blocks: 2
   activation: gelu
   dropout: 0.0
-  layernorm: both                # Shared baseline; residual-block norms also remain enabled.
+  layernorm: none
   memory:
-    layernorm: both              # Fixed receiver-memory norm for decoder diagnostics.
-  snr_film: false                # Opt in only for a dedicated FiLM experiment.
-  film_hidden: 64                # Inactive while snr_film is false.
+    layernorm: both
+  snr_film: false
+  film_hidden: 64
 channel:
-  type: awgn                    # Or Python module:ClassName
+  type: awgn
   kwargs: {}
   normalize_power: true
   train_noise: true
-  train_snr_range: [-6.0, 18.0]
+  train_snr_range:
+  - -6.0
+  - 18.0
   clean_film_snr: 18.0

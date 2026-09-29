@@ -81,9 +81,9 @@ Only when a multi-run plan is needed, use `--output runs/studies/NEW_NAME` to wr
 | `training.save_steps` | Additional checkpoint steps |
 | `training.max_minutes` | Optional training time budget, checked between updates; reserve time for final validation and evaluation |
 
-Batch size 16 with accumulation 2 gives an effective batch size of 32. A 6,000-step run performs 12,000 microbatches.
+The current COCO default uses batch 16 with accumulation 4 for 500 updates; HellaSwag uses batch 64 with accumulation 1 for 10,000 updates. Both have effective batch 64. HellaSwag training uses five-shot prompts. These are the completed September recipes adopted by the owner; see [current defaults](docs/current-defaults.md) for exact lineage and evaluation settings.
 
-External LayerNorm `pre` is before codec encoding, and `post` is after decoding; residual blocks retain their internal LayerNorm. Both tasks now start from the same encoder-final-norm split and residual codec with external LayerNorm `both`. A decoder experiment may add `codec.memory` overrides to hold the receiver-memory codec's settings fixed while varying the main hidden codec. SNR-FiLM is disabled in all default and smoke recipes. Task data, training budgets and evaluation methods remain task-specific. See [the shared baseline](docs/architecture.md#shared-baseline) for the design and compatibility limits.
+External LayerNorm `pre` is before codec encoding, and `post` is after decoding; residual blocks retain their internal LayerNorm. Both tasks now start from the completed September `enc_l9` design and residual codec with external LayerNorm `none`. A decoder experiment may add `codec.memory` overrides to hold the receiver-memory codec's settings fixed while varying the main hidden codec. SNR-FiLM is disabled in all default and smoke recipes. Task data, training budgets and evaluation methods remain task-specific. See [the shared baseline](docs/architecture.md#shared-baseline) for the design and compatibility limits.
 
 W&B is optional: set `run.wandb_project` and add `--extra wandb` to `uv run --locked`.
 
@@ -113,7 +113,7 @@ uv run --locked python evaluate.py --run runs/<hellaswag-run>
 
 The checkpoint identifies the task. Both commands default to `best.pt`; use `--checkpoint last.pt` to select another saved checkpoint.
 
-COCO writes captions, CIDEr and EOS/empty/truncation rates. HellaSwag uses lm-eval to report accuracy and normalized accuracy. Default evaluations cover no-noise, nine SNR values and vanilla. No-noise retains the codec; vanilla bypasses both codec and channel.
+COCO writes captions, CIDEr and EOS/empty/truncation rates. HellaSwag uses lm-eval to report accuracy and normalized accuracy. Default evaluations cover no-noise, -6, +6 and +18 dB with the codec active; the adopted historical recipes evaluated vanilla separately. No-noise retains the codec; vanilla bypasses both codec and channel.
 
 Pass `--config` an evaluation-only YAML to adjust sample count, batch size or SNRs. Fields are top-level, for example:
 
@@ -121,6 +121,7 @@ Pass `--config` an evaluation-only YAML to adjust sample count, batch size or SN
 snrs: [no_noise, 0, 18]
 num_samples: 32
 batch_size: 4
+mode: all
 vanilla: true
 ```
 
@@ -168,6 +169,9 @@ Earlier full-weight checks completed HellaSwag training/evaluation and COCO smal
 
 ## Documentation and collaboration
 
+- [Current defaults and historical recipe lineage](docs/current-defaults.md)
+- [COCO query-image and endpoint diagnostic](docs/coco-query-endpoint-diagnostic.md)
+- [HellaSwag enc_l9 two-stage preparation and execution](docs/hellaswag-two-stage.md)
 - [Architecture, data, objectives and checkpoint semantics](docs/architecture.md)
 - [Configuration directory guide](configs/README.md)
 - [Study preview, export and train/eval jobs](docs/studies.md)

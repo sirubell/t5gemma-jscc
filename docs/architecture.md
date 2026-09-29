@@ -18,20 +18,20 @@ D comes from the backbone configuration; K is codec.bottleneck_dim. Both codec h
 
 ## Shared baseline
 
-COCO and HellaSwag reference `configs/model.yaml` for the same backbone revision, encoder-final-norm split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
+COCO and HellaSwag reference `configs/model.yaml` for the same backbone revision, encoder-layer-9 split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
 
 | Component | Baseline |
 |---|---|
-| Split | Encoder after final norm; no layer index is required |
+| Split | Encoder after layer 9 (zero-based) |
 | Codec hidden width | 1152 |
 | Bottleneck width | 512 |
 | Residual blocks | Two in each codec half; each block computes x + F(x) |
 | Activation / dropout | GELU / 0 |
-| External LayerNorm | Both input and output; internal block norms remain enabled |
+| External LayerNorm | None at the hidden-stream boundary; internal block norms remain enabled |
 | Channel | AWGN with per-sample power normalization |
 | SNR-FiLM | Disabled |
 
-This baseline makes the task designs consistent; it is not an experimentally established optimum. Task-specific preprocessing, targets, training budgets and metrics still differ. A study may explicitly override the split or codec settings.
+The owner adopted these completed September recipe settings on September 29; see [current defaults](current-defaults.md) for the exact lineage. This baseline makes the task designs consistent; it is not an experimentally established optimum. Task-specific preprocessing, targets, training budgets and metrics still differ. A study may explicitly override the split or codec settings.
 
 FiLM remains implemented as an opt-in experiment via `codec.snr_film: true` in a separately named model design file. Point the relevant experiment's task YAML at that file, keeping the shared default off for normal development and collaboration. When disabled, no FiLM module or parameters are created and codec decoding does not depend on SNR. The channel still uses SNR to generate noise. `film_hidden` and `clean_film_snr` have no numerical effect while FiLM is off.
 
@@ -71,7 +71,7 @@ A step is an optimizer update. Microbatches accumulate gradients before clipping
 | Task | Training inputs/targets | Task evaluation |
 |---|---|---|
 | COCO | Images and demonstration captions as prompt; caption target | Autoregressive captions, Java PTB tokenizer, CIDEr |
-| HellaSwag | Context prompt; correct ending target | lm-eval likelihood of candidate endings, acc/acc_norm |
+| HellaSwag | Five-shot prompt; correct ending target | lm-eval likelihood of candidate endings, acc/acc_norm |
 
 COCO selects disjoint train/demo/validation/report IDs using Karpathy splits and saves them in each run. Evaluation reuses the checkpoint's report IDs. These IDs are not claimed to match historical reports.
 

@@ -23,19 +23,19 @@ def tensor_digest(value):
 
 class PresentationSampler(Sampler[int]):
     """Concatenated CPU randperm epochs; no discarded or short epoch tails."""
-    def __init__(self, row_ids, total, seed=0):
+    def __init__(self, row_ids, total, seed=0, start=0):
         self.row_ids = list(row_ids)
-        if not self.row_ids or total <= 0:
+        if not self.row_ids or total <= 0 or start < 0:
             raise ValueError("presentation stream requires nonempty rows and a positive budget")
-        self.seed, self.total = seed, total
+        self.seed, self.total, self.start = seed, total, start
         generator = torch.Generator(device="cpu").manual_seed(seed)
         chunks = []
-        remaining = total
+        remaining = total + start
         while remaining:
             chunk = torch.randperm(len(row_ids), generator=generator)[:remaining]
             chunks.append(chunk)
             remaining -= len(chunk)
-        self.indices = torch.cat(chunks)
+        self.indices = torch.cat(chunks)[start:]
         self.actual_ids = torch.tensor(self.row_ids, dtype=torch.int64)[self.indices]
 
     def __iter__(self):
@@ -51,6 +51,7 @@ class PresentationSampler(Sampler[int]):
             json.dump(self.actual_ids.tolist(), output, separators=(",", ":"))
         manifest = {"policy": "epoch-permutations-v1", "algorithm": "torch CPU Generator randperm concatenated epochs",
                     "seed": self.seed, "torch_version": str(torch.__version__), "total_presentations": self.total,
+                    "start_presentation": self.start,
                     "microbatch_size": batch_size, "pool_ids": self.row_ids,
                     "actual_ids_file": "presentation_ids.json.gz", "actual_ids_sha256": tensor_digest(self.actual_ids),
                     "actual_ids_bytes_sha256": hashlib.sha256(self.actual_ids.numpy().astype("<i8").tobytes()).hexdigest(),

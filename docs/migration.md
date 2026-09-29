@@ -16,7 +16,7 @@ The refactor established one research project with shared COCO/HellaSwag trainin
 
 ## Intentional changes
 
-- The current shared baseline uses encoder final norm, external LayerNorm both and FiLM off for both tasks. Earlier COCO examples used decoder layer 24, external LayerNorm none and FiLM on. Existing checkpoints/results retain that earlier design; they are not relabeled as evidence for the new baseline.
+- On September 29 the owner adopted the completed September enc_l9 recipes as defaults: external LayerNorm none and FiLM off for both tasks, COCO 500 updates and HellaSwag five-shot training for 10,000 updates. The previous generic shared design used encoder final norm and external LayerNorm both; still earlier COCO examples used decoder layer 24 and FiLM on. Saved checkpoints/results retain their own design; see [current defaults](current-defaults.md).
 - Both tasks use the same configurable LayerNorm residual codec. Historical HellaSwag fixed mean/std calibration was not carried over, so this is not an equivalent rerun of that configuration.
 - Steps and the learning-rate schedule count optimizer updates. Effective batch still depends on microbatch size and accumulation.
 - Checkpoint selection uses the configured validation metric rather than separate selection jobs. Additional saved steps can be evaluated explicitly.

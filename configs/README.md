@@ -25,6 +25,8 @@ configs/
     smoke_h200.yaml
 ```
 
+Current defaults follow the completed September enc_l9 recipes: COCO 500 updates at 16×4, HellaSwag five-shot training for 10,000 updates at 64×1, external LayerNorm none and FiLM off. See [default lineage and portability](../docs/current-defaults.md). Named historical study recipes retain their own explicit overrides; a study definition is not execution authorization.
+
 ## Which file should change?
 
 - Change the shared architecture in model.yaml, or copy it to a named model design for an explicit variation.
@@ -50,7 +52,7 @@ The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only mo
 
 Each training configuration can have a separate evaluation job. Evaluation SNRs do not multiply the number of trained models. All supplied plans keep FiLM off.
 
-The split plan lists the 13 historical locations under the current shared codec design with boundary-aware normalization: `post` at `enc_emb`, `both` at `enc_fn`, and `none` at raw encoder/decoder residual streams. Internal residual-block LayerNorm and FiLM-off remain shared. Decoder receiver layers use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. `hellaswag_diagnostic.yaml` is a five-setting, 4,000-update pre-H200 plan; it keeps a 20,000-update schedule horizon and fixes decoder memory normalization while varying the main decoder codec. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol, including HellaSwag's current early-stop setting.
+The split plan lists the 13 historical locations under the current shared codec design with boundary-aware normalization: `post` at `enc_emb`, `both` at `enc_fn`, and `none` at raw encoder/decoder residual streams. Internal residual-block LayerNorm and FiLM-off remain shared. Decoder receiver layers use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. `hellaswag_diagnostic.yaml` is a five-setting, 4,000-update pre-H200 plan; it keeps a 20,000-update schedule horizon and fixes decoder memory normalization while varying the main decoder codec. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol. The current HellaSwag default and two-stage plan use fixed terminal steps (`patience: null`); older diagnostic studies may have different stopping rules.
 
 The `hellaswag_diagnostic` plan is the gate before a formal H200 study. It is HellaSwag-only, stops after 4,000 optimizer updates while retaining a 20,000-update schedule, uses effective batch 32 (`16 x 2`), validates the full fixed 512-row selection holdout, and evaluates a fixed 512-example panel at `no_noise`, `-6`, `18`, plus `vanilla`. Its five rows change only the split and main codec boundary norm; `codec.memory.layernorm: both` is held constant for decoder rows.
 

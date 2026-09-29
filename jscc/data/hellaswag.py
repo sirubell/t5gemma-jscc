@@ -97,7 +97,8 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
             if total != settings["max_steps"] * settings["batch_size"] * settings["gradient_accumulation"]:
                 raise ValueError("presentation budget must match exact full optimizer batches")
             dataset = dataset.add_column("row_id", list(indices))
-            sampler = PresentationSampler(indices, total, stream["seed"])
+            sampler = PresentationSampler(indices, total, stream["seed"],
+                                          start=stream.get("start_presentation", 0))
         else:
             sampler = None
         # HF Dataset implements the map-style protocol but does not inherit torch Dataset.
