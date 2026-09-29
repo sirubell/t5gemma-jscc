@@ -260,3 +260,23 @@ def test_objective_validation_capability_rejects_optimization_data(tmp_path, mod
     needs["parity_receipt"]["capability"] = "objective_validation"
     with pytest.raises(ValueError, match="objective_validation data"):
         open_replay(tmp_path / "optimization", needs)
+
+
+def test_runner_binds_replay_to_current_learner_and_exact_prepared_views(tmp_path, model, batch, spec):
+    from jscc.baseline_protocol import open_baseline_replay, read_replay_batch, batch_identity
+    site = resolve_encoder_site(model.base, model.split, "tiny-fixed")
+    manifest = capture_sequences(tmp_path / "bank", spec, [batch], model)
+    needs = requirement(manifest)
+    options = dict(source_identity="fixture-learner", role="optimization", site=site,
+                   backbone=spec["backbone"], dtype=torch.float32)
+    replay = open_baseline_replay(tmp_path / "bank", needs, **options)
+    ref = {"batch_view_id": "batch0", "view_sha256": batch_identity(batch)}
+    assert torch.equal(read_replay_batch(replay, ref)["input_ids"], batch["input_ids"])
+    with pytest.raises(ValueError, match="ordered stream"):
+        read_replay_batch(replay, {**ref, "view_sha256": "other-online-view"})
+    with pytest.raises(ValueError, match="consumer source/role"):
+        open_baseline_replay(tmp_path / "bank", needs, **{**options, "source_identity": "new-learner"})
+    with pytest.raises(ValueError, match="consumer source/role"):
+        open_baseline_replay(tmp_path / "bank", needs, **{**options, "role": "objective_validation"})
+    with pytest.raises(ValueError, match="backbone/site/precision"):
+        open_baseline_replay(tmp_path / "bank", needs, **{**options, "backbone": {**spec["backbone"], "model_revision": "other"}})

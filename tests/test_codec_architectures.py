@@ -222,7 +222,8 @@ def test_encoder_routing_rejects_undeclared_or_unfrozen_roles(role, purpose, mat
             pass
 
 
-def test_route_cannot_change_during_direct_encoder_forward_and_recovers_exception():
+@pytest.mark.parametrize("route", ["encoder", "forward", "generate"])
+def test_route_cannot_change_during_direct_encoder_forward_and_recovers_exception(route):
     from jscc.models.split_model import resolve_encoder_site, stack_module
     model = routed_model()
     encoder = stack_module(model.base, "enc")
@@ -233,14 +234,24 @@ def test_route_cannot_change_during_direct_encoder_forward_and_recovers_exceptio
         with model.at_site(site, purpose="capture", authorization=authorization):
             pass
 
+    def run():
+        inputs = {"input_ids": torch.tensor([[2, 4, 5]])}
+        if route == "encoder":
+            return encoder(**inputs)
+        if route == "forward":
+            return model(**inputs, labels=torch.tensor([[5, 6, 1]]))
+        return model.generate(**inputs, max_new_tokens=2, decoder_start_token_id=0)
+
+    assert not model.base._forward_hooks and not model.base._forward_pre_hooks
     hook = encoder.layers[0].register_forward_pre_hook(fail_inside)
     with pytest.raises(RuntimeError, match="during a forward"):
-        encoder(input_ids=torch.tensor([[2, 4, 5]]))
+        run()
     hook.remove()
     assert model._forward_active == 0
     with model.at_site(site, purpose="capture", authorization=authorization), model.transmission(bypass=True):
-        encoder(input_ids=torch.tensor([[2, 4, 5]]))
+        run()
     assert model._forward_active == 0
+    assert not model.base._forward_hooks and not model.base._forward_pre_hooks
 
 
 def test_resolved_sites_distinguish_raw_final_and_normalized_and_reject_forgery():

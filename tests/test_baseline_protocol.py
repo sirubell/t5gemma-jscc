@@ -164,3 +164,28 @@ def test_site_provenance_does_not_change_paired_draws():
     from jscc.baseline_protocol import batch_identity
     b = batch()
     assert batch_identity(b) == batch_identity({**b, "site_id": "enc_fn", "activation": torch.randn(2, 3, 8)})
+
+
+def test_task_reuse_requires_exact_complete_observation(monkeypatch, tmp_path):
+    from jscc.baseline_protocol import validate_task_receipt, CONDITIONS
+    from jscc.evaluation import codec_observation_identity
+    from test_evaluation_evidence import observation_fixture
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
+    receipt = {"status": "complete", "request": request, "identity": codec_observation_identity(request),
+               "conditions": [{"condition": c, "status": "complete", "requested": 1, "completed": 1,
+                               "failed": 0, "denominator": 1, "metrics": {"acc": 1.0},
+                               "items": [{"sample_id": 7, "source_id": "source-7"}]} for c in CONDITIONS]}
+    validate_task_receipt(receipt, request)
+    for field, value in [("panel", "other-panel"), ("scorer", "other-scorer"),
+                         ("noise", {"seed": 9, "namespace": "other"})]:
+        changed = {**request, field: value}
+        previous = {**receipt, "request": changed, "identity": codec_observation_identity(changed)}
+        with pytest.raises(ValueError, match="identity differs"):
+            validate_task_receipt(previous, request)
+    with pytest.raises(ValueError, match="conditions incomplete"):
+        validate_task_receipt({**receipt, "conditions": []}, request)
+    for field, value in [("failed", None), ("completed", 0), ("status", "incomplete")]:
+        rows = copy.deepcopy(receipt["conditions"])
+        rows[0][field] = value
+        with pytest.raises(ValueError, match="accounting incomplete"):
+            validate_task_receipt({**receipt, "conditions": rows}, request)

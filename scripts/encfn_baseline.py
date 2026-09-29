@@ -16,8 +16,9 @@ from jscc.experiment_schedule import compile_baseline_plan
 def execute(manifest_path, output):
     import copy
     import torch
-    from jscc.activation_replay import canonical_digest, file_digest, open_replay
-    from jscc.baseline_protocol import BaselineLearner, read_prepared_batch, run_baseline
+    from jscc.activation_replay import canonical_digest, file_digest
+    from jscc.baseline_protocol import (BaselineLearner, read_prepared_batch, run_baseline,
+                                        open_baseline_replay, read_replay_batch)
     from jscc.config import load_config
     from jscc.data import load_data
     from jscc.evaluation import evaluate_checkpoint
@@ -106,11 +107,17 @@ def execute(manifest_path, output):
     replay = {}
     if segment.strategy != "both":
         for role, declaration in manifest["replays"].items():
-            replay[role] = open_replay(root / declaration["path"], declaration["requirement"])
+            requirement = declaration["requirement"]
+            backbone = manifest["capture_backbone"]
+            if backbone["model_revision"] != config["model"]["revision"]:
+                raise ValueError("capture backbone differs from executed model revision")
+            replay[role] = open_baseline_replay(root / declaration["path"], requirement,
+                source_identity=metadata["source_identity"], role=role, site=site,
+                backbone=backbone, dtype=next(model.base.parameters()).dtype)
     def read_many(references, kind, role):
         if kind == "combined":
             return [read_prepared_batch(ref, root) for ref in references]
-        return [replay[role].read(ref["batch_view_id"], "enc_fn") for ref in references]
+        return [read_replay_batch(replay[role], ref) for ref in references]
     def updates(index, kind):
         return read_many(manifest["updates"][index], kind, "optimization")
     def validation(kind):
@@ -142,7 +149,7 @@ def execute(manifest_path, output):
             raise ValueError("reused assessment receipt checksum mismatch")
         reused[int(step)] = {"state": reused_state, "receipt": json.loads(receipt_path.read_text())}
     result = run_baseline(learner, output=output, metadata=metadata, update_batches=updates,
-                         validation_batches=validation, assess=assess, segment=segment, parent=parent, reused_assessments=reused)
+                         validation_batches=validation, assess=assess, segment=segment, parent=parent, reused_assessments=reused, task_request=request)
     return result
 
 

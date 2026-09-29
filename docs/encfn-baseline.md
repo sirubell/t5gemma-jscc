@@ -51,14 +51,20 @@ protocol/parent identities and explicit lineage. The initialization reference
 is the immutable actual codec state dictionary, not a seed-only assertion.
 Preparation must copy the same core tensor snapshot between each family's norm
 variants. The runner checks initialization bytes and exact topology on load.
+The comparison mapping explicitly binds architecture, initialization, training data,
+objective, exposure and schedule control references; it never infers equivalence
+from shape or cell names.
 
 Conditional local segments additionally require role-keyed `replays` with v2
 consumer requirements and an applicable parity receipt. `parent_checkpoint`
 and `parent_expected` identify the exact reconstruction-prefix state at 200;
 continuation carries optimizer, scheduler, scaler, RNG and ordered stream
-state. `reused_assessments` binds any physically deduplicated task observation
+state. The checkpoint also binds pairing ID, draw schema, PyTorch runtime, device
+and dtype; changing the continuation noise policy is rejected before output. `reused_assessments` binds any physically deduplicated task observation
 to its original validated checkpoint and receipt, with identical codec tensors
-and source/config/protocol/initialization provenance. There is no automatic
+and source/config/protocol/initialization/noise provenance. Reuse additionally
+requires exact full request identity, panel/scorer/noise/layout settings, all six
+conditions and actual complete item/source-family counts. There is no automatic
 conditional launch or automatic failed-job retry.
 
 ## APIs and artifacts
@@ -91,7 +97,8 @@ failure, invalid save or missing mandatory assessment stops that learner.
 Attempted exposure remains charged; no extra replacement update is scheduled.
 The zero-LR first AdamW call still advances moments and completed updates.
 
-The learner emits plain `experiment-records-v1` update/failure mappings through
+The learner emits plain `experiment-records-v1` update, failure, objective, cost
+and per-site footprint mappings through
 an optional callback. `evaluation.observation_event_payload` projects executable
 requests into the agreed `codec-observation-v1` identity and plain observation
 mapping, preserving the full original request. Final durable records/plots and
@@ -107,3 +114,9 @@ continuous-versus-restored optimizer trajectories. The runner is also exercised
 with a synthetic CPU model and mandatory assessment callback. Those tests do
 not download data, verify real source-family exclusion, certify BF16 behavior,
 measure GPU fit or establish downstream scientific quality.
+
+The prepared local consumer additionally binds its parity receipt to the current
+executed learner source, the intended optimization versus objective-validation
+capability, the exact resolved backbone/site/precision and each prepared view
+digest. Evaluation reopens immutable checkpoint bytes and rejects a mutated
+in-memory payload before it loads codec weights.

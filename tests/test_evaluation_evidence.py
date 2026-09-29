@@ -119,20 +119,28 @@ def test_installed_recipe_keeps_callable_preprocessing_through_factory(monkeypat
                        data_settings={"name": "Rowan/hellaswag", "revision": "pinned-revision"})
 
 
-def observation_fixture(monkeypatch):
+def observation_fixture(monkeypatch, tmp_path):
     from contextlib import nullcontext
     from dataclasses import asdict
-    from jscc.experiment_state import CheckpointRef, ValidatedState
+    import torch
+    from jscc.experiment_state import open_state, save_state
     from jscc.models.split_model import ResolvedSite
     site = ResolvedSite("after_layer", 9, "revision", 24, 8, "encoder.layers.9")
     monkeypatch.setattr("jscc.models.split_model.resolve_encoder_site", lambda *args: site)
     metadata = {"snapshot_role": "initialization", "completed_updates": 0,
                 "model_state_contract": "codec-only-stateless-channel-v1",
                 "site": asdict(site), "config_identity": "config", "source_identity": "source",
-                "protocol_identity": "protocol", "parent_identity": None}
-    state = ValidatedState({"kind": "single_site_v2", "metadata": metadata, "model": {}},
-                           CheckpointRef("checkpoint", "hash", 1))
-    request = {"schema": "codec-observation-v1", "checkpoint_sha256": "hash",
+                "protocol_identity": "protocol", "parent_identity": None,
+                "initialization_identity": "init", "stream_identity": "stream",
+                "phase": "both", "lineage": []}
+    codec = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(codec.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
+    reference = save_state(tmp_path / "fixture.pt", model=codec, optimizer=optimizer,
+                           scheduler=scheduler, scaler=None, metadata=metadata,
+                           stream_state={"completed_updates": 0, "offset": 0})
+    state = open_state(reference, expected=metadata)
+    request = {"schema": "codec-observation-v1", "checkpoint_sha256": reference.sha256,
                "target_site": asdict(site), "target_role": "trained", "task": "hellaswag",
                "input_ids": [7], "source_family_ids": ["source-7"], "prompt_policy": "native",
                "noise": {"seed": 12, "namespace": "fixture"}, "layout": "full", "backend": "eager", "precision": "fp32",
@@ -140,7 +148,9 @@ def observation_fixture(monkeypatch):
                "expected_items": 1, "settings": {"num_samples": 1}, "data_settings": {},
                "conditions": ["no_noise", -6, 0, 6, 12, 18], "config": "config", "data": "data",
                "parent": None, "panel": "initialization-task", "protocol": "protocol",
-               "learner_kind": "single_site_v2", "step": 0}
+               "learner_kind": "single_site_v2", "step": 0,
+               "comparison": {key: "synthetic-" + key for key in
+                              ("architecture", "initialization", "training_data", "objective", "exposure", "schedule")}}
     loaded = []
     model = SimpleNamespace(base=object(), codec=SimpleNamespace(load_state_dict=loaded.append),
                             training=True, eval=lambda: None, train=lambda value: None,
@@ -150,9 +160,9 @@ def observation_fixture(monkeypatch):
     return state, request, model, loaded
 
 
-def test_full_observation_identity_binds_noise_checkpoint_and_site(monkeypatch):
+def test_full_observation_identity_binds_noise_checkpoint_and_site(monkeypatch, tmp_path):
     from jscc.evaluation import codec_observation_identity
-    _, request, _, _ = observation_fixture(monkeypatch)
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
     original = codec_observation_identity(request)
     for field, value in (("checkpoint_sha256", "other"), ("scorer", "other"),
                          ("source", "other"), ("noise", {"seed": 13, "namespace": "fixture"}), ("input_ids", [8])):
@@ -164,7 +174,7 @@ def test_full_observation_identity_binds_noise_checkpoint_and_site(monkeypatch):
 
 def test_v2_initialization_gate_precedes_weights_and_preserves_split(monkeypatch, tmp_path):
     from jscc.evaluation import evaluate_checkpoint
-    state, request, model, loaded = observation_fixture(monkeypatch)
+    state, request, model, loaded = observation_fixture(monkeypatch, tmp_path)
     request["target_role"] = "heldout_after_freeze"
     with pytest.raises(ValueError, match="saved site"):
         evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
@@ -175,7 +185,7 @@ def test_v2_initialization_gate_precedes_weights_and_preserves_split(monkeypatch
 def test_six_condition_observation_retains_failure_and_restores_rng(monkeypatch, tmp_path):
     import torch
     from jscc import evaluation
-    state, request, model, loaded = observation_fixture(monkeypatch)
+    state, request, model, loaded = observation_fixture(monkeypatch, tmp_path)
     initial_rng = torch.get_rng_state().clone()
 
     def adapter(model, processor, settings, output, condition, data_settings):
@@ -189,7 +199,7 @@ def test_six_condition_observation_retains_failure_and_restores_rng(monkeypatch,
     monkeypatch.setattr(evaluation, "evaluate_hellaswag", adapter)
     receipt = evaluation.evaluate_checkpoint(state, request, model=model, processor=None,
                                             output=tmp_path / "observation")
-    assert loaded == [{}]
+    assert len(loaded) == 1 and set(loaded[0]) == {"weight", "bias"}
     assert torch.equal(initial_rng, torch.get_rng_state())
     assert receipt["status"] == "incomplete"
     assert len(receipt["conditions"]) == 6
@@ -203,9 +213,9 @@ def test_six_condition_observation_retains_failure_and_restores_rng(monkeypatch,
 
 def test_shared_heldout_requires_bound_freeze_before_weight_load(monkeypatch, tmp_path):
     from dataclasses import asdict
-    from jscc.evaluation import evaluate_checkpoint
+    from jscc.evaluation import validate_evaluation_target
     from jscc.models.split_model import ResolvedSite
-    state, request, model, loaded = observation_fixture(monkeypatch)
+    state, request, model, loaded = observation_fixture(monkeypatch, tmp_path)
     site = ResolvedSite("after_layer", 14, "revision", 24, 8, "encoder.layers.14")
     monkeypatch.setattr("jscc.models.split_model.resolve_encoder_site", lambda *args: site)
     state.payload["kind"] = "shared_encoder_v2"
@@ -214,7 +224,7 @@ def test_shared_heldout_requires_bound_freeze_before_weight_load(monkeypatch, tm
     state.payload["metadata"]["evaluation_sites"] = {
         "enc_l14": {"site": asdict(site), "role": "heldout_after_freeze"}}
     with pytest.raises(ValueError, match="freeze receipt"):
-        evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
+        validate_evaluation_target(state, request, model)
     assert loaded == []
 
 
@@ -228,7 +238,7 @@ def test_legacy_entrypoint_rejects_versioned_checkpoint(monkeypatch, tmp_path):
 
 def test_item_mismatch_retains_actual_denominator(monkeypatch, tmp_path):
     from jscc import evaluation
-    state, request, model, _ = observation_fixture(monkeypatch)
+    state, request, model, _ = observation_fixture(monkeypatch, tmp_path)
 
     def adapter(model, processor, settings, output, condition, data_settings):
         (output / f"compact_{condition}.jsonl").write_text(json.dumps(
@@ -245,10 +255,10 @@ def test_item_mismatch_retains_actual_denominator(monkeypatch, tmp_path):
         assert condition["metrics"]["acc"] == 0.0
 
 
-def test_records_projection_identity_and_unavailable_measure(monkeypatch):
+def test_records_projection_identity_and_unavailable_measure(monkeypatch, tmp_path):
     import hashlib
     from jscc.evaluation import codec_observation_identity, observation_event_payload
-    _, request, _, _ = observation_fixture(monkeypatch)
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
     receipt = {"request": request, "identity": codec_observation_identity(request),
                "status": "incomplete", "reuse": None, "conditions": [
                    {"condition": "no_noise", "requested": 1, "completed": 0, "failed": None,
@@ -270,15 +280,74 @@ def test_records_projection_identity_and_unavailable_measure(monkeypatch):
     assert row["metrics"]["task_score"] == {"value": None, "reason": "adapter interrupted"}
 
 
-def test_records_projection_retains_item_values(monkeypatch):
+def test_records_projection_retains_item_values(monkeypatch, tmp_path):
     from jscc.evaluation import codec_observation_identity, observation_event_payload
-    _, request, _, _ = observation_fixture(monkeypatch)
-    item = {"sample_id": 7, "source_id": "family-7", "raw_scores": [-1.0, -2.0], "denominators": [2, 3]}
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
+    item = {"sample_id": 7, "source_id": "family-7", "raw_scores": [-1.0, -2.0], "denominators": [2, 3],
+            "tokens": [4, 5], "raw_correct": 0, "normalized_correct": 0,
+            "normalized_prediction": 1, "normalized_scores": [-0.5, -0.4]}
     receipt = {"request": request, "identity": codec_observation_identity(request),
                "status": "incomplete", "conditions": [
                    {"condition": "no_noise", "requested": 1, "completed": 1, "failed": 0,
                     "denominator": 1, "metrics": {"acc": 0.0, "num_samples": {"effective": 1}},
                     "items": [item], "unobserved": 0}]}
     row = observation_event_payload(receipt)["conditions"][0]
-    assert row["items"][0] == {**item, "item_id": "7"}
+    assert row["items"][0] == {**item, "item_id": "7", "prediction": "1", "score": -0.4}
     assert row["metrics"]["acc"] == {"value": 0.0, "reason": None}
+
+
+
+@pytest.mark.parametrize("tamper", ["metadata", "tensor", "corrupt", "delete"])
+def test_evaluation_reopens_checkpoint_before_mutation(monkeypatch, tmp_path, tamper):
+    from pathlib import Path
+    from jscc.evaluation import evaluate_checkpoint
+    state, request, model, loaded = observation_fixture(monkeypatch, tmp_path)
+    if tamper == "metadata":
+        state.payload["metadata"]["site"]["index"] = 8
+    elif tamper == "tensor":
+        state.payload["model"]["weight"].add_(1)
+    elif tamper == "corrupt":
+        Path(state.reference.path).write_bytes(b"corrupt")
+    else:
+        Path(state.reference.path).unlink()
+    with pytest.raises((ValueError, FileNotFoundError)):
+        evaluate_checkpoint(state, request, model=model, processor=None, output=tmp_path / "observation")
+    assert loaded == []
+    assert not (tmp_path / "observation").exists()
+
+
+def test_observation_comparison_requires_explicit_controls(monkeypatch, tmp_path):
+    from jscc.evaluation import codec_observation_identity
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
+    del request["comparison"]["exposure"]
+    with pytest.raises(ValueError, match="comparison control"):
+        codec_observation_identity(request)
+
+
+def test_actual_harness_document_tokens_are_joined(tmp_path):
+    from jscc.evaluation import _observation_items
+    (tmp_path / "compact_no_noise.jsonl").write_text(json.dumps(
+        {"sample_id": 7, "source_id": "source-7", "normalized_prediction": 1}) + "\n")
+    (tmp_path / "documents.jsonl").write_text(json.dumps(
+        {"sample_id": 7, "requests": [{"continuation_token_ids": [3]},
+                                      {"continuation_token_ids": [4, 5]}]}) + "\n")
+    items, ids, families = _observation_items(tmp_path, "hellaswag", "no_noise")
+    assert ids == [7] and families == ["source-7"]
+    assert items[0]["tokens"] == [4, 5]
+    assert items[0]["tokens_policy"] == "normalized-prediction-continuation-v1"
+
+
+def test_records_coco_projection_uses_actual_generation_fields(monkeypatch, tmp_path):
+    from jscc.evaluation import codec_observation_identity, observation_event_payload
+    _, request, _, _ = observation_fixture(monkeypatch, tmp_path)
+    request["task"] = "coco"
+    item = {"image_id": 7, "token_ids": [0, 4, 1], "raw_caption": "Cat\nother",
+            "caption": "Cat", "cider": 0.4, "eos": True, "truncated": False}
+    receipt = {"request": request, "identity": codec_observation_identity(request),
+               "status": "incomplete", "conditions": [
+                   {"condition": "no_noise", "requested": 1, "completed": 1, "failed": 0,
+                    "denominator": 1, "metrics": {"cider": 0.4}, "items": [item], "unobserved": 0}]}
+    row = observation_event_payload(receipt)["conditions"][0]
+    assert row["items"][0] == {**item, "item_id": "7", "source_id": "7", "tokens": [0, 4, 1],
+                               "caption_raw": "Cat\nother", "caption_clean": "Cat", "cap_hit": False}
+    assert row["metrics"]["cider"] == {"value": 0.4, "reason": None}

@@ -101,7 +101,7 @@ class SplitModel(nn.Module):
         self._routing_active = False
         self._forward_active = 0
         # Generation can call encoder/decoder stacks without base.forward.
-        for guarded in (base, stack_module(base, "enc"), stack_module(base, "dec")):
+        for guarded in (stack_module(base, "enc"), stack_module(base, "dec")):
             guarded.register_forward_pre_hook(self._enter_base_forward)
             guarded.register_forward_hook(self._exit_base_forward, always_call=True)
         stack = stack_module(base, split["stack"])
@@ -452,10 +452,12 @@ class SplitModel(nn.Module):
                     self._active_encoder_valid_mask, self._encoder_mask_representation,
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
+        self._forward_active += 1
         try:
             with self.attention_context():
                 return self.base(**kwargs)
         finally:
+            self._forward_active -= 1
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
              self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
@@ -470,10 +472,12 @@ class SplitModel(nn.Module):
                     self._active_encoder_valid_mask, self._encoder_mask_representation,
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
+        self._forward_active += 1
         try:
             with self.attention_context():
                 return self.base.generate(**kwargs)
         finally:
+            self._forward_active -= 1
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
              self._decoder_mask_representation, self._active_encoder_mask_representation) = previous

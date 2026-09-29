@@ -381,6 +381,15 @@ def _observation_items(output, task, condition):
         ids = [row["image_id"] for row in rows]
         families = ids  # Each COCO image is the source family for its captions.
     else:
+        document_path = output / "documents.jsonl"
+        if document_path.exists():
+            documents = {row["sample_id"]: row for row in
+                         (json.loads(line) for line in document_path.read_text().splitlines() if line.strip())}
+            for row in rows:
+                document = documents[row["sample_id"]]
+                prediction = row["normalized_prediction"]
+                row["tokens"] = document["requests"][prediction]["continuation_token_ids"]
+                row["tokens_policy"] = "normalized-prediction-continuation-v1"
         ids = [row["sample_id"] for row in rows]
         families = [row["source_id"] for row in rows]
     return rows, ids, families
@@ -393,8 +402,12 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
     has a fresh directory; partial evidence and failures remain in the receipt.
     No count here certifies scientific quality or a validation threshold.
     """
-    from .experiment_state import isolated_rng as state_isolated_rng
+    from .experiment_state import isolated_rng as state_isolated_rng, open_state
     identity = codec_observation_identity(request)
+    reopened = open_state(validated_state.reference, expected=validated_state.payload["metadata"])
+    if not _state_payload_equal(validated_state.payload, reopened.payload):
+        raise ValueError("Validated state payload was modified after checkpoint validation")
+    validated_state = reopened
     site, authorization = validate_evaluation_target(validated_state, request, model)
     settings = copy.deepcopy(request["settings"])
     settings["noise_seed"] = request["noise"]["seed"]
@@ -563,6 +576,11 @@ def observation_record_request(request):
     def reference(value):
         return value if isinstance(value, str) and value else "sha256:" + digest(value)
 
+    comparison = request.get("comparison", {})
+    controls = {"architecture", "initialization", "training_data", "objective", "exposure", "schedule"}
+    if (set(comparison) != controls or any(not isinstance(value, str) or not value.strip()
+                                           for value in comparison.values())):
+        raise ValueError("Observation requires explicit nonempty comparison control references")
     site = request["target_site"]
     site_id = "enc_fn" if site["where"] == "after_final_norm" else f"enc_l{site['index']}"
     kind = ("initialization" if request["step"] == 0 else
@@ -577,6 +595,7 @@ def observation_record_request(request):
         "conditions": list(request["conditions"]), "expected_items": request["expected_items"],
         "learner_kind": kind, "step": request["step"],
         "site_step": request.get("site_step", request["step"]), "purpose": "task",
+        "objective_kind": None, "comparison": copy.deepcopy(comparison),
         "details": {"prompt": reference(request["prompt_policy"]),
                     "native_policy": reference(request["settings"]),
                     "draws": reference(request["noise"]),
@@ -613,7 +632,27 @@ def observation_event_payload(receipt):
             source_id = item.get("source_id", item.get("image_id"))
             if item_id is None or source_id is None:
                 raise ValueError("Cannot project item with unavailable item/source identity")
-            items.append({**item, "item_id": str(item_id), "source_id": str(source_id)})
+            normalized = {**item, "item_id": str(item_id), "source_id": str(source_id)}
+            if receipt["request"]["task"] == "hellaswag":
+                required = ("tokens", "raw_correct", "normalized_correct", "normalized_prediction", "normalized_scores")
+                if any(key not in item for key in required):
+                    raise ValueError("HellaSwag item lacks actual token/prediction/correctness evidence")
+                prediction = item["normalized_prediction"]
+                normalized.update(raw_correct=int(item["raw_correct"]),
+                                  normalized_correct=int(item["normalized_correct"]),
+                                  prediction=str(prediction), score=item["normalized_scores"][prediction])
+            else:
+                required = ("token_ids", "raw_caption", "caption", "cider", "eos", "truncated")
+                if any(key not in item for key in required):
+                    raise ValueError("COCO item lacks actual caption/token/generation evidence")
+                normalized.update(tokens=item["token_ids"], caption_raw=item["raw_caption"],
+                                  caption_clean=item["caption"], cap_hit=item["truncated"])
+            items.append(normalized)
+        task_fields = ({"raw_accuracy": "raw_correct", "normalized_accuracy": "normalized_correct"}
+                       if receipt["request"]["task"] == "hellaswag" else {"cider": "cider"})
+        for metric, field in task_fields.items():
+            metrics[metric] = ({"value": sum(item[field] for item in items) / len(items), "reason": None}
+                               if items else {"value": None, "reason": "No completed per-item task evidence"})
         conditions.append({"condition": row["condition"], "requested": row["requested"],
                            "completed": row["completed"], "failed": row["failed"],
                            "failure_reason": (row.get("failure_scope", "Per-item failure count unavailable")
@@ -623,3 +662,21 @@ def observation_event_payload(receipt):
                            "items": items, "objectives": {}})
     return {"request": observation_record_request(receipt["request"]), "identity": receipt["identity"],
             "status": receipt["status"], "conditions": conditions, "reuse": receipt.get("reuse")}
+
+
+
+def _state_payload_equal(left, right):
+    """Compare a caller's mutable state against freshly verified artifact bytes."""
+    import numpy as np
+    if isinstance(left, torch.Tensor):
+        return (isinstance(right, torch.Tensor) and left.dtype == right.dtype
+                and left.shape == right.shape and torch.equal(left.cpu(), right.cpu()))
+    if isinstance(left, np.ndarray):
+        return isinstance(right, np.ndarray) and left.dtype == right.dtype and np.array_equal(left, right)
+    if isinstance(left, dict):
+        return (isinstance(right, dict) and left.keys() == right.keys()
+                and all(_state_payload_equal(value, right[key]) for key, value in left.items()))
+    if isinstance(left, (tuple, list)):
+        return (type(left) is type(right) and len(left) == len(right)
+                and all(_state_payload_equal(a, b) for a, b in zip(left, right)))
+    return type(left) is type(right) and left == right

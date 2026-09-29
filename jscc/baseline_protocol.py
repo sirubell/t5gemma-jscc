@@ -125,6 +125,9 @@ class BaselineLearner:
         dtype = next(model.base.parameters()).dtype
         self.scaler = GradScaler("cuda", enabled=device.type == "cuda" and dtype == torch.float16)
         self.run_id, self.task, self.identity, self.pairing_id = run_id, task, identity, pairing_id
+        self.noise_identity = canonical_digest({"pairing_id": pairing_id, "schema": "runtime-awgn-replay-v2",
+            "torch": str(torch.__version__), "device": str(device), "dtype": str(dtype),
+            "snr": "per-sequence-uniform[-6,18]", "streams": ["hidden"]})
         self.final_step, self.effective_batch, self.grad_clip = final_step, effective_batch, grad_clip
         self.event_sink = event_sink
         self.completed = self.attempted = self.offset = self.valid_tokens = 0
@@ -150,7 +153,8 @@ class BaselineLearner:
         namespace = noise_namespace(NoiseKey(self.pairing_id,
             "training" if purpose == "train" else "validation", "enc_fn",
             step if purpose == "train" else 0, batch_identity(batch),
-            canonical_digest({"shape": key["layout"], "micro": micro}), condition=str(condition)))
+            canonical_digest({"shape": key["layout"], "micro": micro}), condition=str(condition),
+            draw_schema="runtime-awgn-replay-v2"))
         device = next(self.model.base.parameters()).device
         if condition == "uniform":
             generator = torch.Generator(device=device).manual_seed(derived_seed(0, namespace + ":snr"))
@@ -313,7 +317,7 @@ def write_manifest(path, value):
 
 
 def run_baseline(learner, *, output, metadata, update_batches, validation_batches,
-                 assess, segment=None, parent=None, reused_assessments=None):
+                 assess, segment=None, parent=None, reused_assessments=None, task_request=None):
     """Execute a declared segment, including mandatory saves and measurements.
 
     ``update_batches(index)`` reads the immutable global stream without cycling.
@@ -337,12 +341,15 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
     if not segment.start and parent is not None:
         raise ValueError("fresh segment cannot load parent weights")
     output = Path(output)
-    output.mkdir(parents=True, exist_ok=False)
     learner.phase_start_step = segment.start
     kind = "combined" if segment.strategy in {"both", "staged"} else "local"
     metadata = dict(metadata)
+    if metadata.get("noise_identity", learner.noise_identity) != learner.noise_identity:
+        raise ValueError("learner pairing/noise identity differs from preparation")
+    metadata["noise_identity"] = learner.noise_identity
     if parent is not None:
-        for key in ("source_identity", "config_identity", "initialization_identity", "stream_identity", "protocol_identity"):
+        parent = open_state(parent.reference, expected=parent.payload["metadata"])
+        for key in ("source_identity", "config_identity", "initialization_identity", "stream_identity", "protocol_identity", "noise_identity"):
             if parent.payload["metadata"][key] != metadata[key]:
                 raise ValueError(f"phase continuation {key} differs from parent")
         metadata = branch_metadata(parent, phase=segment.strategy)
@@ -353,6 +360,8 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
         learner.offset, learner.valid_tokens = stream["offset"], stream["source_valid_tokens"]
     elif learner.completed or learner.attempted:
         raise ValueError("fresh segment learner already consumed work")
+    output.mkdir(parents=True, exist_ok=False)
+    learner.final_step = segment.stop
     checkpoints, objectives, assessments = [], [], []
     original_sink = learner.event_sink
     def sink(event):
@@ -377,7 +386,12 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
         save_config(metadata["config"], output / "config.yaml")
     if "data_ids" in metadata:
         write_manifest(output / "data_ids.json", metadata["data_ids"])
+    def cost(category, started):
+        learner._event("cost", kind, {"category": category, "seconds": measure(time.monotonic() - started),
+            "attribution": "first_use", "site_id": "enc_fn", "scope": "host_wall",
+            "concurrency": "single_process", "device_count": int(next(learner.model.base.parameters()).is_cuda)})
     def save(step):
+        started = time.monotonic()
         state_metadata = {**metadata, "completed_updates": step, "phase": segment.strategy,
                           "snapshot_role": "initialization" if step == 0 else "trained"}
         reference = save_state(output / f"step_{step:06d}.pt", model=learner.model.codec,
@@ -386,8 +400,10 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
                 "source_valid_tokens": learner.valid_tokens})
         checkpoints.append(asdict(reference))
         write_manifest(output / "checkpoints.json", checkpoints)
+        cost("checkpoint_io", started)
         return open_state(reference, expected=state_metadata)
     def measure_at(step, state, task_required):
+        started = time.monotonic()
         validation = validation_batches(kind)
         records = learner.validate(validation, kind=kind)
         path = output / f"objective_{step:06d}.json"
@@ -395,8 +411,16 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
                              "kind": kind, "conditions": records})
         objectives.append({"step": step, "path": path.name, "sha256": file_digest(path)})
         learner._event("observation", kind, objective_event_payload(learner, state, records, validation, path))
+        cost("objective_validation", started)
         if task_required:
+            started = time.monotonic()
             receipt = assess(state, output / "evaluations" / f"step_{step:06d}")
+            if task_request is not None:
+                expected_request = {**task_request, "checkpoint_sha256": state.reference.sha256,
+                                    "step": step, "parent": state.payload["metadata"]["parent_identity"]}
+                validate_task_receipt(receipt, expected_request)
+            elif not learner.synthetic:
+                raise ValueError("real runner requires full task observation request")
             if receipt.get("status") != "complete" or len(receipt.get("conditions", [])) != len(CONDITIONS):
                 raise RuntimeError("mandatory task assessment incomplete")
             if [row["condition"] for row in receipt["conditions"]] != list(CONDITIONS):
@@ -405,6 +429,7 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
             if "request" in receipt:
                 from .evaluation import observation_event_payload
                 learner._event("observation", kind, observation_event_payload(receipt))
+            cost("task_scoring", started)
     try:
         initial = save(segment.start)
         # Staged entry computes functional K/R, in addition to the parent's local validation.
@@ -414,10 +439,13 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
             if reuse is None:
                 raise ValueError("deduplicated task assessment requires exact prior state and receipt")
             reused_state, receipt = reuse["state"], reuse["receipt"]
-            request = receipt.get("request", {})
-            if receipt.get("status") != "complete" or request.get("checkpoint_sha256") != reused_state.reference.sha256:
-                raise ValueError("incomplete or unbound reused task assessment")
-            for key in ("source_identity", "config_identity", "initialization_identity", "protocol_identity"):
+            reused_state = open_state(reused_state.reference, expected=reused_state.payload["metadata"])
+            if task_request is None:
+                raise ValueError("reuse requires the currently declared full task request")
+            expected_request = {**task_request, "checkpoint_sha256": reused_state.reference.sha256,
+                                "step": segment.start, "parent": reused_state.payload["metadata"]["parent_identity"]}
+            validate_task_receipt(receipt, expected_request)
+            for key in ("source_identity", "config_identity", "initialization_identity", "protocol_identity", "noise_identity"):
                 if reused_state.payload["metadata"][key] != metadata[key]:
                     raise ValueError("reused task assessment provenance mismatch")
             current = learner.model.codec.state_dict()
@@ -434,6 +462,10 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
                 measure_at(step, state, step in segment.assessments)
         if learner.completed != segment.stop:
             raise RuntimeError("finite segment ended before required completed updates")
+        learner._event("footprint", kind, {"scope": "per_site", "site_id": "enc_fn",
+            "parameter_count": measure(sum(p.numel() for p in learner.model.codec.parameters())),
+            "checkpoint_bytes": measure(sum(ref["size"] for ref in checkpoints)),
+            "checkpoint_refs": [Path(ref["path"]).name for ref in checkpoints]})
         result = {"schema": "baseline-completion-v2", "status": "complete", "segment": asdict(segment),
                   "attempted_updates": learner.attempted, "completed_updates": learner.completed,
                   "checkpoints": checkpoints, "objective_observations": objectives,
@@ -473,11 +505,79 @@ def objective_event_payload(learner, state, records, batches, artifact):
                "backend": str(learner.model.sdpa_backend_policy), "conditions": list(CONDITIONS),
                "expected_items": len(items), "learner_kind": "initialization" if learner.completed == 0 else "specialist",
                "step": learner.completed, "site_step": learner.completed, "purpose": "objective",
+               "objective_kind": records[0]["objective"]["kind"],
+               "comparison": comparison_refs(learner, metadata, records[0]["objective"]["kind"]),
                "details": {"prompt": panel, "native_policy": panel,
-                           "draws": str(artifact), "outputs": str(artifact)}}
+                           "draws": canonical_digest({"noise": learner.noise_identity, "panel": panel, "purpose": "objective_validation"}),
+                           "outputs": "baseline-objective-v2"}}
     identity = hashlib.sha256(b"codec-observation-v1\0" + json.dumps(
         request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return {"request": request, "identity": identity, "status": "complete", "reuse": None,
             "conditions": [{"condition": row["condition"], "requested": len(items), "completed": len(items),
                             "failed": 0, "failure_reason": None, "denominator": len(items), "metrics": {},
                             "items": items, "objectives": row["objective"]["components"]} for row in records]}
+
+
+def comparison_refs(learner, metadata, kind):
+    """Actual recipe control identities; synthetic fixtures are labeled explicitly."""
+    if "comparison" in metadata:
+        result = dict(metadata["comparison"])
+    elif learner.synthetic:
+        result = {key: "synthetic:" + key for key in
+                  ("architecture", "initialization", "training_data", "objective", "exposure", "schedule")}
+    else:
+        raise ValueError("prepared state requires explicit comparison-control identities")
+    if set(result) != {"architecture", "initialization", "training_data", "objective", "exposure", "schedule"} or any(
+        not isinstance(value, str) or not value for value in result.values()
+    ):
+        raise ValueError("invalid comparison-control identities")
+    # A local observation describes its actually evaluated objective, independently of strategy.
+    result["objective"] = canonical_digest(objective_settings(kind))
+    return result
+
+
+def validate_task_receipt(receipt, expected_request):
+    """A complete flag cannot replace exact immutable observation evidence."""
+    from .evaluation import codec_observation_identity
+    expected_identity = codec_observation_identity(expected_request)
+    if receipt.get("request") != expected_request or receipt.get("identity") != expected_identity:
+        raise ValueError("task observation identity differs from required panel/noise/scorer contract")
+    rows = receipt.get("conditions", [])
+    if receipt.get("status") != "complete" or [r.get("condition") for r in rows] != list(CONDITIONS):
+        raise ValueError("task observation conditions incomplete")
+    count = expected_request["expected_items"]
+    for row in rows:
+        if row.get("status") != "complete" or any(row.get(key) != count for key in ("requested", "completed", "denominator")) or row.get("failed") != 0:
+            raise ValueError("task observation item accounting incomplete")
+        items = row.get("items", [])
+        ids = [item.get("sample_id", item.get("image_id")) for item in items]
+        families = [item.get("source_id", item.get("image_id")) for item in items]
+        if ids != expected_request["input_ids"] or families != expected_request["source_family_ids"]:
+            raise ValueError("task observation item/source membership mismatch")
+        if not row.get("metrics") or row.get("error"):
+            raise ValueError("task observation scores unavailable or condition failed")
+
+
+def open_baseline_replay(directory, requirement, *, source_identity, role, site, backbone, dtype):
+    """Bind a producer bank to this consumer, not to self-asserted requirements."""
+    from dataclasses import asdict
+    from .activation_replay import open_replay
+    capability = {"optimization": "local_reconstruction", "objective_validation": "objective_validation"}.get(role)
+    if (capability is None or requirement.get("capability") != capability
+            or requirement.get("data_role") != role
+            or requirement.get("learner_source_sha256") != source_identity):
+        raise ValueError("replay consumer source/role/capability differs from current learner")
+    replay = open_replay(directory, requirement)
+    producer = replay.manifest["producer"]
+    expected_site = {**asdict(site), "site_id": site.site_id, "split": site.split}
+    if (producer["sites"] != [expected_site] or producer["backbone"] != backbone
+            or producer["environment"]["activation_dtype"] != str(dtype)):
+        raise ValueError("replay backbone/site/precision differs from actual consumer binding")
+    return replay
+
+
+def read_replay_batch(replay, reference):
+    batch = replay.read(reference["batch_view_id"], "enc_fn")
+    if batch_identity(batch) != reference["view_sha256"]:
+        raise ValueError("replayed input/view differs from prepared ordered stream")
+    return batch

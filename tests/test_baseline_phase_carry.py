@@ -88,3 +88,68 @@ def test_real_cpu_200_to_201_of_400_full_state_carry(tmp_path):
     for key, value in optimizer.state_dict()["state"].items():
         for name, tensor in value.items():
             assert torch.equal(tensor, restored[1].state_dict()["state"][key][name])
+
+
+def test_real_local_prefix_online_branch_preserves_pairing_and_update(tmp_path):
+    import copy
+    import pytest
+    from jscc.baseline_protocol import BaselineLearner, run_baseline, CONDITIONS
+    from jscc.experiment_schedule import Segment
+    from jscc.experiment_state import save_state, open_state
+    from jscc.runtime import model_inputs
+    from test_core import toy_model, batch
+
+    model = toy_model(where="after_final_norm")
+    model.codec.film = None
+    b = {k: v.repeat(32, 1) for k, v in batch().items()}
+    def make(model, pairing="shared-pair"):
+        return BaselineLearner(model, run_id="carry-cpu", task="hellaswag", synthetic=True,
+            identity={"source": "s", "config": "c", "data": "d", "parent": None}, pairing_id=pairing)
+    continuous = make(model)
+    kwargs, _ = model_inputs(b, model)
+    captured = []
+    with torch.no_grad(), model.transmission(bypass=True):
+        handle = model.base.enc.norm.register_forward_hook(lambda _m, _a, o: captured.append(o.detach().clone()))
+        model(**kwargs)
+        handle.remove()
+    local = {**b, "activation": captured[0], "site_id": "enc_fn"}
+    for _ in range(200):
+        continuous.update([local], kind="local")
+    metadata = dict(source_identity="s", config_identity="c", parent_identity=None,
+                    initialization_identity="i", stream_identity="stream", protocol_identity="p", lineage=[],
+                    phase="reconstruction-prefix", completed_updates=200, noise_identity=continuous.noise_identity)
+    reference = save_state(tmp_path / "parent.pt", model=model.codec, optimizer=continuous.optimizer,
+        scheduler=continuous.scheduler, scaler=continuous.scaler, metadata=metadata,
+        stream_state={"completed_updates": 200, "offset": 12800, "source_valid_tokens": continuous.valid_tokens})
+    parent = open_state(reference, expected=metadata)
+    def clone_model():
+        clone = toy_model(where="after_final_norm")
+        clone.codec.film = None
+        clone.load_state_dict(model.state_dict())
+        return clone
+    mismatched = make(clone_model(), "changed-pair")
+    segment = Segment("synthetic", "staged", 200, 201, (201,), (200, 201))
+    with pytest.raises(ValueError, match="pairing/noise"):
+        run_baseline(mismatched, output=tmp_path / "rejected", metadata=metadata,
+                     update_batches=lambda *_: [b], validation_batches=lambda _: [b], assess=lambda *_: None,
+                     segment=segment, parent=parent)
+    assert not (tmp_path / "rejected").exists()
+    branched = make(clone_model())
+    expected = continuous.update([b], kind="combined")
+    expected_weights = copy.deepcopy(model.codec.state_dict())
+    events = []
+    branched.event_sink = events.append
+    run_baseline(branched, output=tmp_path / "branch", metadata=metadata,
+        update_batches=lambda *_: [b], validation_batches=lambda _: [b],
+        assess=lambda *_: {"status": "complete", "conditions": [{"condition": c} for c in CONDITIONS]},
+        segment=segment, parent=parent)
+    actual = next(event for event in events if event["event_type"] == "update")
+    assert actual["payload"]["snr"] == expected["payload"]["snr"]
+    assert actual["payload"]["lr_used"] == expected["payload"]["lr_used"]
+    assert actual["payload"]["objective"] == expected["payload"]["objective"]
+    for name, value in branched.model.codec.state_dict().items():
+        torch.testing.assert_close(value, expected_weights[name], rtol=0, atol=0)
+    for actual_state, expected_state in zip(branched.optimizer.state.values(), continuous.optimizer.state.values()):
+        for key in actual_state:
+            torch.testing.assert_close(actual_state[key], expected_state[key], rtol=0, atol=0)
+    assert branched.offset == continuous.offset == 12864
