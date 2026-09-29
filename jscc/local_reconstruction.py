@@ -18,8 +18,9 @@ from .models.channel import AWGNChannel
 from .presentation import derived_seed, initialization_evidence, training_source_digest
 from .runtime import (append_metrics, autocast_for, configure_training_determinism,
                       new_run, prepare_trainable_parameters, seed_everything)
-from .training import (BatchValues, aggregate_batch_losses, effective_batch_denominators,
-                       make_scheduler, save_checkpoint, scaled_batch_loss)
+from .training import make_scheduler, save_checkpoint
+from .training_objectives import (BatchValues, aggregate_batch_losses, detached_batch_values,
+                                  effective_batch_denominators, objective_components, scaled_batch_loss)
 
 
 def _recipe(config: dict) -> dict:
@@ -186,7 +187,6 @@ def local_batch_values(model, shard: dict, snr_db, settings: dict) -> BatchValue
         numerator, denominator = reconstruction_loss_stats(reconstructed, activation, mask)
     zero = numerator.detach().new_zeros(())
     hidden = numerator / denominator.clamp_min(1).to(numerator.dtype)
-    from .training import objective_components
     components = objective_components(zero, hidden, None, settings)
     return cast(BatchValues, {**components, "loss": components["loss"], "kl": zero, "nmse": hidden,
             "kl_numerator": zero, "kl_denominator": zero,
@@ -281,8 +281,7 @@ def run_local(config: dict, cache_dir: str | Path, *, deadline: float | None = N
                 with context:
                     values = local_batch_values(model, batch, snr, local_settings)
                 scaler.scale(scaled_batch_loss(values, local_settings, denominator)).backward()
-                results.append({key: value.detach() if torch.is_tensor(value) else value
-                                for key, value in values.items()})
+                results.append(detached_batch_values(values))
             totals = aggregate_batch_losses(results, local_settings)
             if not bool(torch.isfinite(totals["loss"])):
                 raise FloatingPointError(f"nonfinite local loss at step {step}")

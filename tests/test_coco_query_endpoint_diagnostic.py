@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tarfile
+from types import SimpleNamespace
 
 from PIL import Image
 import pytest
@@ -14,7 +15,7 @@ import yaml
 
 from model_helpers import tiny_backbone
 from jscc.coco_diagnostic import (
-    MAX_REQUESTS, RequestBudget, forward_endpoint, prefix_inputs, prefix_variants,
+    MAX_REQUESTS, RequestBudget, diagnostic_inputs, forward_endpoint, prefix_inputs, prefix_variants,
     prepare_manifest, prepare_pair, runtime_packages, score_logits, source_digest, teacher_student_kl,
     validate_selection, verify_historical_archive, verify_plan,
 )
@@ -96,6 +97,30 @@ def test_endpoint_logits_nonfinite_and_newline_semantics():
     assert teacher_student_kl(logits, logits) == pytest.approx(0.0, abs=1e-7)
     with pytest.raises(FloatingPointError):
         score_logits(torch.tensor([0.0, float("nan")]), 0, [1])
+
+
+def test_diagnostic_inputs_casts_only_pixels_and_preserves_original_inputs():
+    model = SimpleNamespace(base=torch.nn.Linear(2, 2, dtype=torch.bfloat16))
+    inputs = {"input_ids": torch.tensor([[2, 3]], dtype=torch.int64),
+              "attention_mask": torch.tensor([[1, 0]], dtype=torch.int32),
+              "pixel_values": torch.tensor([0.125, 0.5], dtype=torch.float32)}
+    original = dict(inputs)
+    snapshots = {key: value.clone() for key, value in inputs.items()}
+
+    source = diagnostic_inputs(model, inputs)
+
+    assert source is not inputs
+    assert source.keys() == inputs.keys()
+    assert all(value.device == model.base.weight.device for value in source.values())
+    assert source["pixel_values"].dtype == torch.bfloat16
+    assert torch.equal(source["pixel_values"], inputs["pixel_values"].bfloat16())
+    for key in ("input_ids", "attention_mask"):
+        assert source[key].dtype == inputs[key].dtype
+        assert torch.equal(source[key], inputs[key])
+    for key, value in inputs.items():
+        assert value is original[key]
+        assert value.dtype == snapshots[key].dtype
+        assert torch.equal(value, snapshots[key])
 
 
 def test_decoder_receiver_memory_is_used_in_real_tiny_full_forward():

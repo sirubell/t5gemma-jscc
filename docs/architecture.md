@@ -145,3 +145,11 @@ which lets diagnostics force math-only execution without changing dispatch globa
 ### Explicit functional phase reset
 
 The HellaSwag two-stage planner can opt into `--include-reset-control`, adding fresh functional E1 and weight-only child E to A/B/C/D. E1 uses the local-stage recipe with functional execution; E uses C's phase-two recipe. The E command requires its exact terminal parent checkpoint and `--parent-sha256`. Functional-parent transfer validates complete native functional receipts, current source, saved recipe, data IDs, exact presentation boundary and checkpoint bytes. It creates fresh optimizer/scheduler/scaler state rather than resuming training. Historical B-local transfer stays separate and unchanged. CPU lifecycle tests establish these semantics; full-weight GPU acceptance is recorded separately.
+
+## Code responsibilities
+
+`losses.py` contains numerical KL/reconstruction reductions. `training_objectives.py` owns the shared batch-statistics type, explicit/legacy objective weighting, and effective-batch aggregation used by functional and local reconstruction training. `training.py` owns teacher/student forwards, validation, optimizer-loop orchestration and checkpoint lifecycle. `local_reconstruction.py` owns cached reconstruction and phase-parent validation. This separation does not change objective formulas, stream masks, reduction order or schedules.
+
+The existing public objective helpers remain re-exported from `training.py` for historical scripts and top-level instrumentation; new shared-objective code should import from `training_objectives.py`. Functional training still invokes its imported aggregate/scaled-loss names so existing instrumentation can wrap those entry points. Private globals inside moved helpers belong to the objective module.
+
+COCO endpoint and trajectory diagnostics share input placement through `coco_diagnostic.diagnostic_inputs`: all source tensors move to the backbone device, and only image pixels adopt the backbone dtype. Diagnostic budgets, output schemas and distinct evidence-hash formats retain their existing definitions.

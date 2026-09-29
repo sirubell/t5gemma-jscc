@@ -138,9 +138,7 @@ class ForcedTrajectory(LogitsProcessor):
 
 
 def cached_replay(model, inputs, tokens: list[int], lengths: list[int], *, vanilla: bool, budget):
-    parameter = next(model.base.parameters())
-    source = {key: value.to(device=parameter.device, dtype=parameter.dtype if key == "pixel_values" else None)
-              for key, value in inputs.items()}
+    source = endpoint.diagnostic_inputs(model, inputs)
     captured: dict[int, torch.Tensor] = {}
     steps = 0
     def capture(_module, _args, result):

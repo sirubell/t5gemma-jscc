@@ -140,7 +140,9 @@ Resume creates a new run using the saved training recipe; the supplied YAML sele
 |---|---|
 | Shared model and task recipes | `configs/model.yaml`, `configs/tasks/coco.yaml`, `configs/tasks/hellaswag.yaml` |
 | Codec, channel and split hooks | `jscc/models/` |
-| Training and objectives | `jscc/training.py`, `jscc/losses.py` |
+| Functional training orchestration | `jscc/training.py` |
+| Shared objective accounting and numerical losses | `jscc/training_objectives.py`, `jscc/losses.py` |
+| Local reconstruction and activation replay | `jscc/local_reconstruction.py`, `jscc/activation_replay.py` |
 | Task data | `jscc/data/coco.py`, `jscc/data/hellaswag.py` |
 | Task evaluation | `jscc/evaluation.py` |
 | COCO and HellaSwag coverage | `tests/test_coco.py`, `tests/test_hellaswag.py` |
@@ -173,6 +175,8 @@ For local research, start with `docs/local/research/HANDOFF.md` when present. It
 
 - [Current defaults and historical recipe lineage](docs/current-defaults.md)
 - [COCO query-image and endpoint diagnostic](docs/coco-query-endpoint-diagnostic.md)
+- [COCO visited-generation trajectory diagnostic](docs/coco-trajectory-diagnostic.md)
+- [Shared encoder capture and replay acceptance](docs/shared-encoder-atlas.md)
 - [HellaSwag enc_l9 two-stage preparation and execution](docs/hellaswag-two-stage.md)
 - [Architecture, data, objectives and checkpoint semantics](docs/architecture.md)
 - [Configuration directory guide](configs/README.md)

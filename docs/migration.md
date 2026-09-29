@@ -38,3 +38,9 @@ New checkpoints contain codec/channel state, optimizer state, configuration and 
 Private source locations and historical artifact paths are recorded in docs/local/legacy.md when present. Keep an index of purpose, source/configuration, checkpoint, results and comparability before moving old data. Legacy results are not automatically comparable after changes to architecture or sample selection.
 
 See [architecture](architecture.md) for current behavior and [validation](validation.md) for what has been exercised.
+
+## Behavior-preserving maintenance split
+
+Shared batch statistics and objective aggregation moved from `training.py` to `training_objectives.py`; public `training.*` imports remain available. Local reconstruction uses the same objective and detachment helpers directly. CLI/configuration/checkpoint schemas and scientific defaults are unchanged. Existing top-level instrumentation of `training.aggregate_batch_losses` and `training.scaled_batch_loss` remains effective; callers changing objective internals should use the new module explicitly.
+
+Source fingerprints intentionally change: training provenance hashes Python filenames and bytes, so even this refactor changes identities. Existing source-bound replay caches and phase transfers must still reject a mismatched source. Reproduce historical runs from their frozen source; prepare fresh source bindings for new work. Do not rewrite saved identities or relax guards to reuse an old cache. This cleanup does not implement encoder-final replay or multi-site shared training.

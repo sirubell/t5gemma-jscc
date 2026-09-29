@@ -471,10 +471,16 @@ def load_mode(info: dict[str, Any], mode: str):
     return processor, model
 
 
+def diagnostic_inputs(model, inputs):
+    """Place source tensors on the backbone, casting only image pixels."""
+    parameter = next(model.base.parameters())
+    return {key: value.to(device=parameter.device, dtype=parameter.dtype if key == "pixel_values" else None)
+            for key, value in inputs.items()}
+
+
 def forward_endpoint(model, inputs, decoder, *, vanilla: bool = False):
     parameter = next(model.base.parameters())
-    source = {key: value.to(device=parameter.device, dtype=parameter.dtype if key == "pixel_values" else None)
-              for key, value in inputs.items()}
+    source = diagnostic_inputs(model, inputs)
     decoder = decoder.to(parameter.device)
     with torch.no_grad(), autocast_for(model), model.observe_payload() as events, model.transmission(None, bypass=vanilla,
             encoder_mask=source["attention_mask"], decoder_mask=torch.ones_like(decoder, dtype=torch.bool)):
@@ -486,9 +492,7 @@ def forward_endpoint(model, inputs, decoder, *, vanilla: bool = False):
 
 
 def generate_caption(model, processor, inputs, *, vanilla: bool = False):
-    parameter = next(model.base.parameters())
-    source = {key: value.to(device=parameter.device, dtype=parameter.dtype if key == "pixel_values" else None)
-              for key, value in inputs.items()}
+    source = diagnostic_inputs(model, inputs)
     decoder_calls = 0
     def counted(*_):
         nonlocal decoder_calls
