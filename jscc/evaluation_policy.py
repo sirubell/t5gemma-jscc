@@ -1,11 +1,13 @@
 """Versioned HellaSwag scoring and compact, independently recomputable evidence."""
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import math
 from pathlib import Path
 
 import torch
+from tokenizers import AddedToken
 
 
 EVALUATION_OPTIONS = {"scoring_policy", "evidence_mode", "mode", "noise_seed",
@@ -20,6 +22,27 @@ def digest(value):
 def file_digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _identity_json_default(value):
+    """Encode file-backed module functions; never use callable repr addresses."""
+    if callable(value):
+        if (not inspect.isfunction(value) or value.__qualname__ != value.__name__
+                or value.__name__ == "<lambda>" or value.__closure__
+                or value.__defaults__ or value.__kwdefaults__ or value.__dict__):
+            raise TypeError("Evaluation identity supports only stateless module-level Python functions")
+        source = inspect.getsourcefile(value)
+        if (source is None or not Path(source).is_file()
+                or value.__globals__.get(value.__name__) is not value):
+            raise TypeError("Evaluation identity requires a file-backed module function")
+        # lm-eval's YAML loader executes modules without adding them to sys.modules.
+        # Use the function's source file, not import_module(value.__module__). Hash
+        # the whole module to include helpers such as HellaSwag's preprocess().
+        return {"type": "python-module-function-v1", "module": value.__module__,
+                "qualname": value.__qualname__, "module_sha256": file_digest(source)}
+    if isinstance(value, (AddedToken, torch.dtype)):
+        return str(value)
+    raise TypeError(f"Unsupported evaluation identity value: {type(value).__module__}.{type(value).__qualname__}")
 
 
 def scoring_kwargs(settings, model):
@@ -57,7 +80,7 @@ def evaluation_identity(model, tokenizer, settings, data_settings, metadata, ada
                     "models/split_model.py", "models/channel.py"]
     root = Path(__file__).parent
     identity = {
-        "version": "hellaswag-evaluation-identity-v1",
+        "version": "hellaswag-evaluation-identity-v2",
         "frozen_model": {"name": getattr(config, "_name_or_path", None),
                          "revision": getattr(config, "_commit_hash", None),
                          "config": config.to_dict()},
@@ -88,7 +111,7 @@ def evaluation_identity(model, tokenizer, settings, data_settings, metadata, ada
         "source_sha256": {name: file_digest(root / name) for name in source_files},
     }
     # Tokenizer/config objects occasionally carry AddedToken or dtype objects.
-    return json.loads(json.dumps(identity, default=str))
+    return json.loads(json.dumps(identity, default=_identity_json_default))
 
 
 def compact_sample(sample, condition, identity_id, noise_policy_id, run_id=None):

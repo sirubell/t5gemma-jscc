@@ -30,6 +30,34 @@ The image-route fixture assigns a nonzero image projector: Transformers initiali
 
 The COCO regression checks that image pixels affect transmitted representations, AWGN changes image positions, and the first text layer receives the reconstructed image positions. A control probe moving the hook back to token embeddings must fail because later image scatter overwrites those positions. At decoder splits, transmitter layers retain original encoder memory, while receiver layers use separately transmitted memory; decoder-memory tests cover that boundary and cached generation.
 
+## HellaSwag evaluation identity serialization
+
+New compact evidence uses `hellaswag-evaluation-identity-v2`. The previous v1
+serializer converted nested Python functions to `str`, including their process
+addresses. In lm-eval 0.4.12, `TaskConfig.to_dict()` serializes top-level callables
+but leaves `fewshot_config.process_docs` callable, so equivalent evaluations in
+separate processes could receive different identities.
+
+V2 records a module-level function's module name, qualified name, and SHA-256 of
+its complete source module. Hashing the module also covers local preprocessing
+helpers; absolute installation paths and process addresses are excluded. This
+supports file-backed module functions without closures, defaults, or attached
+state, including lm-eval's YAML-loaded functions whose modules are not registered
+in `sys.modules`. Other callable forms and unknown non-JSON values fail clearly.
+AddedToken and torch dtype values retain their previous string encoding. This is
+source provenance under the pinned software environment; it does not certify
+arbitrary runtime mutation of module globals or external dependencies.
+
+`tests/test_evaluation_identity.py` reproduces the old mismatch and verifies v2
+stability across fresh Python processes using the installed HellaSwag YAML and
+TaskConfig serialization, without data downloads, pretrained weights, or GPU
+work. It also checks that helper implementation and evaluation protocol changes
+alter the identity, relocated identical helpers retain it, and unsupported
+callable state fails. Existing v1 records and hashes remain unchanged: v1 and v2
+are distinct identity domains and must not be silently equated or used to resume
+one another. This local serializer correction does not change scoring, model
+forward computation, prompts, or any source archive already pinned for a run.
+
 ## Real-weight execution
 
 Historical observations below retain the recipes used at execution time. The earlier study-array smoke validated the then-current encoder-final-norm / LayerNorm-both / FiLM-off baseline on full weights; it does not relabel historical results as belonging to that baseline.
