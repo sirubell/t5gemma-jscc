@@ -1,6 +1,8 @@
-"""One residual MLP codec for COCO and HellaSwag; all choices live in YAML."""
+"""Residual/factorized and direct affine codecs with explicit YAML designs."""
 import torch
 from torch import nn
+
+from jscc.config import validate_codec_architecture
 
 
 class ResidualBlock(nn.Module):
@@ -22,7 +24,17 @@ class ResidualBlock(nn.Module):
 class Codec(nn.Module):
     def __init__(self, input_dim, config):
         super().__init__()
+        validate_codec_architecture(config)
         self.config = config
+        self.film: nn.Sequential | None = None
+        if config.get("architecture", "residual_mlp") == "direct_affine":
+            # Retain the public Sequential interface used by diagnostics. Each
+            # half has exactly one biased Linear, with no hidden-width factor.
+            self.input_norm = nn.Identity()
+            self.output_norm = nn.Identity()
+            self.encoder = nn.Sequential(nn.Linear(input_dim, config["bottleneck_dim"]))
+            self.decoder = nn.Sequential(nn.Linear(config["bottleneck_dim"], input_dim))
+            return
         width, bottleneck = config["hidden_dim"], config["bottleneck_dim"]
         activation = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}[config["activation"]]
         norm = config["layernorm"]
@@ -37,7 +49,6 @@ class Codec(nn.Module):
 
         self.encoder = nn.Sequential(nn.Linear(input_dim, width), *trunk(), nn.Linear(width, bottleneck))
         self.decoder = nn.Sequential(nn.Linear(bottleneck, width), *trunk(), nn.Linear(width, input_dim))
-        self.film: nn.Sequential | None = None
         if config["snr_film"]:
             film_input = nn.Linear(1, config["film_hidden"])
             film_output = nn.Linear(config["film_hidden"], 2 * width)

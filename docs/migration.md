@@ -27,6 +27,10 @@ The refactor established one research project with shared COCO/HellaSwag trainin
 - Source task YAMLs now reference one shared model_config file. Saved run/checkpoint configurations are still complete flat dictionaries; old flat configurations and checkpoint loading do not require conversion.
 - The old flat config filenames moved into tasks/, smoke/ and evaluation/. Update command paths; no duplicate alias files are retained. Relative model references and output directories were adjusted so direct task/smoke runs keep their previous artifact locations. Studies add explicit model overrides and export complete configs without changing the shared model file.
 
+## Explicit codec design compatibility
+
+Omitted `codec.architecture` retains the historical `residual_mlp` behavior and state-dictionary keys. `direct_affine` is a separate opt-in design and requires matching checkpoint architecture; it does not convert old residual weights. Zero residual blocks preserve the existing two-Linear factorization per half. Saved recipes remain authoritative.
+
 ## Artifact compatibility
 
 New checkpoints contain codec/channel state, optimizer state, configuration and data IDs. Historical checkpoint formats and codec structures are not automatically imported.

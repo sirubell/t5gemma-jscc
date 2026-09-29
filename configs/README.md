@@ -94,3 +94,7 @@ manifest with matching train/evaluate arrays, for example
 evaluation array. Site-specific partition/account/QOS options still belong at
 submission time. Do not infer job status from the plan alone; inspect the
 recorded execution manifest and Slurm evidence for the specific run.
+
+## Codec architecture designs
+
+The named model files `models/enc_l9_residual.yaml`, `models/enc_l9_zero_block.yaml`, and `models/enc_l9_direct_affine.yaml` specify architecture experiments while keeping task data/evaluation settings in task recipes. The shared `model.yaml` remains the residual baseline. See [architecture semantics](../docs/architecture.md#explicit-codec-architecture-experiments) for direct-affine restrictions and checkpoint compatibility. Preparing a model design does not execute a sweep.

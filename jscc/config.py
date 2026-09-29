@@ -6,6 +6,20 @@ from pathlib import Path
 import yaml
 
 
+def validate_codec_architecture(codec):
+    """Validate explicit designs without rewriting historical saved configs."""
+    architecture = codec.get("architecture", "residual_mlp")
+    if architecture not in ("residual_mlp", "direct_affine"):
+        raise ValueError("codec.architecture must be residual_mlp or direct_affine")
+    if architecture == "direct_affine":
+        required = {"n_res_blocks": 0, "layernorm": "none", "snr_film": False}
+        for key, value in required.items():
+            if codec.get(key) != value:
+                raise ValueError(f"direct_affine requires codec.{key}={value!r}")
+        if codec.get("dropout", 0.0) != 0.0:
+            raise ValueError("direct_affine requires codec.dropout=0")
+
+
 def resolve_codec_configs(codec):
     """Return the main and receiver-memory codec configurations.
 
@@ -91,7 +105,8 @@ def validate_config(config):
         raise ValueError("training.validation_snrs must contain at least one condition")
     # Keep the historical flat codec schema valid, while rejecting malformed
     # nested memory overrides before a model is constructed.
-    resolve_codec_configs(config["codec"])
+    for codec in resolve_codec_configs(config["codec"]):
+        validate_codec_architecture(codec)
 
 
 def save_config(config, path):

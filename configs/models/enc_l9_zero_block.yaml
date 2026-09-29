@@ -1,5 +1,4 @@
-# Shared enc_l9 design adopted from the completed September recipes.
-# Historical checkpoints retain their saved model design.
+# Explicit enc_l9 architecture comparison; preparing this design launches no runs.
 model:
   name: google/t5gemma-2-1b-1b
   revision: dd0a2683227859151b1730ca3a63087df5b5f39b
@@ -13,12 +12,12 @@ codec:
   architecture: residual_mlp
   hidden_dim: 1152
   bottleneck_dim: 512
-  n_res_blocks: 2
+  n_res_blocks: 0
   activation: gelu
   dropout: 0.0
   layernorm: none
   memory:
-    layernorm: both
+    layernorm: none
   snr_film: false
   film_hidden: 64
 channel:

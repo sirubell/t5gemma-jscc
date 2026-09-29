@@ -16,6 +16,18 @@ hidden [B,T,D] → codec.encode → z [B,T,K]
 
 D comes from the backbone configuration; K is codec.bottleneck_dim. Both codec halves consist of Linear layers and residual blocks. External LayerNorm is configurable; internal block LayerNorm remains enabled. Optional receiver FiLM conditions the first decoder hidden representation on SNR.
 
+## Explicit codec architecture experiments
+
+`codec.architecture` defaults to `residual_mlp` when omitted, preserving saved historical recipes and residual checkpoint tensor keys. The shared baseline uses this architecture. Named designs live in `configs/models/`:
+
+- `enc_l9_residual.yaml`: current two-block residual reference.
+- `enc_l9_zero_block.yaml`: `residual_mlp` with zero residual blocks; each half still contains two Linear layers, with no activation between them.
+- `enc_l9_direct_affine.yaml`: `direct_affine`, one `Linear(D, B)` encoder and one `Linear(B, D)` decoder, including biases.
+
+The direct design requires zero residual blocks, external LayerNorm `none`, FiLM disabled and zero dropout. Its retained `hidden_dim` and activation configuration do not add hidden layers. These restrictions make the minimal architecture experiment explicit; they are not a change to the shared default. Each half is affine, while the complete transmission path still includes nonlinear power normalization and the configured channel.
+
+At D1152/B512, main-codec parameter counts including biases are 14,473,088 for the two-block residual design, 3,837,824 for zero-block factorization and 1,181,312 for direct affine. These are model parameters, not communication bits or coordinates. B=D removes dimensional compression but still applies normalization/channel effects; B>D expands the transmitted representation. Compare task quality alongside valid channel coordinates and measured cost.
+
 ## Shared baseline
 
 COCO and HellaSwag reference `configs/model.yaml` for the same backbone revision, encoder-layer-9 split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
