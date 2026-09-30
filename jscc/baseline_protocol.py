@@ -6,6 +6,7 @@ package acceptance are separate gates; it never chooses an architecture.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import time
@@ -50,6 +51,50 @@ def batch_identity(batch):
     """Bind complete padded inputs and view metadata, including image tensors."""
     return canonical_digest({key: tensor_digest(value) if torch.is_tensor(value) else value
                              for key, value in batch.items() if key not in {"activation", "site_id"}})
+
+
+def _tensor_binding(value):
+    return (id(value), value._version, tuple(value.shape), tuple(value.stride()),
+            str(value.dtype), str(value.device), value.data_ptr())
+
+
+@dataclass(frozen=True)
+class BoundBatchIdentity:
+    """A complete prepared-batch binding for reuse outside the update timer.
+
+    Keep the bound tensors read-only: ordinary in-place mutation, replacement,
+    layout changes, and metadata edits invalidate this token. Unsafe writes
+    through ``.data`` or a foreign storage alias are outside this contract.
+    The complete digest also binds replay activation/site provenance, while
+    the view digest preserves the established paired-noise namespace.
+    """
+    view_sha256: str
+    complete_sha256: str
+    _tensor_bindings: tuple
+    _metadata_sha256: str
+
+    def validate(self, batch):
+        tensors = tuple((key, _tensor_binding(value)) for key, value in sorted(batch.items())
+                        if torch.is_tensor(value))
+        metadata = canonical_digest({key: value for key, value in batch.items()
+                                     if not torch.is_tensor(value)})
+        if tensors != self._tensor_bindings or metadata != self._metadata_sha256:
+            raise ValueError("prepared batch changed after identity binding")
+        return self.view_sha256
+
+
+def bind_batch_identity(batch, *, expected_identity=None):
+    """Hash each complete tensor once, before timed updates; verify a known view."""
+    contents = {key: tensor_digest(value) if torch.is_tensor(value) else value
+                for key, value in batch.items()}
+    view = canonical_digest({key: value for key, value in contents.items()
+                             if key not in {"activation", "site_id"}})
+    if expected_identity is not None and view != expected_identity:
+        raise ValueError("prepared input/view identity mismatch")
+    return BoundBatchIdentity(view, canonical_digest(contents),
+        tuple((key, _tensor_binding(value)) for key, value in sorted(batch.items())
+              if torch.is_tensor(value)),
+        canonical_digest({key: value for key, value in batch.items() if not torch.is_tensor(value)}))
 
 
 def _check_batches(batches, kind, expected_sequences=None):
@@ -99,7 +144,9 @@ class BaselineLearner:
     """
     def __init__(self, model, *, run_id, task, identity, pairing_id, final_step=400,
                  effective_batch=64, lr=2e-4, weight_decay=0.01, grad_clip=1.0,
-                 event_sink=None, synthetic=False):
+                 event_sink=None, synthetic=False, audit_policy="full"):
+        if audit_policy not in {"full", "sparse_first_final"}:
+            raise ValueError("audit policy must be full or sparse_first_final")
         if task not in {"hellaswag", "coco"}:
             raise ValueError("undeclared mixed-task baseline is unsupported")
         if model.split["stack"] != "enc" or model.split["where"] != "after_final_norm":
@@ -117,6 +164,7 @@ class BaselineLearner:
         if set(identity) != {"source", "config", "data", "parent"}:
             raise ValueError("identity must bind source/config/data/parent")
         self.synthetic = synthetic
+        self.audit_policy = audit_policy
         self.model = prepare_trainable_parameters(model)
         self.model.train()
         self.parameters = [p for p in model.parameters() if p.requires_grad]
@@ -152,14 +200,16 @@ class BaselineLearner:
             self.event_sink(event)
         return event
 
-    def _values(self, batch, kind, step, micro, purpose, condition: str | int = "uniform"):
+    def _values(self, batch, kind, step, micro, purpose, condition: str | int = "uniform", *,
+                capture=True, bound_identity=None):
+        view = None if bound_identity is None else bound_identity.view_sha256
         key = {"schema": "baseline-draw-v2", "pairing_id": self.pairing_id,
                "purpose": purpose, "site": "enc_fn", "site_local_batch": step if purpose == "train" else 0,
-               "view": batch_identity(batch), "microbatch": micro,
+               "view": batch_identity(batch) if view is None else view, "microbatch": micro,
                "layout": list(batch["attention_mask"].shape), "condition": condition}
         namespace = noise_namespace(NoiseKey(self.pairing_id,
             "training" if purpose == "train" else "validation", "enc_fn",
-            step if purpose == "train" else 0, batch_identity(batch),
+            step if purpose == "train" else 0, batch_identity(batch) if view is None else view,
             canonical_digest({"shape": key["layout"], "micro": micro}), condition=str(condition),
             draw_schema="runtime-awgn-replay-v2"))
         device = next(self.model.base.parameters()).device
@@ -169,7 +219,7 @@ class BaselineLearner:
         else:
             snr = None if condition == "no_noise" else float(condition)
         channel = self.model.channel
-        context = channel.replay(0, namespace, capture=True) if isinstance(channel, AWGNChannel) else nullcontext()
+        context = channel.replay(0, namespace, capture=capture) if isinstance(channel, AWGNChannel) else nullcontext()
         with context:
             values = (local_batch_values(self.model, batch, snr, objective_settings(kind)) if kind == "local"
                       else batch_losses(self.model, batch, objective_settings(kind), snr,
@@ -177,12 +227,20 @@ class BaselineLearner:
         draws = list(channel.draw_summaries) if isinstance(channel, AWGNChannel) else []
         return values, snr, {"key": key, "draws": draws}
 
-    def update(self, batches, *, kind="combined", data_cache_seconds=0.0):
+    def update(self, batches, *, kind="combined", data_cache_seconds=0.0, batch_identities=None):
         if self.failed or self.completed >= self.final_step:
             raise RuntimeError("learner is terminal; no automatic retries or extra updates")
         settings = objective_settings(kind)
         _check_batches(batches, kind, self.effective_batch)
+        if batch_identities is not None:
+            if len(batch_identities) != len(batches):
+                raise ValueError("prepared batch identity count differs from microbatches")
+            for batch, binding in zip(batches, batch_identities):
+                if not isinstance(binding, BoundBatchIdentity):
+                    raise TypeError("prepared batch identity must be a bound identity token")
+                binding.validate(batch)
         step = self.completed + 1
+        capture = self.audit_policy == "full" or step in {self.phase_start_step + 1, self.final_step}
         self.attempted += 1
         started = time.monotonic()
         self.optimizer.zero_grad(set_to_none=True)
@@ -199,7 +257,8 @@ class BaselineLearner:
         try:
             denominator = effective_batch_denominators(self.model, batches, next(self.model.base.parameters()).device)
             for micro, batch in enumerate(batches):
-                values, snr, draw = self._values(batch, kind, step, micro, "train")
+                values, snr, draw = self._values(batch, kind, step, micro, "train",
+                    capture=capture, bound_identity=None if batch_identities is None else batch_identities[micro])
                 loss = scaled_batch_loss(values, settings, denominator)
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError("nonfinite loss")
@@ -270,6 +329,10 @@ class BaselineLearner:
                                   "throughput": measure(self.effective_batch / elapsed), "throughput_denominator": "sequences",
                                   "scope": "host_wall_including_scalar_reads; no_extra_cuda_synchronize"},
                        "memory": memory}
+            if self.audit_policy != "full":
+                payload["audit"] = {"policy": self.audit_policy, "noise_capture": capture,
+                                    "complete_batch_identities": None if batch_identities is None else
+                                        [b.complete_sha256 for b in batch_identities]}
             return self._event("update", kind, payload)
         except Exception as exc:
             self.failed = True
