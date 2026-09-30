@@ -536,3 +536,32 @@ def test_output_created_by_other_actor_during_preparation_is_untouched(prepared,
     assert list(output.iterdir()) == [output / "completion.json"]
     assert (output / "completion.json").read_bytes() == prior
     assert json.loads(Path(allocation["campaign_journal"]).read_text())["status"] == "failed"
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_prepared_runner_applies_determinism_before_seeding(prepared, monkeypatch, enabled):
+    import os
+
+    path, manifest, config = prepared
+    config["training"]["deterministic_algorithms"] = enabled
+    rewrite_config(path, manifest, config)
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    previous = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(not enabled)
+
+    class ReachedSeed(Exception):
+        pass
+
+    def inspect_before_model(_seed):
+        assert torch.are_deterministic_algorithms_enabled() is enabled
+        if enabled:
+            assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+        raise ReachedSeed
+
+    monkeypatch.setattr("jscc.runtime.seed_everything", inspect_before_model)
+    forbid_construction(monkeypatch)
+    try:
+        with pytest.raises(ReachedSeed):
+            encfn_baseline.execute(path, path.parent / "run")
+    finally:
+        torch.use_deterministic_algorithms(previous)

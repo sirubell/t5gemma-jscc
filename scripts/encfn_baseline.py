@@ -24,7 +24,7 @@ def _execute(manifest_path, output, resource_guard=None):
     from jscc.evaluation import evaluate_checkpoint
     from jscc.experiment_state import CheckpointRef, open_state
     from jscc.models.split_model import build_model, resolve_encoder_site
-    from jscc.runtime import seed_everything
+    from jscc.runtime import configure_training_determinism, seed_everything
 
     manifest_path = Path(manifest_path).resolve()
     root = manifest_path.parent
@@ -96,6 +96,7 @@ def _execute(manifest_path, output, resource_guard=None):
         raise ValueError("state data identity differs from prepared data IDs")
     if resource_guard is not None:
         resource_guard()
+    metadata["execution_determinism"] = configure_training_determinism(config["training"])
     seed_everything(0)
     processor, model = build_model(config)
     site = resolve_encoder_site(model.base, config["split"], config["model"]["revision"])

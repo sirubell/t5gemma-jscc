@@ -59,6 +59,8 @@ Greedy generation (num_beams=1) is supported. Beam-specific physical noise shari
 
 Evaluation records channel_uses_real for hidden and memory streams: real latent coordinates actually sent, including padding, prompts and repeated evaluation calls. These are evaluator execution counts, not bits or a deduplicated per-context rate (HellaSwag scores multiple candidates). Per-sample power normalization applies independently to each stream. Teacher-forced full sequences and autoregressive one-token hidden transmissions have different normalization domains; quantify this limitation before interpreting robustness curves.
 
+Power normalization promotes BF16/FP16 latents to FP32 before squaring, reduction, division and square root, and returns FP32 normalized latents. FP32/FP64 inputs retain their precision. Masked valid-coordinate counts use integer arithmetic (for example, 263 valid tokens at B512 means 134,656 coordinates), avoiding BF16 count rounding and FP16 count overflow. This preserves sequence-wide, token-wise causal and padding policies, including zero output for empty masked sequences. The transmission path returns reconstructed representations to the backbone dtype. This numerical policy does not establish full-weight gradient stability or task quality.
+
 The shared default now uses an encoder split, so its encoder output memory passes through the codec/channel before the decoder consumes it. Decoder splits remain supported for explicit experiments.
 
 ## Training objective

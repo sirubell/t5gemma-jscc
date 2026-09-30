@@ -99,9 +99,14 @@ def normalize_power(z, valid_mask=None, *, token_wise=False, mask_representation
     token positions contribute to the sequence-wide estimate.  With
     ``token_wise=True``, each token is normalized independently over its
     bottleneck coordinates and ``valid_mask`` is not used to couple tokens.
+    BF16/FP16 inputs use FP32 arithmetic and return FP32 normalized latents;
+    FP32/FP64 inputs retain their precision. Valid coordinates are counted
+    in integers so the normalization domain does not depend on latent dtype.
     """
     if z.ndim < 2:
         raise ValueError("latent tensor must have a batch dimension and a payload dimension")
+    if z.dtype in {torch.bfloat16, torch.float16}:
+        z = z.float()
     if token_wise:
         power = z.pow(2).mean(dim=-1, keepdim=True)
     else:
@@ -112,9 +117,9 @@ def normalize_power(z, valid_mask=None, *, token_wise=False, mask_representation
         else:
             weighted = z.pow(2) * mask.to(dtype=z.dtype).unsqueeze(-1)
             total = weighted.sum(dim=tuple(range(1, z.ndim)), keepdim=True)
-            count = mask.to(dtype=z.dtype).sum(dim=tuple(range(1, mask.ndim)), keepdim=True)
+            count = mask.sum(dim=tuple(range(1, mask.ndim)), keepdim=True, dtype=torch.int64)
             count = count.reshape(z.shape[0], *([1] * (z.ndim - 1))) * z.shape[-1]
-            power = total / count.clamp_min(1.0)
+            power = total / count.clamp_min(1)
             # An empty payload has no power to normalize; keep it safely zero.
             z = torch.where(count > 0, z, torch.zeros_like(z))
     return z / torch.sqrt(power + 1e-8)

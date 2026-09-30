@@ -31,6 +31,49 @@ def test_masked_sequence_power_ignores_padding_values():
     torch.testing.assert_close(valid_power / valid_count, torch.ones(2), rtol=0, atol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("policy", ["masked", "sequence", "token"])
+def test_low_precision_power_matches_quantized_fp32_reference(dtype, policy):
+    # 263 is rounded to 264 when accumulated in BF16; B512 also exceeds
+    # FP16's finite range for the sequence coordinate count.
+    latent = torch.linspace(-2, 3, 265 * 512).reshape(1, 265, 512).to(dtype)
+    latent.requires_grad_()
+    reference = latent.detach().float().requires_grad_()
+    valid = torch.arange(265).unsqueeze(0) < 263 if policy == "masked" else None
+    actual = normalize_power(latent, valid, token_wise=policy == "token")
+    expected = normalize_power(reference, valid, token_wise=policy == "token")
+    torch.testing.assert_close(actual.float(), expected, rtol=1e-6, atol=1e-6)
+    assert actual.dtype == torch.float32
+    weights = torch.linspace(-1, 1, actual.numel()).reshape_as(actual)
+    (actual * weights).mean().backward()
+    (expected * weights).mean().backward()
+    assert latent.grad is not None
+    assert torch.isfinite(latent.grad).all()
+    assert reference.grad is not None
+    torch.testing.assert_close(latent.grad, reference.grad.to(dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("policy", ["empty", "masked", "sequence", "token"])
+def test_low_precision_tiny_power_has_finite_outputs_and_gradients(dtype, policy):
+    latent = torch.full((1, 263, 512), 1e-5, dtype=dtype, requires_grad=True)
+    valid = torch.full((1, 263), policy != "empty") if policy in {"empty", "masked"} else None
+    result = normalize_power(latent, valid, token_wise=policy == "token")
+    assert torch.isfinite(result).all()
+    result.mean().backward()
+    assert latent.grad is not None
+    assert torch.isfinite(latent.grad).all()
+    if policy == "empty":
+        assert torch.count_nonzero(result) == 0
+        assert torch.count_nonzero(latent.grad) == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_power_preserves_full_precision_input_dtype(dtype):
+    latent = torch.tensor([[[1., 2.], [3., 4.]]], dtype=dtype)
+    assert normalize_power(latent, torch.ones(1, 2, dtype=torch.bool)).dtype == dtype
+
+
 def test_decoder_token_power_is_prefix_causal():
     torch.manual_seed(11)
     latent = torch.randn(1, 5, 7)
