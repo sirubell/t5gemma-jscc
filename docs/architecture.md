@@ -155,3 +155,35 @@ The HellaSwag two-stage planner can opt into `--include-reset-control`, adding f
 The existing public objective helpers remain re-exported from `training.py` for historical scripts and top-level instrumentation; new shared-objective code should import from `training_objectives.py`. Functional training still invokes its imported aggregate/scaled-loss names so existing instrumentation can wrap those entry points. Private globals inside moved helpers belong to the objective module.
 
 COCO endpoint and trajectory diagnostics share input placement through `coco_diagnostic.diagnostic_inputs`: all source tensors move to the backbone device, and only image pixels adopt the backbone dtype. Diagnostic budgets, output schemas and distinct evidence-hash formats retain their existing definitions.
+
+## Opt-in codec and receiver FP32 arithmetic
+
+`model.numerical_policy: codec_receiver_fp32` names an explicit numerical
+experiment for T5Gemma2 at encoder `after_final_norm`. It requires stored
+backbone dtype `bfloat16` and `sdpa_backend_policy: auto`. Omission (or `native`)
+retains existing arithmetic. Other sites and site routing are rejected.
+
+The encoder retains BF16 computation and its existing attention dispatch. Codec
+parameters and encode/decode computation are FP32, as are channel power
+statistics. The decoder and output head compute with detached FP32 copies of
+frozen parameters; decoder attention is scoped to MATH. Original BF16 parameter
+objects, encoder/head ties, frozen status and state-dictionary paths remain
+unchanged. The compute copies are lazy nonpersistent tensors, excluded from
+optimizers and checkpoints, and refreshed after parameter replacement,
+in-place state loading or device moves. Their memory cost is reported by
+precision telemetry. This functional substitution supports sequential forwards,
+not concurrent forwards on the same model instance.
+
+The K path receives the unrounded FP32 codec reconstruction. R keeps its original
+BF16 target and BF16-rounded prediction, including local replay training and
+existing masks/reductions. Clean teacher passes use the same FP32 receiver/head
+policy. Direct `model.base` evaluator calls and cached generation use the same
+adapters. KV cache objects retain identity and receive FP32 keys/values from
+the receiver; they are not recursively cast. Replay features must remain BF16
+and retain the existing site/backbone/source acceptance checks.
+
+Resolved configurations/checkpoints identify this policy. Versioned task
+observations must match it in checkpoint `metadata.numerical_policy` and request
+`settings.numerical_policy`; their `precision` remains the stored-weight dtype.
+Objective requests and HellaSwag evaluation identities include the compute
+policy. No task-quality or GPU-fit improvement follows from selecting it.

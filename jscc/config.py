@@ -61,8 +61,8 @@ def load_config(path):
             raise ValueError("Put model/split/codec/channel settings in model_config, not in the task YAML")
         config.update(design)
     runtime = config.pop("runtime", {})
-    if set(runtime) - {"device", "dtype", "sdpa_backend_policy"}:
-        raise ValueError("runtime overrides are limited to device, dtype and sdpa_backend_policy")
+    if set(runtime) - {"device", "dtype", "sdpa_backend_policy", "numerical_policy"}:
+        raise ValueError("runtime overrides are limited to device, dtype, sdpa_backend_policy and numerical_policy")
     if runtime:
         config["model"].update(runtime)
     for section, key in (("run", "output_dir"),):
@@ -78,6 +78,19 @@ def validate_sdpa_backend_policy(policy):
         raise ValueError("model.sdpa_backend_policy must be auto or flash_math")
 
 
+def validate_numerical_policy(model, split):
+    policy = model.get("numerical_policy", "native")
+    if policy not in ("native", "codec_receiver_fp32"):
+        raise ValueError("model.numerical_policy must be native or codec_receiver_fp32")
+    if policy == "codec_receiver_fp32":
+        if model.get("dtype") != "bfloat16":
+            raise ValueError("codec_receiver_fp32 requires model.dtype=bfloat16")
+        if model.get("sdpa_backend_policy", "auto") != "auto":
+            raise ValueError("codec_receiver_fp32 requires sdpa_backend_policy=auto")
+        if split != {"stack": "enc", "where": "after_final_norm"}:
+            raise ValueError("codec_receiver_fp32 requires encoder after_final_norm without index")
+
+
 def validate_config(config):
     """Checks shared by file loading and study expansion."""
     if config["task"] not in ("coco", "hellaswag"):
@@ -85,6 +98,7 @@ def validate_config(config):
     validate_sdpa_backend_policy(config.get("model", {}).get("sdpa_backend_policy", "auto"))
     if config["task"] != "coco" and config.get("model", {}).get("sdpa_backend_policy", "auto") != "auto":
         raise ValueError("flash_math is currently supported only for task=coco")
+    validate_numerical_policy(config.get("model", {}), config["split"])
     training = config["training"]
     if "loss_weights" in training:
         weights = training["loss_weights"]

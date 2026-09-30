@@ -156,3 +156,12 @@ GPU fit, external hard timer enforcement, measured remaining-work reserves or
 scientific quality. Those checks must bind the final source package on its
 authorized runtime. Existing ordinary COCO/HellaSwag and receiver-memory tests
 remain part of the full suite.
+
+`tests/test_numerical_policy.py` exercises actual tiny BF16 T5Gemma2 computation
+for all four direct/residual and outer-LayerNorm none/both cases. It checks
+native/split reduction, finite codec gradients and frozen backbone storage,
+actual AdamW updates and state-restored next updates, exact diagnostic boundary
+R casting, local replay R, direct-base evaluator calls, cached generation and
+cache/full logits, cache refresh and preserved parameter hierarchy, and config
+rejection. These are CPU software tests, not full-weight GPU acceptance or
+scientific evidence for the opt-in `codec_receiver_fp32` runtime.

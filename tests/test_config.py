@@ -83,7 +83,7 @@ def test_runtime_only_accepts_execution_settings(tmp_path):
     task = yaml.safe_load(path.read_text())
     task["runtime"] = {"snr_film": True}
     save_config(task, path)
-    with pytest.raises(ValueError, match="device, dtype and sdpa_backend_policy"):
+    with pytest.raises(ValueError, match="device, dtype, sdpa_backend_policy and numerical_policy"):
         load_config(path)
 
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from ..config import resolve_codec_configs, validate_sdpa_backend_policy
+from ..config import resolve_codec_configs, validate_numerical_policy, validate_sdpa_backend_policy
 from .channel import AWGNChannel, _token_mask, build_channel, normalize_power, valid_payload_count
 from .codec import Codec
 
@@ -69,11 +69,18 @@ def resolve_encoder_site(base, site_spec, model_revision):
 
 
 class SplitModel(nn.Module):
-    def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto"):
+    def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto", numerical_policy="native"):
         super().__init__()
         validate_sdpa_backend_policy(sdpa_backend_policy)
+        validate_numerical_policy({"numerical_policy": numerical_policy,
+                                   "dtype": str(next(base.parameters()).dtype).removeprefix("torch."),
+                                   "sdpa_backend_policy": sdpa_backend_policy}, split)
+        self.numerical_policy = numerical_policy
         self.sdpa_backend_policy = sdpa_backend_policy
         self.base = base.requires_grad_(False).eval()
+        if numerical_policy == "codec_receiver_fp32":
+            from .precision import install_fp32_receiver
+            install_fp32_receiver(self.base)
         self.codec = codec
         self.channel = channel
         self.split = split
@@ -151,6 +158,8 @@ class SplitModel(nn.Module):
         nonempty ``heldout_freeze_receipt`` identity. This seam validates the
         receipt's presence; the checkpoint/evaluation gate verifies its contents.
         """
+        if self.numerical_policy == "codec_receiver_fp32" and site.split != self.split:
+            raise ValueError("codec_receiver_fp32 cannot route away from encoder after_final_norm")
         if self._routing_active or self._forward_active:
             raise RuntimeError("site routing cannot nest or change during a forward")
         if self.split["stack"] != "enc" or self.memory_codec is not None:
@@ -317,11 +326,14 @@ class SplitModel(nn.Module):
         # so the communication hook must preserve the same BF16-backbone /
         # FP32-codec boundary on its own.
         backbone_parameter = next(self.base.parameters())
-        autocast_enabled = backbone_parameter.dtype in (torch.bfloat16, torch.float16)
+        fp32 = self.numerical_policy == "codec_receiver_fp32"
+        if fp32 and any(p.dtype != torch.float32 for p in codec.parameters()):
+            raise ValueError("codec_receiver_fp32 requires FP32 codec parameters")
+        autocast_enabled = not fp32 and backbone_parameter.dtype in (torch.bfloat16, torch.float16)
         with torch.autocast(device_type=backbone_parameter.device.type,
                             dtype=backbone_parameter.dtype,
                             enabled=autocast_enabled):
-            z = codec.encode(hidden)
+            z = codec.encode(hidden.float() if fp32 else hidden)
             self.channel_uses[stream] += z.numel()
             self.channel_uses_valid[stream] += valid_payload_count(
                 z, valid_mask, mask_representation=mask_representation
@@ -352,7 +364,8 @@ class SplitModel(nn.Module):
             # corrected precision contract.  Return the reconstructed stream
             # in the backbone activation dtype before downstream BF16 linear
             # layers consume it.
-            return codec.decode(received, film_snr).to(dtype=hidden.dtype)
+            reconstruction = codec.decode(received, film_snr)
+            return reconstruction if fp32 else reconstruction.to(dtype=hidden.dtype)
 
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()
@@ -367,7 +380,13 @@ class SplitModel(nn.Module):
             token_wise=self.split["stack"] == "dec",
             mask_representation=mask_representation,
         )
-        return hidden if self.bypass else self.reconstruction
+        received = hidden if self.bypass else self.reconstruction
+        if self.numerical_policy == "codec_receiver_fp32":
+            if hidden.dtype != torch.bfloat16:
+                raise ValueError("codec_receiver_fp32 requires BF16 encoder final features")
+            if self.reconstruction is not None:
+                self.reconstruction = self.reconstruction.to(hidden.dtype)
+        return received
 
     def _begin_decoder(self, module, args, kwargs):
         self.memory_activation = self.memory_reconstruction = None
@@ -487,6 +506,7 @@ def build_model(config):
     model_config = config["model"]
     policy = model_config.get("sdpa_backend_policy", "auto")
     validate_sdpa_backend_policy(policy)
+    validate_numerical_policy(model_config, config["split"])
     if policy != "auto" and config["task"] != "coco":
         raise ValueError("flash_math is currently supported only for task=coco")
     # Imports are delayed so --check and tensor-only tests need no Transformers.
@@ -502,7 +522,8 @@ def build_model(config):
     config["codec"]["input_dim"] = input_dim
     codec = Codec(input_dim, config["codec"])
     wrapper = SplitModel(base, codec, build_channel(config["channel"]),
-                         config["split"], config["channel"], sdpa_backend_policy=policy)
+                         config["split"], config["channel"], sdpa_backend_policy=policy,
+                         numerical_policy=model_config.get("numerical_policy", "native"))
     # Keep the frozen backbone at the requested execution dtype, while the
     # trainable communication modules remain FP32.  Calling ``wrapper.to``
     # with ``dtype`` here would silently cast codec parameters (and any

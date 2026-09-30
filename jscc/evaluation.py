@@ -527,6 +527,11 @@ def validate_evaluation_target(validated_state, request, model):
                        ("protocol", "protocol_identity"), ("parent", "parent_identity")):
         if request[field] != metadata[key]:
             raise ValueError(f"Observation {field} identity mismatch")
+    numerical_policy = getattr(model, "numerical_policy", "native")
+    if request["settings"].get("numerical_policy", "native") != numerical_policy:
+        raise ValueError("Observation numerical policy differs from actual model")
+    if metadata.get("numerical_policy", "native") != numerical_policy:
+        raise ValueError("Checkpoint numerical policy differs from actual model")
     site = ResolvedSite(**request["target_site"])
     base_config = getattr(model.base, "config", None)
     backend = getattr(getattr(base_config, "decoder", base_config), "_attn_implementation", None)

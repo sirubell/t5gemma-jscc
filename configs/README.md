@@ -98,3 +98,12 @@ recorded execution manifest and Slurm evidence for the specific run.
 ## Codec architecture designs
 
 The named model files `models/enc_l9_residual.yaml`, `models/enc_l9_zero_block.yaml`, and `models/enc_l9_direct_affine.yaml` specify architecture experiments while keeping task data/evaluation settings in task recipes. The shared `model.yaml` remains the residual baseline. See [architecture semantics](../docs/architecture.md#explicit-codec-architecture-experiments) for direct-affine restrictions and checkpoint compatibility. Preparing a model design does not execute a sweep.
+
+For the explicit encoder-final mixed arithmetic experiment, set
+`model.numerical_policy: codec_receiver_fp32` in a named model design, with
+`dtype: bfloat16`, `sdpa_backend_policy: auto`, and
+`split: {stack: enc, where: after_final_norm}`. A task `runtime.numerical_policy`
+override is also accepted and validated after composition. `native` or omission
+preserves the existing runtime. This policy is restricted to T5Gemma2 and checks
+actual stored backbone and codec dtypes at execution; see the
+[arithmetic contract](../docs/architecture.md#opt-in-codec-and-receiver-fp32-arithmetic).

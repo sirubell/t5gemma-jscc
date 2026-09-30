@@ -185,7 +185,8 @@ def local_batch_values(model, shard: dict, snr_db, settings: dict) -> BatchValue
     activation = shard["activation"].to(device)
     mask = shard["attention_mask"].to(device)
     with autocast_for(model), model.transmission(snr_db, encoder_mask=mask):
-        reconstructed = model._roundtrip(activation)
+        model._roundtrip(activation)
+        reconstructed = model.reconstruction
         numerator, denominator = reconstruction_loss_stats(reconstructed, activation, mask)
     zero = numerator.detach().new_zeros(())
     hidden = numerator / denominator.clamp_min(1).to(numerator.dtype)

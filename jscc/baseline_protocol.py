@@ -427,6 +427,8 @@ def run_baseline(learner, *, output, metadata, update_batches, validation_batche
         started = time.monotonic()
         state_metadata = {**metadata, "completed_updates": step, "phase": segment.strategy,
                           "snapshot_role": "initialization" if step == 0 else "trained"}
+        if getattr(learner.model, "numerical_policy", "native") != "native":
+            state_metadata["numerical_policy"] = learner.model.numerical_policy
         reference = save_state(output / f"step_{step:06d}.pt", model=learner.model.codec,
             optimizer=learner.optimizer, scheduler=learner.scheduler, scaler=learner.scaler,
             metadata=state_metadata, stream_state={"completed_updates": step, "offset": learner.offset,
@@ -626,6 +628,11 @@ def objective_record_request(learner, state, batches, kind):
                "details": {"prompt": panel, "native_policy": panel,
                            "draws": canonical_digest({"noise": learner.noise_identity, "panel": panel, "purpose": "objective_validation"}),
                            "outputs": "baseline-objective-v2"}}
+    if getattr(learner.model, "numerical_policy", "native") != "native":
+        from .models.precision import compute_provenance
+        request["precision"] += ":" + learner.model.numerical_policy
+        request["details"]["outputs"] = "baseline-objective-v2:" + canonical_digest({
+            "numerical_runtime": compute_provenance(learner.model)})
     return request
 
 
