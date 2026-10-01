@@ -158,7 +158,7 @@ def _assets(contract, manifest):
         )
         if not name.endswith(".arrow"):
             _require(
-                asset.resolve() == root / name,
+                asset.resolve() == (root / name).resolve(),
                 "model asset outside exact configured snapshot",
             )
     expected = contract.get("runtime_versions")

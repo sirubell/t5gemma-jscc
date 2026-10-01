@@ -533,3 +533,51 @@ def test_one_owner_campaign_bounds_all_three_widths(contract_fixture):
     contract["campaign_admission"] = record("campaign.json", campaign)
     with pytest.raises(ValueError, match="exact task-7 overnight"):
         qualification._admission(contract)
+
+
+def test_snapshot_symlink_assets_keep_expected_canonical_file(contract_fixture):
+    import importlib.metadata
+
+    _, contract, manifest = contract_fixture
+    root = Path(manifest["resolved_config"]["model"]["name"])
+    root.mkdir()
+    blobs = root.parent / "blobs"
+    blobs.mkdir()
+    names = [
+        "config.json",
+        "generation_config.json",
+        "model.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "hellaswag-train.arrow",
+        "hellaswag-validation.arrow",
+    ]
+    contract["target_assets"] = {}
+    for name in names:
+        blob = blobs / name
+        blob.write_text("CPU symlink fixture " + name)
+        member = root / name
+        member.symlink_to(blob)
+        contract["target_assets"][name] = {
+            "path": str(member),
+            "sha256": file_digest(blob),
+        }
+    contract["runtime_versions"] = {
+        name: importlib.metadata.version(name)
+        for name in ("torch", "transformers", "datasets", "lm-eval")
+    }
+    assert (
+        qualification._assets(contract, manifest)["runtime_versions"]
+        == contract["runtime_versions"]
+    )
+    alternate = root.parent / "other-snapshot"
+    alternate.mkdir()
+    (alternate / "model.safetensors").write_bytes(
+        (blobs / "model.safetensors").read_bytes()
+    )
+    contract["target_assets"]["model.safetensors"]["path"] = str(
+        alternate / "model.safetensors"
+    )
+    with pytest.raises(ValueError, match="outside exact configured snapshot"):
+        qualification._assets(contract, manifest)
