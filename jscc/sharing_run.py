@@ -353,11 +353,15 @@ def execute_prepared(manifest, root, output):
     root = Path(root)
     started = time.monotonic()
     def guard():
+        from .sharing_controller import check_worker_resources
+        check_worker_resources(manifest)
         if time.monotonic() - started >= manifest['hard_cap_seconds']:
             raise TimeoutError('sharing allocation deadline; partial work retained, no retry')
     config = manifest['resolved_config']
     require_execution_ready(manifest)
     guard()
+    from .sharing_controller import check_target_device
+    check_target_device(manifest)
     from .runtime import configure_training_determinism, seed_everything
     configure_training_determinism(config['training'])
     seed_everything(config['seed'])

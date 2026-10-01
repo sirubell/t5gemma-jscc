@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import zipfile
 
@@ -23,7 +24,8 @@ from .sharing_schedule import SharingPlan
 from .sharing_accumulation import partition_policy
 
 SCHEMA = "sharing-prepared-v1"
-CELLS = {"D-LN": ("direct_outer_ln", "both"), "R-LN": ("residual_mlp", "both")}
+CELLS = {"D-N": ("direct_affine", "none"), "D-LN": ("direct_outer_ln", "both"), "R-LN": ("residual_mlp", "both"),
+         "T-LN": ("two_linear_gelu", "both")}
 
 
 def state_dict_identity(state):
@@ -38,7 +40,8 @@ def state_dict_identity(state):
 def source_inventory(source_root=None):
     root = Path(source_root or Path(__file__).resolve().parents[1]).resolve()
     names = {str(path.relative_to(root)) for path in (root / "jscc").rglob("*.py")}
-    names |= {"scripts/shared_codec.py", "scripts/render_experiment_report.py",
+    names |= {"scripts/shared_codec.py", "scripts/sharing_production.py", "scripts/sharing_qualification.py",
+              "scripts/render_experiment_report.py",
               "uv.lock", "pyproject.toml"}
     return {name: file_digest(root / name) for name in sorted(names)}
 
@@ -188,9 +191,18 @@ def _config_contract(config, manifest):
     if synthetic and (model["device"] != "cpu" or model["dtype"] != "float32"):
         raise ValueError("synthetic fixture must use CPU/float32")
     partition = manifest.get("execution_partition")
+    width = codec["bottleneck_dim"]
+    if type(width) is not int or width <= 0:
+        raise ValueError("positive integer bottleneck required")
+    if not synthetic:
+        if (codec.get("hidden_dim") != 1152 or codec.get("activation") != "gelu"
+                or codec.get("n_res_blocks") != (2 if manifest["cell"] == "R-LN" else 0)):
+            raise ValueError("production codec differs from reviewed D-N/D-LN/R-LN/T-LN topology")
+        if manifest.get("selected_bottleneck_dim") != width or width not in (512, 1152, 2304):
+            raise ValueError("production requires explicit reviewed bottleneck binding")
+        if partition is None:
+            raise ValueError("production requires explicit qualified execution partition")
     if partition is None:
-        if not synthetic and codec["bottleneck_dim"] != 512:
-            raise ValueError("production sharing requires B512")
         microbatch, accumulation = manifest["batch_size"], 1
     else:
         if partition != partition_policy(partition.get("microbatch_size")) or manifest["batch_size"] != 64:
@@ -219,10 +231,9 @@ def _acceptance_receipt(root, manifest):
 
 
 def require_execution_ready(manifest):
-    if not manifest["synthetic_cpu"]:
-        raise ValueError(
-            "ticket21 allocation controller not integrated; production execution disabled"
-        )
+    if not manifest["synthetic_cpu"] or os.environ.get("SHARING_CONTROLLER_CONTRACT"):
+        from .sharing_controller import require_worker_authorization
+        require_worker_authorization(manifest)
 
 
 def validate_task_template(template, config, *, synthetic):
