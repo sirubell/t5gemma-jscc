@@ -280,8 +280,8 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
         with torch.no_grad(), model.transmission(bypass=True):
             model.eval()
             metrics = evaluation.evaluate_hellaswag(model, processor, task_template['settings'], vanilla,
-                                                    'no_noise', task_template['data_settings'])
-        rows, ids, families = evaluation._observation_items(vanilla, 'hellaswag', 'no_noise')
+                                                    'vanilla', task_template['data_settings'])
+        rows, ids, families = evaluation._observation_items(vanilla, 'hellaswag', 'vanilla')
         if ids != task_template['input_ids'] or families != task_template['source_family_ids']:
             raise ValueError('vanilla membership mismatch')
         write_manifest(vanilla / 'receipt.json', {'status': 'complete', 'metrics': metrics,

@@ -108,7 +108,7 @@ def _vanilla(output):
     if receipt["status"] != "complete" or receipt["requested"] != receipt["completed"]:
         raise ValueError("incomplete vanilla bypass receipt")
     hashes = receipt["output_hashes"]
-    if "compact_no_noise.jsonl" not in hashes:
+    if "compact_vanilla.jsonl" not in hashes:
         raise ValueError("vanilla compact evidence hash missing")
     for name, expected in hashes.items():
         artifact = directory / name
@@ -118,7 +118,7 @@ def _vanilla(output):
             raise ValueError("vanilla output hash mismatch")
     rows = [
         json.loads(line)
-        for line in (directory / "compact_no_noise.jsonl").read_text().splitlines()
+        for line in (directory / "compact_vanilla.jsonl").read_text().splitlines()
         if line.strip()
     ]
     request = receipt["request"]
@@ -145,6 +145,8 @@ def _vanilla(output):
         "items": [
             {
                 **row,
+                "raw_correct": int(row["raw_correct"]),
+                "normalized_correct": int(row["normalized_correct"]),
                 "item_id": str(row["sample_id"]),
                 "source_id": str(row["source_id"]),
             }

@@ -144,12 +144,12 @@ def test_vanilla_is_separate_verified_bypass_evidence(tmp_path):
         {
             "sample_id": str(i),
             "source_id": f"family-{i // 2}",
-            "normalized_correct": 1,
-            "raw_correct": 0,
+            "normalized_correct": True,
+            "raw_correct": False,
         }
         for i in range(4)
     ]
-    compact = directory / "compact_no_noise.jsonl"
+    compact = directory / "compact_vanilla.jsonl"
     compact.write_text("".join(json.dumps(row) + "\n" for row in rows))
     receipt = {
         "status": "complete",
@@ -169,6 +169,8 @@ def test_vanilla_is_separate_verified_bypass_evidence(tmp_path):
     (directory / "receipt.json").write_text(json.dumps(receipt))
     report = write_sharing_report(tmp_path, observations(), plan())
     assert report["vanilla_bypass"]["bypass"] is True
+    assert all(type(row[field]) is int for row in report["vanilla_bypass"]["items"]
+               for field in ("raw_correct", "normalized_correct"))
     assert report["vanilla_bypass"]["metrics"]["normalized_accuracy"] == 1
     assert (
         report["heldout_shared_only"]["baseline_context"][0]["terminal_minus_vanilla"]
@@ -176,6 +178,12 @@ def test_vanilla_is_separate_verified_bypass_evidence(tmp_path):
     )
     compact.write_text("tampered\n")
     with pytest.raises(ValueError, match="hash mismatch"):
+        write_sharing_report(tmp_path, observations(), plan())
+    rows[0]["normalized_correct"] = 0.5
+    compact.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    receipt["output_hashes"][compact.name] = hashlib.sha256(compact.read_bytes()).hexdigest()
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="invalid vanilla per-item correctness"):
         write_sharing_report(tmp_path, observations(), plan())
 
 
