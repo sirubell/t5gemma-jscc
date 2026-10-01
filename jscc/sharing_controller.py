@@ -68,14 +68,14 @@ def validate_contract(path, manifest=None):
         raise ValueError('allocation root must be contract directory')
     if contract.get('automatic_retry') is not False:
         raise ValueError('automatic retry forbidden')
-    if contract.get('entry_route') not in (None, 'h200-target-startup-v1'):
+    if contract.get('entry_route') not in (None, 'h200-target-startup-v1', '5090-q400-target-startup-v1'):
         raise ValueError('unknown production entry route')
-    if manifest['synthetic_cpu'] and contract.get('entry_route') == 'h200-target-startup-v1':
+    if manifest['synthetic_cpu'] and contract.get('entry_route') in ('h200-target-startup-v1', '5090-q400-target-startup-v1'):
         from .sharing_startup import validate_request
         validate_request(contract, manifest)
     if not manifest['synthetic_cpu']:
         _positive(contract.get('finish_before_epoch'), 'absolute finish boundary')
-        if contract.get('entry_route') == 'h200-target-startup-v1':
+        if contract.get('entry_route') in ('h200-target-startup-v1', '5090-q400-target-startup-v1'):
             from .sharing_startup import validate_request
             validate_request(contract, manifest)
         else:
@@ -109,7 +109,7 @@ def validate_contract(path, manifest=None):
             raise ValueError('absolute existing device lease required')
         idle_device_query(contract)
         proposal = _read_ref(contract['proposal'])
-        if contract.get('entry_route') == 'h200-target-startup-v1':
+        if contract.get('entry_route') in ('h200-target-startup-v1', '5090-q400-target-startup-v1'):
             if ledger.get('schema') != 'bounded-overnight-campaign-ledger-v1':
                 raise ValueError('startup route requires exact overnight owner ledger')
             from .sharing_startup import validate_owner_route
@@ -262,6 +262,9 @@ def check_target_device(manifest):
         raise ValueError('visible CUDA UUID differs from sealed assigned device')
     if not torch.cuda.is_bf16_supported():
         raise ValueError('actual CUDA BF16 target required')
+    if contract.get('entry_route') == '5090-q400-target-startup-v1':
+        if str(properties.name) != 'NVIDIA GeForce RTX 5090':
+            raise ValueError('q400 startup requires actual RTX 5090')
     if contract.get('device_binding_receipt') is not None:
         receipt = _read_ref(contract['device_binding_receipt'])
         if receipt.get('device_uuid') != expected or not str(properties.name).startswith('NVIDIA H200'):
@@ -309,7 +312,7 @@ def _cleanup_group():
 def run_controller(path):
     started = time.monotonic()
     contract, manifest = validate_contract(path)
-    if contract.get('entry_route') == 'h200-target-startup-v1':
+    if contract.get('entry_route') in ('h200-target-startup-v1', '5090-q400-target-startup-v1'):
         from .sharing_startup import require_preflight
         require_preflight(path, contract, manifest)
     if not manifest['synthetic_cpu']:

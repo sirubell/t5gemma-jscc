@@ -16,8 +16,9 @@ from test_sharing_qualification import stress_parent
 import test_sharing_accumulation_lifecycle as fixture
 
 
-@pytest.fixture
-def startup_contract(tmp_path, monkeypatch):
+@pytest.fixture(params=[startup.ROUTE, startup.Q400_ROUTE])
+def startup_contract(tmp_path, monkeypatch, request):
+    route = request.param
     from jscc import sharing_run
     class PackageReady(Exception):
         pass
@@ -26,6 +27,11 @@ def startup_contract(tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(sharing_run, 'execute_prepared', stop_before_execution)
         patch.setattr(fixture, 'parent64', stress_parent)
+        from jscc import sharing_preparation
+        original_write = sharing_preparation.write_prepared
+        def write_with_test_cap(path, manifest):
+            return original_write(path, {**manifest, 'hard_cap_seconds': 1000})
+        patch.setattr(sharing_preparation, 'write_prepared', write_with_test_cap)
         tiny_model = sharing_model('D-N')
         template = task_template()
         template['backend'] = tiny_model.base.config.decoder._attn_implementation
@@ -42,17 +48,17 @@ def startup_contract(tmp_path, monkeypatch):
     (allocation/'cpu-proof.json').write_text(json.dumps({'test_fixture':True}))
     contract = dict(schema='sharing-production-controller-v1', prepared=ref(prepared),
         binding=controller.binding_identity(manifest), run_id='startup-cpu-test',
-        hard_cap_seconds=240, output_byte_cap=100000000, automatic_retry=False,
-        allocation_root=str(allocation), entry_route=startup.ROUTE,
-        finish_before_epoch=int(time.time())+1000, target_assets={}, runtime_versions={},
+        hard_cap_seconds=1000, output_byte_cap=100000000, automatic_retry=False,
+        allocation_root=str(allocation), entry_route=route,
+        finish_before_epoch=int(time.time())+2000, target_assets={}, runtime_versions={},
         expected_panel=ref(allocation/'panel.json'))
-    request = dict(schema='sharing-h200-target-startup-request-v1', entry_route=startup.ROUTE,
+    request = dict(schema=startup.schema(contract, '-target-startup-request-v1'), entry_route=route,
         run_id=contract['run_id'], prepared=contract['prepared'], binding=contract['binding'],
         initialization_identity=manifest['initialization']['state_identity'], guard_sha256=startup.GUARD_SHA256,
-        guard_workload=startup.DIAGNOSTIC_WORKLOAD, production_workload=startup.PRODUCTION_WORKLOAD,
-        hard_cap_seconds=240, finish_before_epoch=contract['finish_before_epoch'], automatic_retry=False,
+        guard_workload=startup.DIAGNOSTIC_WORKLOAD, production_workload=startup.workload(contract),
+        hard_cap_seconds=1000, finish_before_epoch=contract['finish_before_epoch'], automatic_retry=False,
         target_assets={}, runtime_versions={}, expected_panel=contract['expected_panel'],
-        cpu_lifecycle_proof=ref(allocation/'cpu-proof.json'), target_class='H200',
+        cpu_lifecycle_proof=ref(allocation/'cpu-proof.json'), target_class=startup.target_class(contract),
         fit_policy={'safety_multiplier':1, 'unmeasured_seconds':dict.fromkeys(startup.UNMEASURED, .01),
                     'cleanup_reserve_seconds':10})
     (allocation/'startup-request.json').write_text(json.dumps(request))
@@ -153,3 +159,25 @@ def test_fit_counts_every_production_obligation():
     assert fit['estimated_remaining_seconds']==(1200*2+108*3+192)*1.5+40
     assert fit['coverage']['states']==17
     assert not fit['coverage']['heldout_measured_before_freeze']
+    depth=startup.estimate_remaining(record,policy,q=400)
+    assert depth['estimated_remaining_seconds']==(2400*2+108*3+192)*1.5+40
+    assert depth['coverage']['scientific_updates']==2400
+
+
+def test_q400_actual_device_name_gate(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import torch
+    expected = 'GPU-00000000-0000-0000-0000-000000000000'
+    path = tmp_path/'device-contract.json'
+    path.write_text(json.dumps({'entry_route':startup.Q400_ROUTE, 'device_uuid':expected}))
+    monkeypatch.setenv('SHARING_CONTROLLER_CONTRACT',str(path))
+    monkeypatch.setenv('SHARING_CONTROLLER_CONTRACT_SHA256',ref(path)['sha256'])
+    monkeypatch.setattr(torch.cuda,'device_count',lambda:1)
+    monkeypatch.setattr(torch.cuda,'is_bf16_supported',lambda:True)
+    properties=SimpleNamespace(uuid=expected,name='NVIDIA H200')
+    monkeypatch.setattr(torch.cuda,'get_device_properties',lambda index:properties)
+    manifest={'synthetic_cpu':False,'resolved_config':{'model':{'device':'cuda','dtype':'bfloat16'}}}
+    with pytest.raises(ValueError,match='actual RTX 5090'):
+        controller.check_target_device(manifest)
+    properties.name='NVIDIA GeForce RTX 5090'
+    controller.check_target_device(manifest)

@@ -588,6 +588,7 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
         tuple(batch_view(batches[i]) for i in order),
         manifest["study_pairing_id"] + ":qualification-only",
         synthetic=manifest["synthetic_cpu"],
+        protocol_id=manifest["protocol_id"],
     )
     parents = [batches[i] for i in indexes]
     validation = [
