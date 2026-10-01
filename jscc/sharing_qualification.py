@@ -30,7 +30,7 @@ from .sharing_controller import (
 )
 from .sharing_preparation import load_prepared, state_dict_identity
 
-GUARD_SHA256 = "bc7865910b5696ee4f1b70fdc8b62dad3b671a8e6d687e0f2b691fdcb35d3bf1"
+GUARD_SHA256 = "1547ddf362d4bc5430f42d1f1e147895856b9d6646bc7d7554409dee88ac7ada"
 SITES = ("enc_l9", "enc_l19", "enc_fn")
 CONDITIONS = ["no_noise", -6, 0, 6, 12, 18]
 FINISH_BEFORE_EPOCH = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc).timestamp()

@@ -224,7 +224,8 @@ def checkpoint_roundtrip(learner, *, checkpoint_path, metadata):
         ordered_view_identities=[v.view_sha256 for v in plan.views], completed_updates=learner.completed,
         source_valid_per_view=[v.source_tokens for v in plan.views],
         target_valid_per_view=[v.target_tokens for v in plan.views],
-        padded_per_view=[v.padded_tokens for v in plan.views], batch_size=plan.batch_size)
+        padded_per_view=[v.padded_tokens for v in plan.views], batch_size=plan.batch_size,
+        protocol_id=plan.protocol_id)
     site = learner.sites[name.removeprefix('specialist_')]
     details = {**metadata, 'parent_identity': None, 'lineage': [], 'phase': 'both',
         'sharing': sharing, 'completed_updates': learner.completed,
