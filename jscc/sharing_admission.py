@@ -64,10 +64,52 @@ CONTINUATION_WORKLOAD = {
 }
 
 
+
+CORRECTED_PRIOR_RUN = "sharing-dn-b512-q400-science-5090-20261002-01"
+CORRECTED_NEW_RUN = "sharing-dn-b512-q400-science-5090-20261002-02"
+CORRECTED_SETTLEMENT_SHA = "2c0e515660f2fdf74da139d5ac96f440604daffdabb5e38576961fa280057b24"
+
+
+def _corrected_attempt(extension, pending, settled):
+    """One explicitly authorized correction, not an automatic retry policy."""
+    authorization = extension.get("explicit_corrected_attempt_authorization", {})
+    require(all(authorization.get(k) == v for k, v in {
+        "schema": "explicit-q400-corrected-attempt-authorization-v1",
+        "status": "OWNER_APPROVED_ONE_NEW_DISTINCT_ATTEMPT",
+        "prior_run_id": CORRECTED_PRIOR_RUN, "prior_charge_device_seconds": 283,
+        "new_run_id": CORRECTED_NEW_RUN, "new_cap_device_seconds": 14117,
+        "maximum_total_attempts": 2, "combined_q400_cap_device_seconds": 14400,
+        "automatic_retry": False,
+    }.items()) and authorization.get("automatic_retry") is False,
+        "exact explicit corrected attempt authority required")
+    handoff = authorization.get("corrected_source_handoff", {})
+    require(isinstance(authorization.get("authorization_source"), str)
+            and bool(authorization["authorization_source"].strip())
+            and handoff.get("sha256") == "844d2d622dc4be2d46cc03a45fb843ef29f88be82d7630dd9b1abde317dbef97"
+            and isinstance(handoff.get("path"), str) and Path(handoff["path"]).is_absolute(),
+            "corrected authority must retain reviewed correction handoff")
+    require(len(settled) == 1 and len(pending) == 1,
+            "corrected attempt requires exactly one settled and one pending run")
+    prior, current = settled[0], pending[0]
+    require(prior.get("run_id") == CORRECTED_PRIOR_RUN
+            and prior.get("charged_device_seconds") == 283
+            and prior.get("max_device_seconds") == 14400
+            and type(prior.get("scientific_training_updates")) is int
+            and prior.get("scientific_training_updates") == 0
+            and prior.get("cleanup_verified") is True
+            and prior.get("compute_status") == "FAILED_STARTUP_NO_SCIENCE"
+            and current.get("run_id") == CORRECTED_NEW_RUN
+            and current.get("prior_consumed_run_id") == CORRECTED_PRIOR_RUN
+            and type(current.get("max_device_seconds")) is int
+            and 0 < current["max_device_seconds"] <= 14117,
+            "corrected attempt must follow exact settled283 and named remaining slot")
+
+
 def _continuation_rows(ledger):
     """Read both accounts without changing frozen primary accounting semantics."""
     primary_pending, primary_settled = _budget_rows(ledger)
     extension = ledger.get("continuation_accounting", {})
+    corrected = extension.get("authorized_scope", {}).get("maximum_distinct_runs") == 2
     require(
         extension.get("schema") == "overnight-q400-continuation-accounting-v1"
         and extension.get("campaign_id") == CAMPAIGN
@@ -76,7 +118,7 @@ def _continuation_rows(ledger):
         and extension.get("protected_h200_device_seconds") == 32400
         and extension.get("authorized_scope") == {
             "cell": "D-N", "bottleneck_dim": 512, "seed": 0, "q": 400,
-            "maximum_distinct_runs": 1, "automatic_retry": False,
+            "maximum_distinct_runs": 2 if corrected else 1, "automatic_retry": False,
             "finish_before_epoch": DEADLINE,
         },
         "exact authorized continuation account required",
@@ -87,7 +129,12 @@ def _continuation_rows(ledger):
     pending = extension.get("pending_reservations", [])
     settled = extension.get("allocations", [])
     require(isinstance(pending, list) and isinstance(settled, list)
-            and len(pending + settled) <= 1, "one continuation run only")
+            and len(pending + settled) <= (2 if corrected else 1), "bounded continuation runs only")
+    if corrected:
+        _corrected_attempt(extension, pending, settled)
+    else:
+        require("explicit_corrected_attempt_authorization" not in extension,
+                "corrected authority requires explicit two-attempt scope")
     all_rows = primary_pending + primary_settled + pending + settled
     ids = [r.get("run_id") for r in all_rows]
     require(all(isinstance(run, str) and run for run in ids)
@@ -357,6 +404,19 @@ def validate_overnight_admission(contract, diagnostic_only):
                         "automatic_retry": False, "finish_before_epoch": DEADLINE,
                         "scope": CONTINUATION_WORKLOAD,
                     }.items()), "exact q400 continuation budget required")
+            if ledger["continuation_accounting"]["authorized_scope"]["maximum_distinct_runs"] == 2:
+                prior = admission.get("prior_consumed_run", {})
+                settlement = prior.get("settlement_receipt", {})
+                require(admission.get("explicit_corrected_attempt")
+                    == ledger["continuation_accounting"]["explicit_corrected_attempt_authorization"]
+                    and run_id == CORRECTED_NEW_RUN and cap <= 14117
+                    and prior.get("run_id") == CORRECTED_PRIOR_RUN
+                    and prior.get("charged_device_seconds") == 283
+                    and prior.get("scientific_training_updates") == 0
+                    and settlement.get("sha256") == CORRECTED_SETTLEMENT_SHA
+                    and isinstance(settlement.get("path"), str)
+                    and Path(settlement["path"]).is_absolute(),
+                    "corrected admission must bind exact settled attempt and owner authority")
         else:
             _diagnostic_budget(admission, hold, ledger_origin, cap, width,
                                run_id, pending, settled)
