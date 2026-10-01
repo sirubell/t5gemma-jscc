@@ -372,6 +372,8 @@ def execute_prepared(manifest, root, output):
     model.codec.load_state_dict(manifest['initialization_state'], strict=True)
     if state_dict_identity(model.codec.state_dict()) != manifest['initialization']['state_identity']:
         raise ValueError('actual initialization differs from prepared codec')
+    from .sharing_startup import run_startup_if_requested
+    run_startup_if_requested(manifest, root, processor, model, guard)
     batches = [read_prepared_batch(ref, root) for ref in manifest['updates']]
     validation = [read_prepared_batch(ref, root) for ref in manifest['validation']]
     plan = SharingPlan(tuple(batch_view(b) for b in batches), manifest['study_pairing_id'],

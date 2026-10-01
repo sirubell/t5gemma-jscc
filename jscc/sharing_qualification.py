@@ -523,7 +523,8 @@ def _verify_panel(directory, expected):
             )
 
 
-def run_diagnostic(manifest, package_root, output, guard, *, expected_panel):
+def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
+                   model_bundle=None, target_class="RTX5090"):
     """Actual reviewed numerical guard and panels; tiny CPU fixtures use this core."""
     import torch
     from .models.split_model import build_model
@@ -542,10 +543,11 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel):
     if not manifest["synthetic_cpu"]:
         _require(
             torch.cuda.device_count() == 1
-            and torch.cuda.get_device_name() == "NVIDIA GeForce RTX 5090",
-            "one RTX5090 required",
+            and ((target_class == "RTX5090" and torch.cuda.get_device_name() == "NVIDIA GeForce RTX 5090")
+                 or (target_class == "H200" and torch.cuda.get_device_name().startswith("NVIDIA H200"))),
+            "one exact requested diagnostic target required",
         )
-    processor, model = build_model(config)
+    processor, model = build_model(config) if model_bundle is None else model_bundle
     if not manifest["synthetic_cpu"]:
         parameter = next(model.base.parameters())
         _require(

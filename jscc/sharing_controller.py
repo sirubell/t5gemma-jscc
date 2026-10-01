@@ -68,30 +68,39 @@ def validate_contract(path, manifest=None):
         raise ValueError('allocation root must be contract directory')
     if contract.get('automatic_retry') is not False:
         raise ValueError('automatic retry forbidden')
+    if contract.get('entry_route') not in (None, 'h200-target-startup-v1'):
+        raise ValueError('unknown production entry route')
+    if manifest['synthetic_cpu'] and contract.get('entry_route') == 'h200-target-startup-v1':
+        from .sharing_startup import validate_request
+        validate_request(contract, manifest)
     if not manifest['synthetic_cpu']:
         _positive(contract.get('finish_before_epoch'), 'absolute finish boundary')
-        qualification = _read_ref(contract['qualification'])
-        if (qualification.get('schema') != 'sharing-production-qualification-v1'
-                or qualification.get('status') != 'qualified_for_production'
-                or qualification.get('scope') != 'full_sharing_lifecycle'
-                or qualification.get('full_lifecycle_ready') is not True
-                or qualification.get('binding') != contract['binding']):
-            raise ValueError('exact production qualification required; diagnostics cannot qualify')
-        measurement = _read_ref(qualification['measurement'])
-        if (measurement.get('schema') != 'sharing-production-measurement-v1'
-                or measurement.get('status') != 'qualified_scope_fit'
-                or measurement.get('binding') != contract['binding']):
-            raise ValueError('exact production measurement evidence required')
-        evidence = measurement.get('measured_evidence')
-        if not isinstance(evidence, list) or not evidence:
-            raise ValueError('nonempty immutable measured evidence required')
-        for reference in evidence:
-            _read_ref(reference)
-        measured = measurement.get('estimated_full_lifecycle_seconds')
-        reserve = measurement.get('reserve_seconds')
-        if (any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-                for value in (measured, reserve)) or measured + reserve > cap):
-            raise ValueError('estimated full lifecycle plus reserve exceeds allocation cap')
+        if contract.get('entry_route') == 'h200-target-startup-v1':
+            from .sharing_startup import validate_request
+            validate_request(contract, manifest)
+        else:
+            qualification = _read_ref(contract['qualification'])
+            if (qualification.get('schema') != 'sharing-production-qualification-v1'
+                    or qualification.get('status') != 'qualified_for_production'
+                    or qualification.get('scope') != 'full_sharing_lifecycle'
+                    or qualification.get('full_lifecycle_ready') is not True
+                    or qualification.get('binding') != contract['binding']):
+                raise ValueError('exact production qualification required; diagnostics cannot qualify')
+            measurement = _read_ref(qualification['measurement'])
+            if (measurement.get('schema') != 'sharing-production-measurement-v1'
+                    or measurement.get('status') != 'qualified_scope_fit'
+                    or measurement.get('binding') != contract['binding']):
+                raise ValueError('exact production measurement evidence required')
+            evidence = measurement.get('measured_evidence')
+            if not isinstance(evidence, list) or not evidence:
+                raise ValueError('nonempty immutable measured evidence required')
+            for reference in evidence:
+                _read_ref(reference)
+            measured = measurement.get('estimated_full_lifecycle_seconds')
+            reserve = measurement.get('reserve_seconds')
+            if (any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                    for value in (measured, reserve)) or measured + reserve > cap):
+                raise ValueError('estimated full lifecycle plus reserve exceeds allocation cap')
         ledger = json.loads(Path(contract['ledger_path']).read_text())
         owner = contract.get('sole_owner')
         if owner != 'task-7':
@@ -100,7 +109,12 @@ def validate_contract(path, manifest=None):
             raise ValueError('absolute existing device lease required')
         idle_device_query(contract)
         proposal = _read_ref(contract['proposal'])
-        if (proposal.get('schema') != 'sharing-production-proposal-v1'
+        if contract.get('entry_route') == 'h200-target-startup-v1':
+            if ledger.get('schema') != 'bounded-overnight-campaign-ledger-v1':
+                raise ValueError('startup route requires exact overnight owner ledger')
+            from .sharing_startup import validate_owner_route
+            validate_owner_route(contract, proposal)
+        elif (proposal.get('schema') != 'sharing-production-proposal-v1'
                 or proposal.get('binding') != contract['binding']
                 or proposal.get('qualification_sha256') != contract['qualification']['sha256']
                 or proposal.get('run_id') != run_id
@@ -295,6 +309,9 @@ def _cleanup_group():
 def run_controller(path):
     started = time.monotonic()
     contract, manifest = validate_contract(path)
+    if contract.get('entry_route') == 'h200-target-startup-v1':
+        from .sharing_startup import require_preflight
+        require_preflight(path, contract, manifest)
     if not manifest['synthetic_cpu']:
         _watchdog(contract)
     if time.time() + contract['hard_cap_seconds'] > contract.get('finish_before_epoch', float('inf')):
