@@ -99,7 +99,7 @@ def _validate(payload):
         raise ValueError("incomplete or unknown state payload")
     if (
         payload["schema"] != "experiment-state-v2"
-        or payload["kind"] != "single_site_v2"
+        or payload["kind"] not in {"single_site_v2", "shared_encoder_v2"}
     ):
         raise ValueError("unsupported state schema/kind")
     metadata = payload["metadata"]
@@ -111,24 +111,30 @@ def _validate(payload):
         ):
             raise ValueError(f"missing {key}")
     count = metadata["completed_updates"]
-    if type(count) is not int or not 0 <= count <= 400:
-        raise ValueError("invalid completed update count")
-    if metadata["phase"] not in {
-        "both",
-        "reconstruction",
-        "staged",
-        "reconstruction-prefix",
-    }:
-        raise ValueError("unknown phase")
+    if payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
+        from .sharing_state import validate_sharing_state
+        validate_sharing_state(payload)
+    else:
+        if type(count) is not int or not 0 <= count <= 400:
+            raise ValueError("invalid completed update count")
+        if metadata["phase"] not in {
+            "both",
+            "reconstruction",
+            "staged",
+            "reconstruction-prefix",
+        }:
+            raise ValueError("unknown phase")
+        if not isinstance(metadata["lineage"], list):
+            raise ValueError("phase lineage must be explicit")
+        stream = payload["stream"]
+        if (
+            not isinstance(stream, dict)
+            or stream.get("completed_updates") != count
+            or stream.get("offset") != count * 64
+        ):
+            raise ValueError("inconsistent stream/update counters")
     if not isinstance(metadata["lineage"], list):
         raise ValueError("phase lineage must be explicit")
-    stream = payload["stream"]
-    if (
-        not isinstance(stream, dict)
-        or stream.get("completed_updates") != count
-        or stream.get("offset") != count * 64
-    ):
-        raise ValueError("inconsistent stream/update counters")
     if payload["scheduler"].get("last_epoch") != count:
         raise ValueError("scheduler/global update mismatch")
     if set(payload["rng"]) != {"python", "numpy", "torch", "cuda"}:
@@ -206,7 +212,8 @@ def save_state(path, *, model, optimizer, scheduler, scaler, metadata, stream_st
     """Durably publish once. A failed save never replaces any existing parent."""
     payload = dict(
         schema="experiment-state-v2",
-        kind="single_site_v2",
+        kind=("shared_encoder_v2" if metadata.get("sharing", {}).get("learner") == "shared"
+              else "single_site_v2"),
         metadata=copy.deepcopy(metadata),
         parameter_map=parameter_map(model, optimizer),
         model=model.state_dict(),

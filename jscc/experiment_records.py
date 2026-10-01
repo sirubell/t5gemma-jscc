@@ -200,7 +200,14 @@ def _objective_value(components: dict[str, Any], kind: str) -> float:
 
 
 def _update(p: dict[str, Any]) -> None:
-    _fields(p, "site_id attempted_step completed_step final_step phase_start_step site_step sweep exposure objective lr_used lr_next gradient nonfinite skipped update_l2 snr timing memory", "update")
+    _fields({k: v for k, v in p.items() if k != "audit"}, "site_id attempted_step completed_step final_step phase_start_step site_step sweep exposure objective lr_used lr_next gradient nonfinite skipped update_l2 snr timing memory", "update")
+    if "audit" in p:
+        audit = p["audit"]
+        _fields(audit, "policy noise_capture complete_batch_identities", "update audit")
+        _require(audit["policy"] == "sparse_first_final", "unknown update audit policy")
+        _require(type(audit["noise_capture"]) is bool and audit["noise_capture"] == (p["attempted_step"] in {p["phase_start_step"] + 1, p["final_step"]}), "invalid sparse noise capture")
+        identities = audit["complete_batch_identities"]
+        _require(identities is None or (isinstance(identities, list) and bool(identities) and all(isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value) for value in identities)), "invalid complete batch identities")
     _text(p["site_id"], "site_id")
     for key in ("attempted_step", "completed_step", "final_step", "phase_start_step", "site_step", "sweep"):
         _count(p[key], key)

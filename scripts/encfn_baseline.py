@@ -7,13 +7,14 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jscc.experiment_schedule import compile_baseline_plan
 
 
-def _execute(manifest_path, output, resource_guard=None):
+def _execute(manifest_path, output, resource_guard: Any = None):
     import copy
     import torch
     from jscc.activation_replay import canonical_digest, file_digest
@@ -36,6 +37,13 @@ def _execute(manifest_path, output, resource_guard=None):
     if file_digest(config_path) != config_ref["sha256"]:
         raise ValueError("prepared config checksum mismatch")
     config = load_config(config_path)
+    native_c = manifest.get("native64_c")
+    if native_c is not None:
+        if native_c != {"schema": "formal-native64-c-v1", "same_shape_guard": True} or resource_guard is None:
+            raise ValueError("native64+C requires the approved externally bounded formal wrapper")
+        if (config["model"].get("numerical_policy") != "native" or
+                config["training"]["batch_size"] != 64 or config["training"]["gradient_accumulation"] != 1):
+            raise ValueError("formal C requires actual native64 without accumulation")
     if (config["split"] != {"stack": "enc", "where": "after_final_norm"}
             or config["codec"]["bottleneck_dim"] != 512 or config["seed"] != 0
             or config["training"]["max_steps"] != 400):
@@ -115,12 +123,19 @@ def _execute(manifest_path, output, resource_guard=None):
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError("run output must be fresh")
-    learner = BaselineLearner(model, run_id=manifest["run_id"], task=config["task"],
+    from jscc.native64_baseline import Native64Learner, PreparedUpdates, same_shape_guard, evaluate_vanilla_panel
+    learner_class = Native64Learner if native_c else BaselineLearner
+    learner = learner_class(model, run_id=manifest["run_id"], task=config["task"],
         identity={"source": metadata["source_identity"], "config": metadata["config_identity"],
                   "data": metadata["data_identity"], "parent": metadata["parent_identity"]},
         pairing_id=manifest["pairing_id"], lr=config["training"]["lr"],
         weight_decay=config["training"]["weight_decay"], grad_clip=config["training"]["grad_clip"],
-        event_sink=None)
+        event_sink=None,
+        audit_policy="sparse_first_final" if native_c else "full")
+    if native_c:
+        same_shape_guard(learner, manifest["updates"], root,
+                         output.parent / "acceptance" / manifest["cell"], resource_guard)
+        learner.event_sink = getattr(resource_guard, "observe_event", None)
     replay = {}
     if segment.strategy != "both":
         for role, declaration in manifest["replays"].items():
@@ -145,7 +160,8 @@ def _execute(manifest_path, output, resource_guard=None):
     from jscc.baseline_protocol import comparison_refs
     kind = "combined" if segment.strategy in {"both", "staged"} else "local"
     controls = comparison_refs(learner, metadata, kind)
-    request = manifest["task_request"]
+    # Bind the actual resolved backbone site, as in canonical runtime acceptance.
+    request = {**manifest["task_request"], "target_site": asdict(site)}
     if request["comparison"] != controls:
         raise ValueError("prepared task comparison differs from actual config/state")
     if request["expected_items"] != 256:
@@ -171,10 +187,25 @@ def _execute(manifest_path, output, resource_guard=None):
         if file_digest(receipt_path) != declaration["receipt"]["sha256"]:
             raise ValueError("reused assessment receipt checksum mismatch")
         reused[int(step)] = {"state": reused_state, "receipt": json.loads(receipt_path.read_text()), "root": receipt_path.parent}
-    result = run_baseline(learner, output=output, metadata=metadata, update_batches=updates,
-                         validation_batches=validation, assess=assess, segment=segment, parent=parent, reused_assessments=reused, task_request=request, resource_guard=resource_guard, allocation_required=resource_guard is not None,
-                         on_output_created=getattr(resource_guard, "on_output_created", None))
-    return result
+    if native_c and manifest["cell"] == "D-none":
+        assert resource_guard is not None
+        import time
+        from jscc.experiment_state import isolated_rng
+        resource_guard()
+        begin = time.monotonic()
+        with isolated_rng(config["seed"]):
+            evaluate_vanilla_panel(model, processor, request, output.parent / "vanilla")
+        resource_guard.vanilla_complete(time.monotonic() - begin)
+    def run(actual_updates):
+        return run_baseline(learner, output=output, metadata=metadata, update_batches=actual_updates,
+                            validation_batches=validation, assess=assess, segment=segment, parent=parent,
+                            reused_assessments=reused, task_request=request, resource_guard=resource_guard,
+                            allocation_required=resource_guard is not None,
+                            on_output_created=getattr(resource_guard, "on_output_created", None))
+    if native_c:
+        with PreparedUpdates(learner, manifest["updates"], root) as prepared_updates:
+            return run(prepared_updates)
+    return run(updates)
 
 
 def execute(manifest_path, output):

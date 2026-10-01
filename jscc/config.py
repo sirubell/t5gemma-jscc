@@ -9,16 +9,26 @@ import yaml
 def validate_codec_architecture(codec):
     """Validate explicit designs without rewriting historical saved configs."""
     architecture = codec.get("architecture", "residual_mlp")
-    if architecture not in ("residual_mlp", "direct_affine", "direct_outer_ln"):
-        raise ValueError("codec.architecture must be residual_mlp, direct_affine, or direct_outer_ln")
-    if architecture in ("direct_affine", "direct_outer_ln"):
-        required = {"n_res_blocks": 0, "layernorm": ("both" if architecture == "direct_outer_ln" else "none"),
-                    "snr_film": False}
+    if architecture not in ("residual_mlp", "direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
+        raise ValueError("unsupported codec.architecture")
+    if architecture in ("direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
+        required = {"n_res_blocks": 0, "snr_film": False}
+        if architecture != "two_linear_gelu":
+            required["layernorm"] = {"direct_affine": "none", "direct_outer_ln": "both",
+                                     "direct_outer_rms": "rms_both"}[architecture]
+        else:
+            required.update({"hidden_dim": 1152, "activation": "gelu"})
+            if codec.get("layernorm") not in ("none", "both", "rms_both"):
+                raise ValueError("two_linear_gelu requires codec.layernorm=none, both, or rms_both")
         for key, value in required.items():
             if codec.get(key) != value:
                 raise ValueError(f"{architecture} requires codec.{key}={value!r}")
         if codec.get("dropout", 0.0) != 0.0:
             raise ValueError(f"{architecture} requires codec.dropout=0")
+        if codec.get("layernorm") == "rms_both" and codec.get("rms_norm_eps") != 1e-6:
+            raise ValueError("backbone RMSNorm requires explicit codec.rms_norm_eps=1e-6")
+        if type(codec.get("bottleneck_dim")) is not int or codec["bottleneck_dim"] <= 0:
+            raise ValueError("codec.bottleneck_dim must be a positive integer")
 
 
 def resolve_codec_configs(codec):

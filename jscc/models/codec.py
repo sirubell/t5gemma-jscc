@@ -5,6 +5,30 @@ from torch import nn
 from jscc.config import validate_codec_architecture
 
 
+class BackboneRMSNorm(nn.Module):
+    """Exact installed T5Gemma2RMSNorm semantics, including offset scale.
+
+    Verified against Transformers 5.10.2 on the recorded 5090B runtime.
+    RMS reduction and scale multiplication precede the input-dtype cast.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float())
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.eps}"
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, width, activation, dropout=0.0):
         super().__init__()
@@ -27,14 +51,29 @@ class Codec(nn.Module):
         validate_codec_architecture(config)
         self.config = config
         self.film: nn.Sequential | None = None
-        if config.get("architecture", "residual_mlp") in ("direct_affine", "direct_outer_ln"):
+        architecture = config.get("architecture", "residual_mlp")
+        if architecture in ("direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
             # Retain the public Sequential interface used by diagnostics. Each
-            # half has exactly one biased Linear, with no hidden-width factor.
-            outer_ln = config["architecture"] == "direct_outer_ln"
-            self.input_norm = nn.LayerNorm(input_dim) if outer_ln else nn.Identity()
-            self.output_norm = nn.LayerNorm(input_dim) if outer_ln else nn.Identity()
-            self.encoder = nn.Sequential(nn.Linear(input_dim, config["bottleneck_dim"]))
-            self.decoder = nn.Sequential(nn.Linear(config["bottleneck_dim"], input_dim))
+            # boundary norm is at D, never at H or the transmitted bottleneck.
+            norm = config["layernorm"]
+            def boundary_norm():
+                if norm == "both":
+                    return nn.LayerNorm(input_dim)
+                if norm == "rms_both":
+                    return BackboneRMSNorm(input_dim, eps=config["rms_norm_eps"])
+                return nn.Identity()
+            self.input_norm = boundary_norm()
+            self.output_norm = boundary_norm()
+            bottleneck = config["bottleneck_dim"]
+            if architecture == "two_linear_gelu":
+                width = config["hidden_dim"]
+                self.encoder = nn.Sequential(nn.Linear(input_dim, width), nn.GELU(),
+                                             nn.Linear(width, bottleneck))
+                self.decoder = nn.Sequential(nn.Linear(bottleneck, width), nn.GELU(),
+                                             nn.Linear(width, input_dim))
+            else:
+                self.encoder = nn.Sequential(nn.Linear(input_dim, bottleneck))
+                self.decoder = nn.Sequential(nn.Linear(bottleneck, input_dim))
             return
         width, bottleneck = config["hidden_dim"], config["bottleneck_dim"]
         activation = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}[config["activation"]]
