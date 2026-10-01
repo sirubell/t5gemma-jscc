@@ -12,6 +12,7 @@ from .experiment_schedule import CONDITIONS, NoiseKey
 
 TRAINED_SITES = ("enc_l9", "enc_l19", "enc_fn")
 HELDOUT_SITE = "enc_l14"
+DEPTH_PROTOCOL = "sharing-dn-q400-effective64-v1"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class SharingPlan:
     study_pairing_id: str
     synthetic: bool = False
     layer_count: int = 26
+    protocol_id: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.views, tuple) or not self.views:
@@ -85,8 +87,12 @@ class SharingPlan:
             raise ValueError("quota must have four distinct integral quarters")
         if len({v.sequences for v in self.views}) != 1:
             raise ValueError("effective batch size must be constant")
-        if not self.synthetic and (self.q != 200 or self.batch_size != 64):
-            raise ValueError("production requires q200 and effective batch64")
+        if not self.synthetic:
+            quota = 400 if self.protocol_id == DEPTH_PROTOCOL else 200
+            if self.q != quota or self.batch_size != 64:
+                raise ValueError("production requires q200 or explicit q400 depth protocol and effective batch64")
+            if quota == 400 and len({view.view_sha256 for view in self.views}) != 400:
+                raise ValueError("q400 requires400 distinct ordered views; cycling q200 is forbidden")
 
     @property
     def q(self):

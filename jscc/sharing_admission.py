@@ -54,6 +54,78 @@ PRODUCTION_WORKLOAD = {
     "conditions": CONDITIONS,
     "l14": "only after this width pilot’s three specialists and shared learner are complete and frozen; no adaptation or selection across widths using l14.",
 }
+CONTINUATION_WORKLOAD = {
+    **PRODUCTION_WORKLOAD,
+    "specialists": {
+        **PRODUCTION_WORKLOAD["specialists"], "updates_per_site": 400
+    },
+    "shared": {"fresh": True, "updates": 1200},
+    "scientific_training_updates": 2400,
+}
+
+
+def _continuation_rows(ledger):
+    """Read both accounts without changing frozen primary accounting semantics."""
+    primary_pending, primary_settled = _budget_rows(ledger)
+    extension = ledger.get("continuation_accounting", {})
+    require(
+        extension.get("schema") == "overnight-q400-continuation-accounting-v1"
+        and extension.get("campaign_id") == CAMPAIGN
+        and extension.get("ledger_owner") == "task-7"
+        and extension.get("cap_device_seconds") == 14400
+        and extension.get("protected_h200_device_seconds") == 32400
+        and extension.get("authorized_scope") == {
+            "cell": "D-N", "bottleneck_dim": 512, "seed": 0, "q": 400,
+            "maximum_distinct_runs": 1, "automatic_retry": False,
+            "finish_before_epoch": DEADLINE,
+        },
+        "exact authorized continuation account required",
+    )
+    require(type(extension["authorized_scope"]["seed"]) is int
+            and type(extension["authorized_scope"]["q"]) is int,
+            "integer continuation seed and quota required")
+    pending = extension.get("pending_reservations", [])
+    settled = extension.get("allocations", [])
+    require(isinstance(pending, list) and isinstance(settled, list)
+            and len(pending + settled) <= 1, "one continuation run only")
+    all_rows = primary_pending + primary_settled + pending + settled
+    ids = [r.get("run_id") for r in all_rows]
+    require(all(isinstance(run, str) and run for run in ids)
+            and len(ids) == len(set(ids)), "duplicate continuation/primary run")
+    caps = [r.get("max_device_seconds") for r in pending]
+    charges = [r.get("charged_device_seconds") for r in settled]
+    charged = extension.get("charged_device_seconds")
+    require(type(charged) is int and charged >= 0
+            and all(type(n) is int and n > 0 for n in caps)
+            and all(type(n) is int and n >= 0 for n in charges)
+            and sum(charges) == charged and charged + sum(caps) <= 14400,
+            "continuation accounting exceeds or disagrees with14400 cap")
+    primary = ledger["charged_device_seconds"] + sum(
+        r["max_device_seconds"] for r in primary_pending)
+    h200 = sum(r["max_device_seconds"] for r in primary_pending
+               if str(r.get("component", "")).startswith("h200-sharing-B")) + sum(
+        r["charged_device_seconds"] for r in primary_settled
+        if str(r.get("component", "")).startswith("h200-sharing-B"))
+    require(primary + charged + sum(caps) + max(0, 32400 - h200) <= 54000,
+            "continuation exceeds aggregate cap or protected H200 budget")
+    for row in pending + settled:
+        require(row.get("component") == "5090-shared-q400-B512"
+                and row.get("host") == "5090B" and type(row.get("devices")) is int
+                and row.get("devices") == 1
+                and row.get("bottleneck_dim") == 512 and row.get("seed") == 0
+                and type(row.get("seed")) is int and type(row.get("q")) is int
+                and row.get("q") == 400 and row.get("execution_owner") == QUALIFIER
+                and type(row.get("max_device_seconds")) is int
+                and 0 < row["max_device_seconds"] <= 14400
+                and row.get("no_auto_retry") is True
+                and row.get("finish_before_epoch") == DEADLINE
+                and row.get("state") in (
+                    "HELD_DISPATCH_GATED", "HELD_PAYLOAD_APPROVED", "SETTLED"),
+                "continuation row outside authorized scope")
+    require(all(row["state"] in ("HELD_DISPATCH_GATED", "HELD_PAYLOAD_APPROVED")
+                for row in pending) and all(row["state"] == "SETTLED" for row in settled),
+            "continuation row state disagrees with account list")
+    return pending, settled
 
 
 def require(value, message):
@@ -140,9 +212,6 @@ def _budget_rows(ledger):
 
 def validate_overnight_admission(contract, diagnostic_only):
     """Validate actual owner schemas; caller retains target/lease/qualification gates."""
-    from .sharing_preparation import load_prepared
-    from .sharing_controller import binding_identity
-
     require(type(diagnostic_only) is bool, "explicit diagnostic boolean required")
     ledger = json.loads(Path(contract["ledger_path"]).read_text())
     require(
@@ -153,18 +222,22 @@ def validate_overnight_admission(contract, diagnostic_only):
         and contract.get("sole_owner") == "task-7",
         "exact task-7 overnight campaign ledger required",
     )
-    pending, settled = _budget_rows(ledger)
     run_id = contract["run_id"]
     binding = contract["binding"]
+    continuation = (not diagnostic_only and binding.get("protocol_id")
+                    == "sharing-dn-q400-effective64-v1")
+    pending, settled = (_continuation_rows(ledger) if continuation
+                        else _budget_rows(ledger))
     width = binding.get("bottleneck_dim")
-    component = "5090-qualification" if diagnostic_only else f"h200-sharing-B{width}"
-    host = "5090B" if diagnostic_only else "H200"
+    component = ("5090-shared-q400-B512" if continuation else
+                 "5090-qualification" if diagnostic_only else f"h200-sharing-B{width}")
+    host = "5090B" if diagnostic_only or continuation else "H200"
     cap = contract["hard_cap_seconds"]
     require(
-        width in WIDTHS
+        width in ((512,) if continuation else WIDTHS)
         and binding.get("cell") == "D-N"
         and type(cap) is int
-        and 0 < cap <= (1200 if diagnostic_only else 10800)
+        and 0 < cap <= (14400 if continuation else 1200 if diagnostic_only else 10800)
         and contract.get("automatic_retry") is False
         and contract.get("finish_before_epoch") == DEADLINE,
         "exact no-norm width/cap/no-retry/deadline required",
@@ -208,12 +281,14 @@ def validate_overnight_admission(contract, diagnostic_only):
     )
     payload = read_ref(contract["payload_receipt"])
     require(
-        payload.get("schema") == "overnight-run-payload-approval-v1"
+        payload.get("schema") == ("overnight-q400-payload-approval-v1"
+                                  if continuation else "overnight-run-payload-approval-v1")
         and payload.get("template_only") is False
         and payload.get("status") == "APPROVED_FOR_BOUND_PAYLOAD"
         and payload.get("campaign_id") == CAMPAIGN
         and payload.get("ledger_owner") == "task-7"
-        and payload.get("scientific_promotion") is False,
+        and (payload.get("scientific_promotion", False) is False if continuation
+             else payload.get("scientific_promotion") is False),
         "actual task-7 bound payload approval required",
     )
     require(
@@ -244,138 +319,174 @@ def validate_overnight_admission(contract, diagnostic_only):
         == {"path": admission_origin, "sha256": contract["admission"]["sha256"]},
         "payload budget admission link mismatch",
     )
-    if diagnostic_only:
+    if diagnostic_only or continuation:
         handoff = read_ref(payload["owner_handoff"])
-        require(
-            handoff.get("schema") == "explicit-resource-handoff-task3-v1"
-            and handoff.get("status")
-            == "released_resource_handoff_granted_no_launch_here"
-            and handoff.get("from_owner_thread")
-            == "01a0f30f-58de-719f-97ac-b870486db0fc"
-            and handoff.get("sole_5090_qualification_owner_thread") == QUALIFIER
-            and handoff.get("lease", {}).get("path") == contract.get("device_lease")
-            and isinstance(contract.get("device_lease"), str)
-            and Path(contract["device_lease"]).is_absolute(),
-            "exact released 5090 owner and shared lease required",
-        )
-        require(
-            admission.get("schema") == "three-width-diagnostic-budget-admission-v1"
-            and admission.get("campaign_id") == CAMPAIGN
-            and admission.get("ledger_path") == ledger_origin
-            and admission.get("reservation_owner") == "task-7"
-            and admission.get("sole_launcher") == QUALIFIER
-            and hold.get("execution_owner") == QUALIFIER
-            and admission.get("host") == "5090B"
-            and admission.get("total_cap_device_seconds") == 3600
-            and admission.get("finish_before_epoch") == DEADLINE
-            and admission.get("qualification_is_not_promotion") is True,
-            "exact three-width diagnostic budget admission required",
-        )
-        runs = admission.get("runs", [])
-        require(
-            len(runs) == 3
-            and {r.get("bottleneck_dim") for r in runs} == set(WIDTHS)
-            and len({r.get("run_id") for r in runs}) == 3
-            and all(
-                type(r.get("cap_device_seconds")) is int
-                and 0 < r["cap_device_seconds"] <= 1200
-                and r.get("devices") == 1
-                for r in runs
+        if not continuation:
+            require(
+                handoff.get("schema") == "explicit-resource-handoff-task3-v1"
+                and handoff.get("status")
+                == "released_resource_handoff_granted_no_launch_here"
+                and handoff.get("from_owner_thread")
+                == "01a0f30f-58de-719f-97ac-b870486db0fc"
+                and handoff.get("sole_5090_qualification_owner_thread") == QUALIFIER
+                and handoff.get("lease", {}).get("path") == contract.get("device_lease")
+                and isinstance(contract.get("device_lease"), str)
+                and Path(contract["device_lease"]).is_absolute(),
+                "exact released 5090 owner and shared lease required",
             )
-            and sum(r["cap_device_seconds"] for r in runs) <= 3600,
-            "exact three unique width slots within3600 required",
-        )
-        allowed = {r["run_id"]: r for r in runs}
-        require(
-            run_id in allowed
-            and allowed[run_id]["bottleneck_dim"] == width
-            and allowed[run_id]["cap_device_seconds"] == cap
-            and all(
-                r["run_id"] in allowed
-                for r in pending + settled
-                if r.get("component") == component
-            ),
-            "diagnostic run outside immutable three-width slots",
-        )
+        if continuation:
+            require(hold.get("seed") == 0 and hold.get("q") == 400
+                    and handoff.get("schema") == "explicit-q400-resource-handoff-v1"
+                    and handoff.get("status") == "released_resource_handoff_granted"
+                    and handoff.get("sole_execution_owner") == QUALIFIER
+                    and handoff.get("device_lease") == contract.get("device_lease")
+                    and isinstance(contract.get("device_lease"), str)
+                    and Path(contract["device_lease"]).is_absolute()
+                    and handoff.get("workload") == CONTINUATION_WORKLOAD
+                    and payload.get("accounting_key") == "continuation_accounting"
+                    and all(admission.get(k) == v for k, v in {
+                        "schema": "overnight-q400-continuation-admission-v1",
+                        "template_only": False, "status": "APPROVED_BUDGET_SLOT",
+                        "campaign_id": CAMPAIGN, "ledger_path": ledger_origin,
+                        "accounting_key": "continuation_accounting",
+                        "reservation_owner": "task-7", "sole_launcher": QUALIFIER,
+                        "run_id": run_id, "component": component, "host": "5090B",
+                        "devices": 1, "bottleneck_dim": 512, "seed": 0, "q": 400,
+                        "cap_device_seconds": cap, "aggregate_cap_device_seconds": 54000,
+                        "protected_h200_device_seconds": 32400,
+                        "automatic_retry": False, "finish_before_epoch": DEADLINE,
+                        "scope": CONTINUATION_WORKLOAD,
+                    }.items()), "exact q400 continuation budget required")
+        else:
+            _diagnostic_budget(admission, hold, ledger_origin, cap, width,
+                               run_id, pending, settled)
     else:
-        require(
-            admission.get("schema") == "three-width-h200-sharing-budget-admission-v1"
-            and admission.get("template_only") is False
-            and admission.get("status") == "APPROVED_BUDGET_SLOTS"
-            and admission.get("campaign_id") == CAMPAIGN
-            and admission.get("ledger_path") == ledger_origin
-            and admission.get("reservation_owner") == "task-7"
-            and admission.get("sole_launcher") == "01a0f19d-7f2e-739e-8aaf-b4153af2b0d8"
-            and hold.get("execution_owner") == admission.get("sole_launcher")
-            and admission.get("host") == "H200"
-            and admission.get("total_cap_device_seconds") == 32400
-            and admission.get("finish_before_epoch") == DEADLINE
-            and admission.get("automatic_retry") is False
-            and cap == 10800,
-            "exact approved H200 owner budget required",
-        )
-        runs = admission.get("runs", [])
-        require(
-            len(runs) == 3
-            and {r.get("bottleneck_dim") for r in runs} == set(WIDTHS)
-            and len({r.get("run_id") for r in runs}) == 3
-            and all(
-                isinstance(r.get("run_id"), str)
-                and r["run_id"]
-                and r.get("component") == f"h200-sharing-B{r['bottleneck_dim']}"
-                and r.get("devices") == 1
-                and r.get("cap_device_seconds") == 10800
-                for r in runs
-            ),
-            "exact H200 three width slots required",
-        )
-        require(
-            any(r["run_id"] == run_id and r["bottleneck_dim"] == width for r in runs),
-            "H200 run outside approved slots",
-        )
-        allowed_ids = {r["run_id"] for r in runs}
-        require(
-            all(
-                r["run_id"] in allowed_ids
-                for r in pending + settled
-                if str(r.get("component", "")).startswith("h200-sharing-B")
-            ),
-            "H200 prior or pending run outside immutable three slots",
-        )
-        scope = {
-            k: v
-            for k, v in PRODUCTION_WORKLOAD.items()
-            if k not in ("scientific_training_updates", "l14")
-        }
-        scope.update(
-            cell="D-N",
-            architecture="direct_affine",
-            outer_normalization="none",
-            l14="only after trained-study freeze",
-        )
-        require(
-            admission.get("scope") == scope, "H200 budget scientific scope mismatch"
-        )
-        _runtime_device(contract, payload, admission_origin, payload_origin)
-    require(
-        payload.get("workload")
-        == (DIAGNOSTIC_WORKLOAD if diagnostic_only else PRODUCTION_WORKLOAD),
-        "approved workload differs from fixed science",
-    )
+        _h200_budget(contract, payload, admission, hold, ledger_origin, cap,
+                     width, run_id, pending, settled, admission_origin, payload_origin)
+    workload = (CONTINUATION_WORKLOAD if continuation else
+                DIAGNOSTIC_WORKLOAD if diagnostic_only else PRODUCTION_WORKLOAD)
+    require(payload.get("workload") == workload,
+            "approved workload differs from fixed science")
     proposal = read_ref(contract["proposal"])
+    require(all(proposal.get(k) == v for k, v in {
+        "run_id": run_id, "diagnostic_only": diagnostic_only,
+        "hard_cap_seconds": cap, "binding": binding,
+        "workload": payload["workload"],
+    }.items()), "immutable reviewed proposal scope mismatch")
+    _prepared_payload(contract, payload, binding, width, 400 if continuation else 200)
+    return payload
+
+
+def _diagnostic_budget(admission, hold, ledger_origin, cap, width,
+                       run_id, pending, settled):
+    require(
+        admission.get("schema") == "three-width-diagnostic-budget-admission-v1"
+        and admission.get("campaign_id") == CAMPAIGN
+        and admission.get("ledger_path") == ledger_origin
+        and admission.get("reservation_owner") == "task-7"
+        and admission.get("sole_launcher") == QUALIFIER
+        and hold.get("execution_owner") == QUALIFIER
+        and admission.get("host") == "5090B"
+        and admission.get("total_cap_device_seconds") == 3600
+        and admission.get("finish_before_epoch") == DEADLINE
+        and admission.get("qualification_is_not_promotion") is True,
+        "exact three-width diagnostic budget admission required",
+    )
+    runs = admission.get("runs", [])
+    require(
+        len(runs) == 3
+        and {r.get("bottleneck_dim") for r in runs} == set(WIDTHS)
+        and len({r.get("run_id") for r in runs}) == 3
+        and all(
+            type(r.get("cap_device_seconds")) is int
+            and 0 < r["cap_device_seconds"] <= 1200
+            and r.get("devices") == 1
+            for r in runs
+        )
+        and sum(r["cap_device_seconds"] for r in runs) <= 3600,
+        "exact three unique width slots within3600 required",
+    )
+    allowed = {r["run_id"]: r for r in runs}
+    require(
+        run_id in allowed
+        and allowed[run_id]["bottleneck_dim"] == width
+        and allowed[run_id]["cap_device_seconds"] == cap
+        and all(
+            r["run_id"] in allowed
+            for r in pending + settled
+            if r.get("component") == "5090-qualification"
+        ),
+        "diagnostic run outside immutable three-width slots",
+    )
+
+
+def _h200_budget(contract, payload, admission, hold, ledger_origin, cap,
+                 width, run_id, pending, settled, admission_origin, payload_origin):
+    require(
+        admission.get("schema") == "three-width-h200-sharing-budget-admission-v1"
+        and admission.get("template_only") is False
+        and admission.get("status") == "APPROVED_BUDGET_SLOTS"
+        and admission.get("campaign_id") == CAMPAIGN
+        and admission.get("ledger_path") == ledger_origin
+        and admission.get("reservation_owner") == "task-7"
+        and admission.get("sole_launcher") == "01a0f19d-7f2e-739e-8aaf-b4153af2b0d8"
+        and hold.get("execution_owner") == admission.get("sole_launcher")
+        and admission.get("host") == "H200"
+        and admission.get("total_cap_device_seconds") == 32400
+        and admission.get("finish_before_epoch") == DEADLINE
+        and admission.get("automatic_retry") is False
+        and cap == 10800,
+        "exact approved H200 owner budget required",
+    )
+    runs = admission.get("runs", [])
+    require(
+        len(runs) == 3
+        and {r.get("bottleneck_dim") for r in runs} == set(WIDTHS)
+        and len({r.get("run_id") for r in runs}) == 3
+        and all(
+            isinstance(r.get("run_id"), str)
+            and r["run_id"]
+            and r.get("component") == f"h200-sharing-B{r['bottleneck_dim']}"
+            and r.get("devices") == 1
+            and r.get("cap_device_seconds") == 10800
+            for r in runs
+        ),
+        "exact H200 three width slots required",
+    )
+    require(
+        any(r["run_id"] == run_id and r["bottleneck_dim"] == width for r in runs),
+        "H200 run outside approved slots",
+    )
+    allowed_ids = {r["run_id"] for r in runs}
     require(
         all(
-            proposal.get(k) == v
-            for k, v in {
-                "run_id": run_id,
-                "diagnostic_only": diagnostic_only,
-                "hard_cap_seconds": cap,
-                "binding": binding,
-                "workload": payload["workload"],
-            }.items()
+            r["run_id"] in allowed_ids
+            for r in pending + settled
+            if str(r.get("component", "")).startswith("h200-sharing-B")
         ),
-        "immutable reviewed proposal scope mismatch",
+        "H200 prior or pending run outside immutable three slots",
     )
+    scope = {
+        k: v
+        for k, v in PRODUCTION_WORKLOAD.items()
+        if k not in ("scientific_training_updates", "l14")
+    }
+    scope.update(
+        cell="D-N",
+        architecture="direct_affine",
+        outer_normalization="none",
+        l14="only after trained-study freeze",
+    )
+    require(
+        admission.get("scope") == scope, "H200 budget scientific scope mismatch"
+    )
+    _runtime_device(contract, payload, admission_origin, payload_origin)
+
+
+def _prepared_payload(contract, payload, binding, width, q):
+    from .sharing_preparation import load_prepared
+    from .sharing_controller import binding_identity
+
     manifest = load_prepared(verify_ref(contract["prepared"]))
     require(
         binding_identity(manifest) == binding
@@ -383,11 +494,18 @@ def validate_overnight_admission(contract, diagnostic_only):
         "executed prepared/source binding mismatch",
     )
     config = manifest["resolved_config"]
+    if q == 400:
+        require(manifest.get("protocol_id") == "sharing-dn-q400-effective64-v1"
+                and manifest.get("recipe_identity") == "K+0.1R-native-effective64-q400"
+                and manifest.get("initialization_policy") == {
+                    "seed": 0, "fresh_cpu_codec": True, "baseline_state_reused": False}
+                and type(config.get("seed")) is int and config.get("seed") == 0,
+                "exact q400 recipe and fresh seed0 required")
     require(
         manifest.get("synthetic_cpu") is False
         and manifest.get("cell") == "D-N"
         and manifest.get("selected_bottleneck_dim") == width
-        and manifest.get("q") == 200
+        and manifest.get("q") == q
         and manifest.get("batch_size") == 64
         and manifest.get("execution_partition") == partition_policy(16)
         and config.get("codec", {}).get("architecture") == "direct_affine"
@@ -414,7 +532,6 @@ def validate_overnight_admission(contract, diagnostic_only):
         read_ref(payload[field])
     for reference in payload["target_assets"].values():
         verify_ref(reference)
-    return payload
 
 
 def _runtime_device(contract, payload, admission_origin, payload_origin):

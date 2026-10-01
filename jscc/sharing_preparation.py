@@ -20,7 +20,7 @@ from .baseline_protocol import read_prepared_batch
 from .config import load_config
 from .presentation import tensor_digest
 from .sharing_protocol import batch_view
-from .sharing_schedule import SharingPlan
+from .sharing_schedule import SharingPlan, DEPTH_PROTOCOL
 from .sharing_accumulation import partition_policy
 
 SCHEMA = "sharing-prepared-v1"
@@ -105,8 +105,9 @@ def _verify(manifest, root, *, source_root=None):
     if partition is not None and (not isinstance(partition, dict) or partition != partition_policy(partition.get("microbatch_size"))):
         raise ValueError("explicit supported execution partition required")
     expected_size = 64 if partition is not None or not synthetic else 2
-    if type(q) is not int or type(size) is not int or (q, size) != (4 if synthetic else 200, expected_size):
-        raise ValueError("production requires q200/native64; synthetic CPU requires q4/batch2")
+    quota = 400 if manifest.get("protocol_id") == DEPTH_PROTOCOL else 200
+    if type(q) is not int or type(size) is not int or (q, size) != (4 if synthetic else quota, expected_size):
+        raise ValueError("production requires q200 or explicit q400/native64; synthetic CPU requires q4/batch2")
     for key in ("protocol_id", "model_revision", "study_pairing_id", "recipe_identity", "architecture_decision"):
         if not isinstance(manifest[key], str) or not manifest[key].strip():
             raise ValueError(f"explicit {key} required")
@@ -141,7 +142,8 @@ def _verify(manifest, root, *, source_root=None):
         if view.sequences != size:
             raise ValueError("update differs from declared native batch size")
         views.append(view)
-    SharingPlan(tuple(views), manifest["study_pairing_id"], synthetic=synthetic)
+    SharingPlan(tuple(views), manifest["study_pairing_id"], synthetic=synthetic,
+                protocol_id=manifest["protocol_id"])
     validation = _batch_group(root, manifest["validation"])
     if sum(view.sequences for view in validation) != (2 if synthetic else 128):
         raise ValueError("objective validation panel count mismatch")
@@ -161,6 +163,13 @@ def _verify(manifest, root, *, source_root=None):
     state = torch.load(_reference(root, initialization), map_location="cpu", weights_only=True)
     if state_dict_identity(state) != initialization.get("state_identity"):
         raise ValueError("initial codec state identity mismatch")
+    if not synthetic and manifest["q"] == 400:
+        from .models.codec import Codec
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            expected_initial = Codec(1152, config["codec"]).state_dict()
+        if state_dict_identity(state) != state_dict_identity(expected_initial):
+            raise ValueError("q400 initialization must be fresh seed0; trained state cannot be reused")
     acceptance = manifest.get("gpu_acceptance")
     if acceptance is not None:
         _acceptance_receipt(root, manifest)
@@ -188,6 +197,15 @@ def _config_contract(config, manifest):
             or model["revision"] != manifest["model_revision"]
             or model.get("numerical_policy", "native") != "native"):
         raise ValueError("config violates sharing task/seed/site/model contract")
+    if manifest.get("q") == 400 or manifest.get("protocol_id") == DEPTH_PROTOCOL:
+        if (synthetic or manifest.get("q") != 400 or manifest.get("protocol_id") != DEPTH_PROTOCOL
+                or manifest.get("cell") != "D-N" or manifest.get("selected_bottleneck_dim") != 512
+                or manifest.get("batch_size") != 64 or codec["bottleneck_dim"] != 512
+                or manifest.get("execution_partition") != partition_policy(16)
+                or manifest.get("recipe_identity") != "K+0.1R-native-effective64-q400"
+                or manifest.get("initialization_policy") != {
+                    "seed": 0, "fresh_cpu_codec": True, "baseline_state_reused": False}):
+            raise ValueError("q400 is only the explicit fresh seed0 D-N/B512 effective64/16x4 depth pilot")
     if synthetic and (model["device"] != "cpu" or model["dtype"] != "float32"):
         raise ValueError("synthetic fixture must use CPU/float32")
     partition = manifest.get("execution_partition")

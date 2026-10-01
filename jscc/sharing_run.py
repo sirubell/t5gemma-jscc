@@ -149,7 +149,8 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
             ordered_view_identities=[v.view_sha256 for v in plan.views], completed_updates=step,
             source_valid_per_view=[v.source_tokens for v in plan.views],
             target_valid_per_view=[v.target_tokens for v in plan.views],
-            padded_per_view=[v.padded_tokens for v in plan.views], batch_size=plan.batch_size)
+            padded_per_view=[v.padded_tokens for v in plan.views], batch_size=plan.batch_size,
+            protocol_id=metadata['protocol_identity'])
         sites = {key: {'site': asdict(value), 'role': 'heldout_after_freeze' if key == 'enc_l14' else 'trained'}
                  for key, value in learner.sites.items() if name == 'shared' or key == name.removeprefix('specialist_')}
         details = {**metadata, 'parent_identity': None, 'lineage': [], 'phase': 'both',
@@ -374,7 +375,7 @@ def execute_prepared(manifest, root, output):
     batches = [read_prepared_batch(ref, root) for ref in manifest['updates']]
     validation = [read_prepared_batch(ref, root) for ref in manifest['validation']]
     plan = SharingPlan(tuple(batch_view(b) for b in batches), manifest['study_pairing_id'],
-                       synthetic=manifest['synthetic_cpu'])
+                       synthetic=manifest['synthetic_cpu'], protocol_id=manifest['protocol_id'])
     geometry = {partition: [read_prepared_batch(ref, root) for ref in refs]
                 for partition, refs in manifest['geometry'].items()}
     metadata = {'source_identity': manifest['source_identity'], 'config_identity': manifest['config_identity'],

@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 
 from .activation_replay import file_digest
+from .sharing_schedule import DEPTH_PROTOCOL
 from .experiment_records import canonical_bytes, completion_status, read_events, verify_inventory
 
 SITES = ("enc_l9", "enc_l19", "enc_fn")
@@ -35,7 +36,7 @@ def _updates(learner, q):
 
 def build_sharing_state(*, synthetic, learner, ordered_view_identities,
                         completed_updates, source_valid_per_view,
-                        target_valid_per_view, padded_per_view, batch_size):
+                        target_valid_per_view, padded_per_view, batch_size, protocol_id=None):
     """Build deterministic stream counters from complete effective-batch counts.
 
 The per-view vectors contain one aggregate token count per effective batch,
@@ -45,7 +46,9 @@ not individual examples. Their full ordered identities are frozen at step zero.
     for value in (ordered_view_identities, source_valid_per_view, target_valid_per_view, padded_per_view):
         _require(isinstance(value, (list, tuple)), "sharing views/counts must be ordered sequences")
     identities = list(ordered_view_identities)
-    q = len(identities) if synthetic else 200
+    q = len(identities) if synthetic else (400 if protocol_id == DEPTH_PROTOCOL else 200)
+    if not synthetic and q == 400:
+        _require(len(set(identities)) == 400, "q400 state requires400 distinct views")
     _require(q >= 4 and q % 4 == 0, "invalid sharing batch horizon")
     _require(type(batch_size) is int and batch_size in ((2, 64) if synthetic else (64,)), "sharing batch size mismatch")
     order = _updates(learner, q)
@@ -72,6 +75,8 @@ not individual examples. Their full ordered identities are frozen at step zero.
                "target_valid_per_site": {s: sum(vectors["target_valid_per_view"][:n]) for s, n in counts.items()},
                "padded_per_site": {s: sum(vectors["padded_per_view"][:n]) for s, n in counts.items()},
                "next_site": order[completed_updates] if completed_updates < len(order) else None}
+    if not synthetic and q == 400:
+        sharing["protocol_id"] = DEPTH_PROTOCOL
     stream = {"completed_updates": completed_updates, "offset": completed_updates * batch_size,
               "view_offsets": dict(counts), "next_site": sharing["next_site"]}
     return sharing, stream
@@ -125,7 +130,8 @@ def validate_sharing_state(payload):
               "target_valid_per_view", "padded_per_view", "batch_size")
     _require(all(field in sharing for field in fields), "incomplete sharing metadata")
     count = metadata.get("completed_updates")
-    expected, stream = build_sharing_state(completed_updates=count, **{k: sharing[k] for k in fields})
+    expected, stream = build_sharing_state(completed_updates=count,
+        protocol_id=metadata.get("protocol_identity"), **{k: sharing[k] for k in fields})
     _require(canonical_bytes(sharing) == canonical_bytes(expected), "sharing counters/order/horizon mismatch")
     kind = "shared_encoder_v2" if sharing["learner"] == "shared" else "single_site_v2"
     _require(payload.get("kind") == kind, "sharing learner/kind mismatch")
@@ -175,7 +181,7 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
         _count(horizon, "freeze horizon")
         factor = 3 if learner == "shared" else 1
         _require(horizon > 0 and horizon % (4 * factor) == 0
-                 and (synthetic or horizon == 200 * factor), "freeze horizon mismatch")
+                 and (synthetic or horizon == (400 if protocol_identity == DEPTH_PROTOCOL else 200) * factor), "freeze horizon mismatch")
         _require(manifest["phases"] == [{"phase_id": "combined", "updates": horizon,
                     "start_step": 0, "start_valid_tokens": 0}], "freeze trained horizon mismatch")
         events = read_events(paths["events"])

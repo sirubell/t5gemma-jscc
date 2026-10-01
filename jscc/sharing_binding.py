@@ -11,6 +11,7 @@ from .activation_replay import canonical_digest, file_digest
 from .config import load_config
 from .models.codec import Codec
 from .sharing_accumulation import partition_policy
+from .sharing_schedule import DEPTH_PROTOCOL
 from .sharing_preparation import (_config_contract, _reference, source_inventory,
                                   state_dict_identity, write_prepared)
 
@@ -28,12 +29,13 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
     if file_digest(inputs_path) != inputs_sha256:
         raise ValueError('reviewed input manifest checksum mismatch')
     inputs = json.loads(inputs_path.read_text())
+    quota = 400 if protocol_id == DEPTH_PROTOCOL else 200
     if (inputs.get('schema') != 'sharing-production-inputs-v1'
             or inputs.get('status') != 'cpu_contracts_verified'
-            or (inputs.get('q'), inputs.get('batch_size')) != (200, 64)):
+            or (inputs.get('q'), inputs.get('batch_size')) != (quota, 64)):
         raise ValueError('reviewed complete production inputs required')
     config = load_config(config_path)
-    manifest = dict(schema='sharing-prepared-v1', synthetic_cpu=False, q=200, batch_size=64,
+    manifest = dict(schema='sharing-prepared-v1', synthetic_cpu=False, q=quota, batch_size=64,
         cell=cell, selected_bottleneck_dim=bottleneck_dim,
         execution_partition=partition_policy(microbatch_size),
         model_revision=inputs['model_revision'], architecture_decision=architecture_decision,
