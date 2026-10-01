@@ -105,10 +105,70 @@ def _corrected_attempt(extension, pending, settled):
             "corrected attempt must follow exact settled283 and named remaining slot")
 
 
+
+THIRD_RUN = "sharing-dn-b512-q400-science-5090-20261002-03"
+THIRD_AUTHORITY_SHA = "8e354f1ccf8aa65af4110098079542275ca34852be882447c9a66bf589a6afdc"
+SECOND_SETTLEMENT_SHA = "34ab8eec87674af2495dfd3fca442f36f7e198f183df9b6d2129852b431fddb6"
+
+
+def _historical_ref(ref, digest):
+    # Owner-verified receipt identities remain portable when origins are offline.
+    require(isinstance(ref, dict) and ref.get("sha256") == digest
+            and isinstance(ref.get("path"), str) and Path(ref["path"]).is_absolute(),
+            "exact historical owner receipt identity required")
+
+
+def _third_attempt(extension, pending, settled):
+    authority = extension.get("explicit_third_attempt_authorization", {})
+    require(all(authority.get(k) == v for k, v in {
+        "schema": "explicit-q400-third-attempt-authorization-v1",
+        "status": "OWNER_APPROVED_ONE_NEW_DISTINCT_ATTEMPT",
+        "new_run_id": THIRD_RUN, "new_cap_device_seconds": 13246,
+        "maximum_total_attempts": 3, "combined_q400_cap_device_seconds": 14400,
+        "prior_charge_device_seconds": 1154, "automatic_retry": False,
+        "finish_before_epoch": DEADLINE, "sole_execution_owner": QUALIFIER,
+    }.items()) and authority.get("automatic_retry") is False
+            and isinstance(authority.get("authorization_source"), str)
+            and bool(authority["authorization_source"].strip()),
+            "exact explicit third attempt authority required")
+    _historical_ref(extension.get("explicit_third_attempt_authorization_receipt"),
+                    THIRD_AUTHORITY_SHA)
+    _historical_ref(authority.get("corrected_source_handoff"),
+                    "aa10b308590b2a93825f0c55a973a19134076aee964e8a47ad4a51bfb718fff1")
+    priors = authority.get("prior_consumed_runs", [])
+    require(len(priors) == 2 and len(settled) == 2 and len(pending) == 1,
+            "third attempt requires exactly two settled and one pending run")
+    for run, charge, cap, digest in (
+        (CORRECTED_PRIOR_RUN, 283, 14400, CORRECTED_SETTLEMENT_SHA),
+        (CORRECTED_NEW_RUN, 871, 14117, SECOND_SETTLEMENT_SHA),
+    ):
+        receipts = [r for r in priors if r.get("run_id") == run]
+        rows = [r for r in settled if r.get("run_id") == run]
+        require(len(receipts) == len(rows) == 1, "exact two consumed run identities required")
+        receipt, row = receipts[0], rows[0]
+        for record in (receipt, row):
+            require(record.get("state") == "SETTLED"
+                    and type(record.get("charged_device_seconds")) is int
+                    and record["charged_device_seconds"] == charge
+                    and type(record.get("scientific_training_updates")) is int
+                    and record["scientific_training_updates"] == 0
+                    and record.get("cleanup_verified") is True,
+                    "third attempt requires exact settled charges and zero science cleanup")
+        require(row.get("max_device_seconds") == cap, "historical attempt cap changed")
+        _historical_ref(receipt.get("settlement_receipt"), digest)
+    current = pending[0]
+    require(current.get("run_id") == THIRD_RUN
+            and current.get("prior_consumed_run_ids") == [CORRECTED_PRIOR_RUN, CORRECTED_NEW_RUN]
+            and type(current.get("max_device_seconds")) is int
+            and 0 < current["max_device_seconds"] <= 13246,
+            "only named third attempt within remaining13246 is authorized")
+
+
 def _continuation_rows(ledger):
     """Read both accounts without changing frozen primary accounting semantics."""
     primary_pending, primary_settled = _budget_rows(ledger)
     extension = ledger.get("continuation_accounting", {})
+    third = extension.get("authorized_scope", {}).get("maximum_distinct_runs") == 3
     corrected = extension.get("authorized_scope", {}).get("maximum_distinct_runs") == 2
     require(
         extension.get("schema") == "overnight-q400-continuation-accounting-v1"
@@ -118,8 +178,9 @@ def _continuation_rows(ledger):
         and extension.get("protected_h200_device_seconds") == 32400
         and extension.get("authorized_scope") == {
             "cell": "D-N", "bottleneck_dim": 512, "seed": 0, "q": 400,
-            "maximum_distinct_runs": 2 if corrected else 1, "automatic_retry": False,
+            "maximum_distinct_runs": 3 if third else 2 if corrected else 1, "automatic_retry": False,
             "finish_before_epoch": DEADLINE,
+            **({"explicitly_allowed_run_ids": [CORRECTED_PRIOR_RUN, CORRECTED_NEW_RUN, THIRD_RUN]} if third else {}),
         },
         "exact authorized continuation account required",
     )
@@ -129,8 +190,10 @@ def _continuation_rows(ledger):
     pending = extension.get("pending_reservations", [])
     settled = extension.get("allocations", [])
     require(isinstance(pending, list) and isinstance(settled, list)
-            and len(pending + settled) <= (2 if corrected else 1), "bounded continuation runs only")
-    if corrected:
+            and len(pending + settled) <= (3 if third else 2 if corrected else 1), "bounded continuation runs only")
+    if third:
+        _third_attempt(extension, pending, settled)
+    elif corrected:
         _corrected_attempt(extension, pending, settled)
     else:
         require("explicit_corrected_attempt_authorization" not in extension,
@@ -329,7 +392,7 @@ def validate_overnight_admission(contract, diagnostic_only):
     payload = read_ref(contract["payload_receipt"])
     require(
         payload.get("schema") == ("overnight-q400-payload-approval-v1"
-                                  if continuation else "overnight-run-payload-approval-v1")
+                                  if continuation and run_id != THIRD_RUN else "overnight-run-payload-approval-v1")
         and payload.get("template_only") is False
         and payload.get("status") == "APPROVED_FOR_BOUND_PAYLOAD"
         and payload.get("campaign_id") == CAMPAIGN
@@ -404,6 +467,20 @@ def validate_overnight_admission(contract, diagnostic_only):
                         "automatic_retry": False, "finish_before_epoch": DEADLINE,
                         "scope": CONTINUATION_WORKLOAD,
                     }.items()), "exact q400 continuation budget required")
+            if ledger["continuation_accounting"]["authorized_scope"]["maximum_distinct_runs"] == 3:
+                authority = ledger["continuation_accounting"]["explicit_third_attempt_authorization"]
+                require(admission.get("explicit_third_attempt") == authority
+                        and admission.get("prior_consumed_runs") == authority["prior_consumed_runs"]
+                        and run_id == THIRD_RUN and cap <= 13246,
+                        "third admission must bind exact owner authority and both settlements")
+                _historical_ref(admission.get("explicit_third_attempt_authorization"), THIRD_AUTHORITY_SHA)
+                require(handoff.get("run_id") == THIRD_RUN
+                        and handoff.get("campaign_id") == CAMPAIGN
+                        and handoff.get("device_uuid") == contract.get("device_uuid")
+                        and isinstance(contract.get("device_uuid"), str)
+                        and handoff.get("automatic_retry") is False
+                        and handoff.get("finish_before_epoch") == DEADLINE,
+                        "fresh third attempt resource handoff required")
             if ledger["continuation_accounting"]["authorized_scope"]["maximum_distinct_runs"] == 2:
                 prior = admission.get("prior_consumed_run", {})
                 settlement = prior.get("settlement_receipt", {})
