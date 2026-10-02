@@ -2,7 +2,7 @@
 
 ## Research session quick start
 
-For research, experiment or Colab sessions, start with the concise [research workflow](docs/research-roadmap.md#研究工作流程2026-10-02), then the current local HANDOFF and assigned ticket. Colab setup is in [the runbook](docs/running.md#colab-runbook2026-10-02).
+For research, experiment or Colab sessions, start with the concise [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02), then the current local HANDOFF and assigned ticket. Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
 
 ## Read the relevant documents
 

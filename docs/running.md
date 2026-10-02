@@ -114,22 +114,22 @@ See [validation levels](validation.md#what-a-sweep-test-does-and-does-not-prove)
 - Ruff reports invalid UTF-8 in ._*.py after copying from macOS: these may be AppleDouble metadata sidecars. Confirm their format and move them out of the source tree; use a Git checkout/archive for future source transfers. The project explicitly excludes docs/local/ backups and ._* metadata even in deployments without a .git directory. Real Python source encoding errors should still be investigated normally.
 - lm-eval prints a Git lookup failure in a source-only archive deployment: inspect the process exit code and results.json. The metadata lookup can fail while evaluation succeeds; a normal Git checkout provides the missing repository metadata.
 
-## Colab runbook（2026-10-02）
+## Colab runbook (2026-10-02)
 
-沿用 [簡短研究流程](research-roadmap.md#研究工作流程2026-10-02)。以下是現有 owner 回報的已測連線與執行方式；不要重新建立帳號流程或重跑別人的 GPU probe。
+Follow the [concise research workflow](research-roadmap.md#research-workflow-2026-10-02). These connection and execution observations come from the existing owner. Reuse that work rather than rebuilding account setup or duplicating GPU probes.
 
-1. 使用現有官方 Colab CLI 與既有登入狀態。從當前 Colab owner 的 handoff 取得實際 CLI 路徑、runtime ID 與既有 launcher；不要猜 subcommand、重印 token 或把登入資料放進文件。先確認當前 assignment，重用已指定的 runtime。
-2. 明確 stage 固定版本 source 與 launcher 所需 modules；launcher 的 script directory 必須在 `sys.path`。用 project lockfile 執行 `uv sync --locked`，後續固定使用 project Python。Notebook kernel 啟動的 child process 已確認可使用 CUDA。
-3. SSH 路徑需要在啟動 Python **之前**設定 process-local driver library path。既有 launcher 的命令前綴為：
+1. Use the existing official Colab CLI and login. Obtain the actual CLI path, runtime ID and existing launcher from the current Colab owner's handoff; do not guess subcommands, print tokens or put credentials in documents. Check the current assignment and reuse the designated runtime.
+2. Explicitly stage the pinned source and modules required by the launcher. The launcher's script directory must be on `sys.path`. Run `uv sync --locked` with the project lockfile, then use the fixed project Python. A child process launched from the notebook kernel has been verified to use CUDA.
+3. Through SSH, set the process-local driver library path **before** starting Python. Prefix the existing launcher command as follows:
 
    ```bash
    LD_LIBRARY_PATH=/usr/lib64-nvidia .venv/bin/python <existing-launcher.py> <approved-arguments>
    ```
 
-   這是命令樣式，placeholder 必須換成 owner 已驗證的實際路徑／參數；不要改全系統 library 設定。
-4. 必要 weights 先壓縮上傳、解壓，再由 model loader 讀取；確認 input/checkpoint/source 身分與輸出位置。`/content` 是暫存，終止前匯出必要結果。私人永久 Drive 儲存尚未設定或授權，不把 mount/upload 當成既定下一步。
-5. 保留有界的 remote job、結果 export、stop 與 **zero assignments** 驗證。CLI/client timeout 不是遠端 GPU cutoff。背景 runtime 的存活不能視為 AI Pro 保證；斷線後先查既有 job 狀態，避免重複啟動。
+   This is a command pattern: replace placeholders with the owner's verified paths and arguments. Keep system-wide library settings unchanged.
+4. Compress required weights for upload, decompress them, then load the model. Verify input/checkpoint/source identities and output locations. `/content` is ephemeral; export necessary results before termination. Private permanent Drive storage has not been configured or authorized, so mounting or uploading there is not an assumed next step.
+5. Retain a bounded remote job, result export, stop and **zero assignments** verification. A CLI/client timeout is not a remote GPU cutoff. AI Pro does not establish guaranteed background runtime survival; after disconnecting, inspect the existing job before launching a duplicate.
 
-已測範圍：L4 上16-document、BF16、batch16 通過；model load 約7.5秒、evaluation15.09秒，peak allocated6.03GiB／reserved7.16GiB。當次觀察 L4 為1.54 CU/hour、A100 為5.30 CU/hour；這些是當次數值，不保證未來費率。完整 panels／training 尚未由這個小測試驗證。256-document probe 由現有 owner 處理，先讀其結果，不另開重複工作。
+Verified scope: an L4 passed a 16-document BF16 evaluation at batch16; model loading took approximately7.5 seconds and evaluation15.09 seconds, with peak6.03GiB allocated/7.16GiB reserved. Observed rates were1.54 CU/hour for L4 and5.30 CU/hour for A100; these observations do not guarantee future rates. This small test does not qualify full panels or training. The existing owner handles the256-document probe; read its results before starting overlapping work.
 
-本機 evidence workspace：`/Users/tim_c_wang/Documents/Codex/2026-10-01/colab-readiness-cost-probe/`；資產身分來源為 [COLAB-ASSET-HANDOFF.json](local/research/short-trials-20261001/COLAB-ASSET-HANDOFF.json)。外部 session 不會自動取得這些本機／ignored 檔案；由 owner 提供需要的非機密 handoff。此 runbook 不代表已完成永久儲存、完整訓練 qualification 或新的 deployment。
+Local evidence workspace: `/Users/tim_c_wang/Documents/Codex/2026-10-01/colab-readiness-cost-probe/`; asset identities are recorded in [COLAB-ASSET-HANDOFF.json](local/research/short-trials-20261001/COLAB-ASSET-HANDOFF.json). External sessions do not automatically receive these local/ignored files; the owner supplies the necessary non-secret handoff. This runbook does not establish permanent storage, full training qualification or a new deployment.
