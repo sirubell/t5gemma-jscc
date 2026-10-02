@@ -376,6 +376,63 @@ def append_event(path: str | Path, event: dict[str, Any]) -> dict[str, Any]:
     return artifact_ref(path, path.parent, "metadata")
 
 
+class AppendOnlyEventWriter:
+    """Single-writer durable JSONL without rereading or hashing prior events.
+
+    Validate existing history once on acquisition, new events before writing,
+    and the complete history again at the existing completion/inventory gate.
+    A short/interrupted write can leave a diagnostic tail; it stops the caller
+    and this writer cannot retry. read_events rejects a truncated tail. The
+    public atomic-replacement append_event API remains unchanged.
+    """
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.failed = False
+        self._identity = None
+        _require(not self.path.is_symlink(), "event log symlinks forbidden")
+        if self.path.exists():
+            before = self._stat_identity(self.path.stat())
+            read_events(self.path)
+            _require(before == self._stat_identity(self.path.stat()), "event log changed during acquisition")
+            self._identity = before
+
+    @staticmethod
+    def _stat_identity(value):
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    def append(self, event: dict[str, Any]) -> None:
+        if self.failed:
+            raise RuntimeError("event writer failed; no retry")
+        validate_event(event)
+        data = canonical_bytes(event) + b"\n"
+        flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        creating = self._identity is None
+        if creating:
+            flags |= os.O_CREAT | os.O_EXCL
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, flags, 0o600)
+            try:
+                if not creating:
+                    _require(self._stat_identity(os.fstat(fd)) == self._identity,
+                             "event log changed outside its single writer")
+                if os.write(fd, data) != len(data):
+                    raise OSError("partial event append")
+                os.fsync(fd)
+                self._identity = self._stat_identity(os.fstat(fd))
+            finally:
+                os.close(fd)
+            if creating:
+                directory = os.open(self.path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        except BaseException:
+            self.failed = True
+            raise
+
+
 def artifact_ref(path: str | Path, root: str | Path, kind: str) -> dict[str, Any]:
     path, root = Path(path).resolve(), Path(root).resolve()
     _require(kind in ("metadata", "tensor"), "unsupported artifact kind")

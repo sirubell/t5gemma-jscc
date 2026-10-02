@@ -18,7 +18,7 @@ from .baseline_protocol import (objective_record_request, objective_settings,
                                 read_prepared_batch, validate_task_receipt, write_manifest, bind_batch_identity)
 from .evaluation import (codec_observation_identity, evaluate_checkpoint,
                          observation_event_payload, verify_observation_artifacts)
-from .experiment_records import (append_event, artifact_ref, completion_status,
+from .experiment_records import (AppendOnlyEventWriter, artifact_ref, completion_status,
                                  observation_identity, read_events, measure)
 from .experiment_state import open_state, restore_state, save_state
 from .models.split_model import build_model
@@ -131,8 +131,9 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
             model_revision=metadata['model_revision'],
             enc_fn_reuse=not plan.synthetic and plan.protocol_id not in NATIVE16_PROTOCOLS,
             microbatch_size=microbatch_size)
+        event_writer = AppendOnlyEventWriter(root / 'metrics.jsonl')
         def sink(event):
-            append_event(root / 'metrics.jsonl', event)
+            event_writer.append(event)
             if event['event_type'] == 'update':
                 write_manifest(root / 'draws' / f'{learner.completed:06d}.json', learner.last_draws)
         learner.event_sink = sink
