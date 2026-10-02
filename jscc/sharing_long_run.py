@@ -163,6 +163,7 @@ def evaluate_long_vanilla(model, processor, template, manifest, output):
     check_long_deadline()
     output.mkdir(parents=True, exist_ok=False)
     settings = copy.deepcopy(template['settings'])
+    settings['evidence_mode'] = 'compact-v1'
     settings['noise_seed'] = template['noise']['seed']
     settings['noise_namespace'] = template['noise']['namespace']
     started = time.monotonic()

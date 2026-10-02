@@ -19,7 +19,7 @@ from test_shared_lifecycle import geometry_batches, install_adapter, task_templa
 from test_sharing_native16 import native_batches
 
 
-def fixture_package(tmp_path):
+def fixture_package(tmp_path, evidence_mode='compact-v1'):
     source = Path(__file__).resolve().parents[1]
     root = tmp_path / 'prepared'
     root.mkdir()
@@ -42,6 +42,10 @@ def fixture_package(tmp_path):
     updates = [batch_ref(f'update{i}.pt', batch) for i, batch in enumerate(native_batches())]
     geometry = {role: [batch_ref(f'geometry-{role}.pt', values[0])] for role, values in geometry_batches().items()}
     template = task_template()
+    if evidence_mode is None:
+        template['settings'].pop('evidence_mode', None)
+    else:
+        template['settings']['evidence_mode'] = evidence_mode
     template['backend'] = model.base.config.decoder._attn_implementation
     (root / 'task.json').write_text(json.dumps(template))
     torch.save(model.codec.state_dict(), root / 'initial.pt')
@@ -68,11 +72,17 @@ def fixture_package(tmp_path):
     return prepared, cli
 
 
-def test_train_freeze_and_no_noise_first_final_cli(tmp_path, monkeypatch):
-    from jscc import sharing_run, sharing_long_run
+@pytest.mark.parametrize('evidence_mode', ['legacy', None])
+def test_train_freeze_and_no_noise_first_final_cli(tmp_path, monkeypatch, evidence_mode):
+    from jscc import evaluation, sharing_run, sharing_long_run
     torch.set_num_threads(1)
     calls = install_adapter(monkeypatch)
-    prepared, cli = fixture_package(tmp_path)
+    scorer = evaluation.evaluate_hellaswag
+    def require_compact(model, processor, settings, output, condition, data_settings):
+        assert settings['evidence_mode'] == 'compact-v1'
+        return scorer(model, processor, settings, output, condition, data_settings)
+    monkeypatch.setattr(evaluation, 'evaluate_hellaswag', require_compact)
+    prepared, cli = fixture_package(tmp_path, evidence_mode)
     monkeypatch.setattr(sharing_run, 'build_model', lambda config: (object(), sharing_model('D-N')))
     monkeypatch.setattr(sharing_long_run, 'build_model', lambda config: (object(), sharing_model('D-N')))
     trained = tmp_path / 'trained'
