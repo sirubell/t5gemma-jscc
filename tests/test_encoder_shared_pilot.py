@@ -165,3 +165,28 @@ def test_deadline_cannot_publish_training_or_final_success(tmp_path, monkeypatch
     assert json.loads((tmp_path / 'late/campaign.json').read_text())['status'] == 'incomplete'
     assert not (tmp_path / 'late/freeze.json').exists()
     assert not torch.cuda.is_initialized()
+
+
+def test_cpu_cli_accepts_real_path_argument_without_constructing_model(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from jscc.activation_replay import file_digest
+    source = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location('encoder_pilot_entry_test', source / 'scripts/encoder_shared_pilot.py')
+    assert spec is not None and spec.loader is not None
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    path = tmp_path / 'prepared.json'
+    path.write_text('{}')
+    _, plan, _, metadata = fixture()
+    manifest = {'source_inventory': {}, 'manifest_identity': metadata['prepared_identity'],
+                'source_identity': metadata['source_identity'], 'config_identity': metadata['config_identity'],
+                'data_ids': {}, 'initialization': {'state_identity': 'initial'}, 'updates': [],
+                'model_revision': 'tiny-cpu', 'task_request': {'sha256': 'task'}}
+    monkeypatch.setattr(cli, 'load_pilot', lambda path: (manifest, {}, plan, [], [], {}, {}))
+    monkeypatch.setattr(cli.subprocess, 'check_output', lambda argv, **kwargs: 'cpu-test' if 'rev-parse' in argv else '')
+    monkeypatch.setattr(cli.subprocess, 'run', lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, 'initialize', lambda *args: pytest.fail('CPU check constructed model'))
+    result = cli.main(['check', '--prepared', str(path), '--prepared-sha', file_digest(path),
+                       '--approved-source', 'cpu-test'])
+    assert result['status'] == 'CPU_verified' and result['GPU_launched'] is False

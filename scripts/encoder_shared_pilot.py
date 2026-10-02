@@ -26,7 +26,7 @@ def main(argv=None):
     parser.add_argument('--readiness-run')
     parser.add_argument('--timeout-seconds', type=int)
     args = parser.parse_args(argv)
-    if file_digest(args.prepared) != args.prepared_sha:
+    if file_digest(Path(args.prepared)) != args.prepared_sha:
         raise ValueError('exact reviewed pilot manifest SHA required')
     source = Path(__file__).resolve().parents[1]
     if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip() != args.approved_source:
