@@ -25,10 +25,10 @@ class EncoderPilotPlan:
     def __post_init__(self):
         if (self.protocol_id != ENCODER_PILOT_PROTOCOL or self.trained_sites != SITES
                 or type(self.synthetic) is not bool or not self.study_pairing_id
-                or not isinstance(self.views, tuple) or self.q != (4 if self.synthetic else 400)
+                or not isinstance(self.views, tuple) or self.q not in ((4,) if self.synthetic else (400, 6400))
                 or any(v.sequences != 16 for v in self.views)
                 or len({v.view_sha256 for v in self.views}) != self.q):
-            raise ValueError('pilot requires original six sites and distinct native16 q400 views (CPU q4)')
+            raise ValueError('pilot requires original six sites and distinct native16 q400/q6400 views (CPU q4)')
 
     @property
     def q(self):
@@ -52,6 +52,12 @@ class EncoderPilotPlan:
 
     @property
     def checkpoint_steps(self):
+        if self.q == 6400:
+            return (0, 9600, 19200, 28800, 38400)
+        return self.objective_steps
+
+    @property
+    def objective_steps(self):
         return (0, self.horizon // 2, self.horizon)
 
     def update_at(self, index):

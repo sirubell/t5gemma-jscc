@@ -80,9 +80,14 @@ def load_pilot(path):
         rows = [int(i) for batch in batches for i in batch['row_ids']]
         objective = [int(i) for batch in validation for i in batch['row_ids']]
         pool = manifest['data_ids']['train_rows']
-        expected = PresentationSampler(pool, 6400, seed=20260920).actual_ids.tolist()
+        presentations = plan.q * 16
+        expected = PresentationSampler(pool, presentations, seed=20260920).actual_ids.tolist()
         if (len(pool) != 39058 or len(set(pool)) != 39058 or rows != expected
-                or len(set(rows)) != 6400 or len(objective) != 128 or len(set(objective)) != 128
+                or len(set(rows)) != min(len(pool), presentations)
+                or manifest['presentation_stream'] != {
+                    'policy': 'epoch-permutations-v1', 'pool_identity': canonical_digest(pool),
+                    'seed': 20260920, 'start_presentation': 0, 'total_presentations': presentations}
+                or len(objective) != 128 or len(set(objective)) != 128
                 or set(objective) & set(pool)
                 or set(objective) != set(manifest['data_ids']['objective_rows'])
                 or codec['bottleneck_dim'] != 512 or config['model']['dtype'] != 'bfloat16'
@@ -165,26 +170,27 @@ def run_training(model, *, plan, batches, validation, metadata, output, guard):
             if step in plan.checkpoint_steps:
                 state = save_pilot(learner, metadata, output / f'step_{step:06d}.pt')
                 campaign['checkpoints'].append(asdict(state.reference))
-                for site in SITES:
-                    guard()
-                    request = objective_record_request(learner, state, validation, 'combined')
-                    request.update(site=site, role='trained', learner_kind='initialization' if step == 0 else 'shared',
-                                   step=step, site_step=step // 6, conditions=['no_noise'],
-                                   comparison=state.payload['metadata']['comparison_controls'])
-                    rows = learner.validate_site(validation, site, conditions=('no_noise',))
-                    items = [{'item_id': str(int(i)), 'source_id': str(f)} for batch in validation
-                             for i, f in zip(batch['row_ids'], batch['source_family_ids'])]
-                    payload = {'request': request, 'identity': observation_identity(request),
-                               'status': 'complete', 'reuse': None,
-                               'conditions': [{'condition': row['condition'], 'requested': len(items),
-                                    'completed': len(items), 'failed': 0, 'failure_reason': None,
-                                    'denominator': len(items), 'metrics': {}, 'items': items,
-                                    'objectives': row['objective']['components']} for row in rows]}
-                    learner._event('observation', 'combined', payload)
-                    path = output / f'objective_{step:06d}_{site}.json'
-                    write_manifest(path, {'request': request, 'conditions': rows})
-                    manifest['expected_observations'].append(payload['identity'])
-                    campaign['objective_observations'].append({'step': step, 'site': site, 'reference': str(path)})
+                if step in plan.objective_steps:
+                    for site in SITES:
+                        guard()
+                        request = objective_record_request(learner, state, validation, 'combined')
+                        request.update(site=site, role='trained', learner_kind='initialization' if step == 0 else 'shared',
+                                       step=step, site_step=step // 6, conditions=['no_noise'],
+                                       comparison=state.payload['metadata']['comparison_controls'])
+                        rows = learner.validate_site(validation, site, conditions=('no_noise',))
+                        items = [{'item_id': str(int(i)), 'source_id': str(f)} for batch in validation
+                                 for i, f in zip(batch['row_ids'], batch['source_family_ids'])]
+                        payload = {'request': request, 'identity': observation_identity(request),
+                                   'status': 'complete', 'reuse': None,
+                                   'conditions': [{'condition': row['condition'], 'requested': len(items),
+                                        'completed': len(items), 'failed': 0, 'failure_reason': None,
+                                        'denominator': len(items), 'metrics': {}, 'items': items,
+                                        'objectives': row['objective']['components']} for row in rows]}
+                        learner._event('observation', 'combined', payload)
+                        path = output / f'objective_{step:06d}_{site}.json'
+                        write_manifest(path, {'request': request, 'conditions': rows})
+                        manifest['expected_observations'].append(payload['identity'])
+                        campaign['objective_observations'].append({'step': step, 'site': site, 'reference': str(path)})
             if step == plan.horizon:
                 break
             learner.update([batches[step // 6]])
@@ -337,13 +343,19 @@ def initialize(config, initial):
     return processor, model
 
 
+def readiness_view_indices(batches):
+    """Test both extreme layouts, taking the larger companion length on ties."""
+    lengths = [(batch['input_ids'].shape[1], batch['labels'].shape[1]) for batch in batches]
+    return {max(range(len(batches)), key=lambda i: lengths[i]),
+            max(range(len(batches)), key=lambda i: tuple(reversed(lengths[i])))}
+
+
 def readiness(model, *, plan, batches, metadata, output, guard):
     """Isolated six-update cycles on both actual worst layouts; no science updates."""
     from .sharing_qualification_guard import restore, snapshot, state_exact
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    chosen = {max(range(plan.q), key=lambda i: batches[i]['input_ids'].shape[1]),
-              max(range(plan.q), key=lambda i: batches[i]['labels'].shape[1])}
+    chosen = readiness_view_indices(batches)
     result = {'status': 'incomplete', 'scientific_updates': 0, 'cycles': []}
     begun = time.monotonic()
     write_manifest(output / 'result.json', result)

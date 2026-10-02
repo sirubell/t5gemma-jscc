@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jscc.activation_replay import file_digest
 from jscc.encoder_shared_pilot import (initialize, load_pilot, metadata_for, open_terminal,
-                                      readiness, run_evaluation, run_training)
+                                      readiness, readiness_view_indices, run_evaluation, run_training)
 
 
 def main(argv=None):
@@ -33,7 +33,7 @@ def main(argv=None):
         raise ValueError('exact approved pilot source commit required')
     subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--'], cwd=source, check=True)
     started = time.monotonic()
-    limits = {'readiness': 300, 'train': 14400, 'evaluate': 3600}
+    limits = {'readiness': 300, 'train': 21600, 'evaluate': 3600}
     if args.mode != 'check' and (not args.output or type(args.timeout_seconds) is not int
                                 or not 0 < args.timeout_seconds <= limits[args.mode]):
         raise ValueError('explicit fresh output and approved per-stage timeout required')
@@ -44,6 +44,8 @@ def main(argv=None):
 
     guard()
     manifest, config, plan, batches, validation, template, initial = load_pilot(args.prepared)
+    if args.mode == 'train' and plan.q != 6400 and args.timeout_seconds > 14400:
+        raise ValueError('short pilot retains its four-hour training limit')
     tracked = set(subprocess.check_output(['git', 'ls-files'], cwd=source, text=True).splitlines())
     if not set(manifest['source_inventory']) <= tracked:
         raise ValueError('pilot execution inventory must belong to approved Git commit')
@@ -65,8 +67,7 @@ def main(argv=None):
                     or receipt.get('source_commit') != args.approved_source
                     or receipt.get('device_uuid') != manifest['device_uuid']):
                 raise ValueError('readiness result is not complete for this exact source/package/GPU')
-            expected_views = {max(range(plan.q), key=lambda i: batches[i]['input_ids'].shape[1]),
-                              max(range(plan.q), key=lambda i: batches[i]['labels'].shape[1])}
+            expected_views = readiness_view_indices(batches)
             from jscc.encoder_pilot_plan import SITES
             if (receipt.get('scientific_updates') != 0
                     or {cycle['view'] for cycle in receipt['cycles']} != expected_views

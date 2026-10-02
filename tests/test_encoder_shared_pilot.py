@@ -9,7 +9,7 @@ import torch
 from jscc.encoder_pilot_plan import EncoderPilotPlan, SITE_SPECS, SITES, build_pilot_state
 from jscc.activation_replay import canonical_digest
 from jscc.encoder_shared_pilot import (make_learner, open_terminal, readiness,
-                                      run_evaluation, run_training)
+                                      readiness_view_indices, run_evaluation, run_training)
 from jscc.experiment_records import read_events
 from jscc.models.split_model import resolve_encoder_site
 from jscc.sharing_protocol import batch_view
@@ -52,6 +52,34 @@ def test_fixed_schedule_and_balanced_exposure():
         EncoderPilotPlan(views, 'x', trained_sites=tuple(reversed(SITES)))
 
 
+def test_long_schedule_balances_same_stream_at_all_retained_states():
+    _, small, _, _ = fixture()
+    views = tuple(replace(small.views[i % 4], view_sha256=canonical_digest(i)) for i in range(6400))
+    plan = EncoderPilotPlan(views, 'production-long')
+    assert plan.horizon == 38400
+    assert plan.checkpoint_steps == (0, 9600, 19200, 28800, 38400)
+    assert plan.objective_steps == (0, 19200, 38400)
+    assert plan.update_at(1920).lr_factor == 1
+    assert plan.update_at(38399).lr_factor > 0
+    assert [plan.update_at(i).site for i in range(12)] == list(SITES) * 2
+    for step in plan.checkpoint_steps:
+        sharing, stream = build_pilot_state(plan, step)
+        assert sharing['completed_per_site'] == dict.fromkeys(SITES, step // 6)
+        assert stream['offset'] == step * 16
+        assert sharing['source_valid_per_site'] == dict.fromkeys(
+            SITES, sum(v.source_tokens for v in views[:step // 6]))
+    with pytest.raises(ValueError, match='horizon'):
+        plan.update_at(38400)
+    with pytest.raises(ValueError, match='original six'):
+        EncoderPilotPlan(views[:-1], 'unapproved-count')
+
+
+def test_readiness_ties_use_larger_companion_length():
+    batches = [{'input_ids': torch.empty((16, source)), 'labels': torch.empty((16, target))}
+               for source, target in [(684, 53), (684, 63), (544, 96), (600, 96)]]
+    assert readiness_view_indices(batches) == {1, 3}
+
+
 def test_embedding_insertion_is_actual_first_layer_input_and_restores():
     model, _, batches, _ = fixture()
     site = resolve_encoder_site(model.base, SITE_SPECS['enc_emb'], 'tiny-cpu')
@@ -79,14 +107,19 @@ def test_embedding_insertion_is_actual_first_layer_input_and_restores():
         resolve_encoder_site(model.base, {**SITE_SPECS['enc_emb'], 'index': 0}, 'tiny-cpu')
 
 
-def test_actual_single_learner_lifecycle_and_terminal_panels(tmp_path, monkeypatch):
+@pytest.mark.parametrize('quarter_checkpoints', [False, True])
+def test_actual_single_learner_lifecycle_and_terminal_panels(tmp_path, monkeypatch, quarter_checkpoints):
     calls = install_adapter(monkeypatch)
     model, plan, batches, metadata = fixture()
+    if quarter_checkpoints:
+        monkeypatch.setattr(EncoderPilotPlan, 'checkpoint_steps', property(
+            lambda p: tuple(p.horizon * i // 4 for i in range(5))))
     output = tmp_path / 'train'
     result = run_training(model, plan=plan, batches=batches, validation=batches[:1],
                           metadata=metadata, output=output, guard=lambda: None)
     assert result['status'] == 'training_frozen' and result['completed_updates'] == 24
-    assert len(result['checkpoints']) == 3 and len(result['objective_observations']) == 18
+    assert len(result['checkpoints']) == (5 if quarter_checkpoints else 3)
+    assert len(result['objective_observations']) == 18
     assert calls == []
     events = read_events(output / 'metrics.jsonl')
     updates = [e['payload'] for e in events if e['event_type'] == 'update']
@@ -190,3 +223,16 @@ def test_cpu_cli_accepts_real_path_argument_without_constructing_model(tmp_path,
     result = cli.main(['check', '--prepared', str(path), '--prepared-sha', file_digest(path),
                        '--approved-source', 'cpu-test'])
     assert result['status'] == 'CPU_verified' and result['GPU_launched'] is False
+    command = ['train', '--prepared', str(path), '--prepared-sha', file_digest(path),
+               '--approved-source', 'cpu-test', '--output', str(tmp_path / 'train')]
+    with pytest.raises(ValueError, match='four-hour'):
+        cli.main([*command, '--timeout-seconds', '14401'])
+    views = tuple(replace(plan.views[i % 4], view_sha256=canonical_digest(i)) for i in range(6400))
+    long_plan = EncoderPilotPlan(views, 'production-long')
+    manifest.update(synthetic_cpu=False, device_uuid='approved-UUID')
+    monkeypatch.setattr(cli, 'load_pilot', lambda path: (manifest, {}, long_plan, [], [], {}, {}))
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+    with pytest.raises(ValueError, match='GPU assignment'):
+        cli.main([*command, '--timeout-seconds', '21600'])
+    with pytest.raises(ValueError, match='per-stage timeout'):
+        cli.main([*command, '--timeout-seconds', '21601'])
