@@ -13,7 +13,8 @@ from .models.channel import AWGNChannel
 from .models.split_model import resolve_encoder_site
 from .native64_baseline import reuse_encoder
 from .presentation import derived_seed, tensor_digest
-from .sharing_schedule import NATIVE16_PROTOCOLS, NATIVE16_WEIGHT_DECAY, BatchView, SharingExposureLedger
+from .sharing_schedule import (ENCODER_PILOT_PROTOCOL, NATIVE16_PROTOCOLS, NATIVE16_WEIGHT_DECAY,
+                               TRAINED_SITES, BatchView, SharingExposureLedger)
 from .sharing_accumulation import micro_noise_key, partition_native64, partition_policy
 from .training import batch_losses
 
@@ -28,12 +29,17 @@ def batch_view(batch):
         target_tokens=int((batch['labels'] != -100).sum()), padded_tokens=mask.numel())
 
 
-def resolved_sites(model, revision):
+def resolved_sites(model, revision, site_specs=None):
     result = {}
-    for name in ('enc_l9', 'enc_l19', 'enc_fn', 'enc_l14'):
-        spec = ({'stack': 'enc', 'where': 'after_final_norm'} if name == 'enc_fn' else
-                {'stack': 'enc', 'where': 'after_layer', 'index': int(name[5:])})
-        result[name] = resolve_encoder_site(model.base, spec, revision)
+    if site_specs is None:
+        site_specs = {name: ({'stack': 'enc', 'where': 'after_final_norm'} if name == 'enc_fn' else
+                    {'stack': 'enc', 'where': 'after_layer', 'index': int(name[5:])})
+                      for name in ('enc_l9', 'enc_l19', 'enc_fn', 'enc_l14')}
+    for name, spec in site_specs.items():
+        site = resolve_encoder_site(model.base, spec, revision)
+        if site.site_id != name:
+            raise ValueError('site declaration differs from resolved canonical identity')
+        result[name] = site
     return result
 
 
@@ -45,7 +51,7 @@ class SharingLearner(BaselineLearner):
     actual-batch receipts and horizon. No baseline protocol guard is relaxed.
     """
     def __init__(self, model, *, schedule, run_id, identity, model_revision,
-                 event_sink=None, enc_fn_reuse=False, microbatch_size=None):
+                 event_sink=None, enc_fn_reuse=False, microbatch_size=None, site_specs=None):
         plan = schedule.plan
         self.microbatch_size = microbatch_size
         self.execution_partition = None if microbatch_size is None else partition_policy(microbatch_size)
@@ -62,11 +68,12 @@ class SharingLearner(BaselineLearner):
                          pairing_id=plan.study_pairing_id, synthetic=True,
                          final_step=schedule.horizon, effective_batch=plan.batch_size,
                          event_sink=event_sink, audit_policy='sparse_first_final',
-                         weight_decay=NATIVE16_WEIGHT_DECAY if plan.protocol_id in NATIVE16_PROTOCOLS else .01)
+                         weight_decay=NATIVE16_WEIGHT_DECAY if plan.protocol_id in (*NATIVE16_PROTOCOLS, ENCODER_PILOT_PROTOCOL) else .01)
         self.synthetic = plan.synthetic
         self.schedule = schedule
-        self.exposure = SharingExposureLedger(schedule)
-        self.sites = resolved_sites(model, model_revision)
+        self.trained_sites = getattr(plan, 'trained_sites', TRAINED_SITES)
+        self.exposure = SharingExposureLedger(schedule, sites=self.trained_sites)
+        self.sites = resolved_sites(model, model_revision, site_specs)
         self.enc_fn_reuse = enc_fn_reuse
         self.active_site = None
         self.active_local = None
@@ -154,8 +161,11 @@ class SharingLearner(BaselineLearner):
     def validate_site(self, batches, site_id, *, authorization=None, conditions=None):
         if self.active_site is not None:
             raise RuntimeError('cannot nest objective validation')
-        authorization = authorization or {'sites': {site: 'trained' for site in ('enc_l9','enc_l19','enc_fn')}}
-        if site_id == 'enc_l14' and not authorization.get('heldout_freeze_receipt'):
+        authorization = authorization or {'sites': {site: 'trained' for site in self.trained_sites}}
+        pilot_trained = (self.schedule.plan.protocol_id == ENCODER_PILOT_PROTOCOL
+                         and site_id in self.trained_sites
+                         and authorization.get('sites', {}).get(site_id) == 'trained')
+        if site_id == 'enc_l14' and not pilot_trained and not authorization.get('heldout_freeze_receipt'):
             raise ValueError('heldout objective requires verified freeze')
         if self.microbatch_size is not None:
             partitioned = []

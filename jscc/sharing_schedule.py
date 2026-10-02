@@ -15,6 +15,7 @@ HELDOUT_SITE = "enc_l14"
 DEPTH_PROTOCOL = "sharing-dn-q400-effective64-v1"
 NATIVE16_PROTOCOL = "sharing-dn-native16-fresh-v1"
 NATIVE16_LONG_PROTOCOL = "sharing-dn-native16-long-v1"
+ENCODER_PILOT_PROTOCOL = "encoder-original6-native16-pilot-v1"
 NATIVE16_PROTOCOLS = (NATIVE16_PROTOCOL, NATIVE16_LONG_PROTOCOL)
 NATIVE16_WEIGHT_DECAY = 0.002500001398541448
 
@@ -251,14 +252,14 @@ class SharingExposureLedger:
     reinterpretation as successful completion is permitted.
     """
 
-    def __init__(self, schedule: LearnerSchedule):
+    def __init__(self, schedule: LearnerSchedule, *, sites=TRAINED_SITES):
         self.schedule = schedule
         self.completed = 0
         self.failed = False
         self.receipts: list[str] = []
         self.per_site = {site: dict(updates=0, sequences=0, source_tokens=0,
                                     target_tokens=0, padded_tokens=0)
-                         for site in TRAINED_SITES}
+                         for site in sites}
 
     def record(self, update: ScheduledUpdate, *, receipt: str, status="completed"):
         if self.failed:

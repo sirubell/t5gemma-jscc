@@ -346,8 +346,8 @@ def codec_observation_identity(request):
         raise ValueError(f"Observation request missing fields: {sorted(missing)}")
     if request["schema"] != "codec-observation-v1":
         raise ValueError("Unsupported observation schema")
-    from .sharing_schedule import NATIVE16_LONG_PROTOCOL
-    long_condition = (request["protocol"] == NATIVE16_LONG_PROTOCOL
+    from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
+    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL)
                       and len(request["conditions"]) == 1 and request["conditions"][0] in BASELINE_CONDITIONS)
     if tuple(request["conditions"]) != BASELINE_CONDITIONS and not long_condition:
         raise ValueError("Baseline observation requires the exact six conditions")
@@ -592,6 +592,7 @@ def observation_record_request(request):
     projection. This is a reference to planned output evidence, not its results.
     """
     from .evaluation_policy import digest
+    from .models.split_model import ResolvedSite
     def reference(value):
         return value if isinstance(value, str) and value else "sha256:" + digest(value)
 
@@ -601,7 +602,7 @@ def observation_record_request(request):
                                            for value in comparison.values())):
         raise ValueError("Observation requires explicit nonempty comparison control references")
     site = request["target_site"]
-    site_id = "enc_fn" if site["where"] == "after_final_norm" else f"enc_l{site['index']}"
+    site_id = ResolvedSite(**site).site_id
     kind = ("initialization" if request["step"] == 0 else
             "shared" if request["learner_kind"] == "shared_encoder_v2" else "specialist")
     return {

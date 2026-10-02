@@ -32,6 +32,8 @@ class ResolvedSite:
 
     @property
     def site_id(self):
+        if self.where == "after_embed":
+            return "enc_emb"
         return "enc_fn" if self.where == "after_final_norm" else f"enc_l{self.index}"
 
     @property
@@ -63,8 +65,12 @@ def resolve_encoder_site(base, site_spec, model_revision):
         if index is not None:
             raise ValueError("after_final_norm has no layer index")
         path = "encoder.norm"
+    elif where == "after_embed":
+        if index is not None:
+            raise ValueError("after_embed has no layer index")
+        path = "encoder.layers.0.input"
     else:
-        raise ValueError("encoder routing supports after_layer or after_final_norm")
+        raise ValueError("encoder routing supports after_embed, after_layer or after_final_norm")
     return ResolvedSite(where, index, model_revision, count, width, path)
 
 

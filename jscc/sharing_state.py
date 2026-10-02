@@ -130,6 +130,9 @@ def _site_policy(policy, *, learner="shared"):
 
 def validate_sharing_state(payload):
     """Reject drift in sharing kind, phase, schedule, views and exposure."""
+    if payload.get('metadata', {}).get('protocol_identity') == 'encoder-original6-native16-pilot-v1':
+        from .encoder_pilot_plan import validate_pilot_state
+        return validate_pilot_state(payload)
     _require(isinstance(payload, dict) and payload.get("schema") == "experiment-state-v2",
              "invalid sharing state envelope")
     metadata = payload.get("metadata")
