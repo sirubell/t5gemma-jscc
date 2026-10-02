@@ -41,8 +41,19 @@ def distillation_loss_stats(
         # degenerate all-padding fixture.
         if not bool(valid.any()):
             return student.float().sum() * 0.0, valid.sum()
-        student_float = student[valid].float() / temperature
-        teacher_float = teacher[valid].float() / temperature
+        # Keep native-logit rows packed once so backward has one mask scatter.
+        # Each chunk includes the complete vocabulary and retains FP32 scoring;
+        # only transient target-row work is bounded, not the physical batch.
+        student_rows, teacher_rows = student[valid], teacher[valid]
+        numerators = []
+        for student_chunk, teacher_chunk in zip(student_rows.split(32), teacher_rows.split(32)):
+            token_kl = F.kl_div(
+                F.log_softmax(student_chunk.float() / temperature, dim=-1),
+                F.softmax(teacher_chunk.float() / temperature, dim=-1),
+                reduction="none",
+            ).sum(dim=-1) * temperature**2
+            numerators.append(token_kl.sum())
+        return torch.stack(numerators).sum(), valid.sum()
     else:
         student_float = student.float() / temperature
         teacher_float = teacher.float() / temperature
