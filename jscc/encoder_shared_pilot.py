@@ -1,4 +1,4 @@
-"""One fixed six-site learner and terminal development evaluation; no dispatch."""
+"""One fixed six-site learner and terminal fixed evaluation; no dispatch."""
 from __future__ import annotations
 
 import copy
@@ -73,10 +73,14 @@ def load_pilot(path):
             or channel['train_snr_range'] != [-6.0, 18.0]):
         raise ValueError('pilot channel differs')
     template = json.loads(_reference(root, manifest['task_request']).read_text())
-    validate_task_template(template, config, synthetic=manifest['synthetic_cpu'])
-    if template['conditions'] != ['no_noise', -6, 0, 6, 12, 18]:
-        raise ValueError('pilot terminal conditions differ')
+    validate_task_template(template, config, synthetic=manifest['synthetic_cpu'],
+                           final=plan.q == 6400, no_noise_only=plan.q == 6400)
     if not manifest['synthetic_cpu']:
+        evaluation_ids = manifest['data_ids']['final_validation' if plan.q == 6400 else 'development']
+        if plan.q == 6400 and (config['evaluation']['num_samples'] != 10042
+                               or config['evaluation']['snrs'] != ['no_noise']
+                               or config['evaluation']['vanilla'] is not False):
+            raise ValueError('long study requires full10042 no-noise only, without new vanilla')
         rows = [int(i) for batch in batches for i in batch['row_ids']]
         objective = [int(i) for batch in validation for i in batch['row_ids']]
         pool = manifest['data_ids']['train_rows']
@@ -94,9 +98,9 @@ def load_pilot(path):
                 or config['model']['device'] != 'cuda'
                 or manifest['model_revision'] != 'dd0a2683227859151b1730ca3a63087df5b5f39b'
                 or config['model']['attn_implementation'] != 'sdpa'
-                or template['expected_items'] != 256
-                or template['input_ids'] != manifest['data_ids']['development']['input_ids']
-                or template['source_family_ids'] != manifest['data_ids']['development']['source_family_ids']
+                or template['expected_items'] != (10042 if plan.q == 6400 else 256)
+                or template['input_ids'] != evaluation_ids['input_ids']
+                or template['source_family_ids'] != evaluation_ids['source_family_ids']
                 or template['settings'].get('batch_size') != 16
                 or template['settings'].get('num_fewshot') != 5
                 or template['settings'].get('scoring_policy') != 'fp32-v1'):
@@ -213,7 +217,8 @@ def run_training(model, *, plan, batches, validation, metadata, output, guard):
             raise ValueError('pilot training records incomplete')
         freeze = {'schema': 'encoder-original6-freeze-v1', 'status': 'complete',
                   'prepared_identity': metadata['prepared_identity'], 'checkpoint': campaign['checkpoints'][-1],
-                  'final_panels': [list(panel) for panel in final_panels()], 'vanilla_after_codec_panels': 6,
+                  'final_panels': [list(panel) for panel in final_panels(plan.q)],
+                  'vanilla_after_codec_panels': None if plan.q == 6400 else 6,
                   'evidence': {name: {'path': str((output / name).resolve()), 'sha256': file_digest(output / name)}
                                for name in ('manifest.json', 'inventory.json', 'completion.json', 'metrics.jsonl')},
                   'per_site_counts': counts}
@@ -243,8 +248,8 @@ def open_terminal(training_run, metadata, plan):
     freeze = json.loads(freeze_path.read_text())
     if (freeze['schema'] != 'encoder-original6-freeze-v1' or freeze['status'] != 'complete'
             or freeze['prepared_identity'] != metadata['prepared_identity']
-            or freeze['final_panels'] != [list(panel) for panel in final_panels()]
-            or freeze['vanilla_after_codec_panels'] != 6):
+            or freeze['final_panels'] != [list(panel) for panel in final_panels(plan.q)]
+            or freeze['vanilla_after_codec_panels'] != (None if plan.q == 6400 else 6)):
         raise ValueError('pilot frozen final panel plan differs')
     for reference in freeze['evidence'].values():
         path = Path(reference['path']).resolve()
@@ -269,16 +274,21 @@ def run_evaluation(model, processor, *, state, freeze_reference, template, outpu
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     details = state.payload['metadata']
+    panels = final_panels(details['sharing']['q'])
+    long_study = len(panels) == 6
+    if template['conditions'] != (['no_noise'] if long_study else ['no_noise', -6, 0, 6, 12, 18]):
+        raise ValueError('terminal evaluation conditions differ from frozen study')
     result = {'schema': 'encoder-original6-evaluation-v1', 'status': 'incomplete',
               'checkpoint': asdict(state.reference), 'freeze_reference': freeze_reference,
-              'interpretation': 'already inspected development; all six sites trained; no untouched-test claim',
-              'completed_panels': [], 'vanilla_reference': None}
+              'interpretation': 'already inspected official validation; all six sites trained; no untouched-test claim',
+              'completed_panels': [], 'vanilla_reference': None,
+              'vanilla_execution': 'reuse existing external baseline; no new vanilla' if long_study else 'matched fresh bypass'}
     begun = time.monotonic()
     write_manifest(output / 'result.json', result)
     try:
-        for index, (site, condition) in enumerate(final_panels()):
+        for index, (site, condition) in enumerate(panels):
             guard()
-            if index == 6:
+            if index == 6 and not long_study:
                 path = output / 'vanilla'
                 path.mkdir()
                 settings = {**template['settings'], 'evidence_mode': 'compact-v1',
@@ -322,7 +332,8 @@ def run_evaluation(model, processor, *, state, freeze_reference, template, outpu
             print(json.dumps({'phase': 'evaluation', 'completed_codec_panels': len(result['completed_panels']),
                               'site': site, 'condition': condition, 'elapsed_seconds': result['elapsed_seconds']}), flush=True)
         guard()
-        if result['vanilla_reference'] is None or len(result['completed_panels']) != 36:
+        if (len(result['completed_panels']) != len(panels)
+                or (not long_study and result['vanilla_reference'] is None)):
             raise ValueError('pilot final panel obligations incomplete')
         result.update(status='complete', elapsed_seconds=time.monotonic() - begun)
         write_manifest(output / 'result.json', result)

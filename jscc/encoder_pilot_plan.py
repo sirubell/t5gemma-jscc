@@ -121,6 +121,6 @@ def validate_pilot_state(payload):
         raise ValueError('pilot sites have inconsistent backbone topology')
 
 
-def final_panels():
-    """All six no-noise first; caller inserts matched vanilla before SNR panels."""
-    return tuple((site, condition) for condition in CONDITIONS for site in SITES)
+def final_panels(q=400):
+    """Long study: six no-noise only; short pilot retains its original panels."""
+    return tuple((site, condition) for condition in (('no_noise',) if q == 6400 else CONDITIONS) for site in SITES)

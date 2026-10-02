@@ -33,7 +33,7 @@ def main(argv=None):
         raise ValueError('exact approved pilot source commit required')
     subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--'], cwd=source, check=True)
     started = time.monotonic()
-    limits = {'readiness': 300, 'train': 21600, 'evaluate': 3600}
+    limits = {'readiness': 300, 'train': 21600, 'evaluate': 5400}
     if args.mode != 'check' and (not args.output or type(args.timeout_seconds) is not int
                                 or not 0 < args.timeout_seconds <= limits[args.mode]):
         raise ValueError('explicit fresh output and approved per-stage timeout required')
@@ -46,6 +46,8 @@ def main(argv=None):
     manifest, config, plan, batches, validation, template, initial = load_pilot(args.prepared)
     if args.mode == 'train' and plan.q != 6400 and args.timeout_seconds > 14400:
         raise ValueError('short pilot retains its four-hour training limit')
+    if args.mode == 'evaluate' and plan.q != 6400 and args.timeout_seconds > 3600:
+        raise ValueError('short pilot retains its one-hour evaluation limit')
     tracked = set(subprocess.check_output(['git', 'ls-files'], cwd=source, text=True).splitlines())
     if not set(manifest['source_inventory']) <= tracked:
         raise ValueError('pilot execution inventory must belong to approved Git commit')

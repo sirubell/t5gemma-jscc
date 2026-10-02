@@ -6,7 +6,7 @@ import json
 import pytest
 import torch
 
-from jscc.encoder_pilot_plan import EncoderPilotPlan, SITE_SPECS, SITES, build_pilot_state
+from jscc.encoder_pilot_plan import EncoderPilotPlan, SITE_SPECS, SITES, build_pilot_state, final_panels
 from jscc.activation_replay import canonical_digest
 from jscc.encoder_shared_pilot import (make_learner, open_terminal, readiness,
                                       readiness_view_indices, run_evaluation, run_training)
@@ -236,3 +236,52 @@ def test_cpu_cli_accepts_real_path_argument_without_constructing_model(tmp_path,
         cli.main([*command, '--timeout-seconds', '21600'])
     with pytest.raises(ValueError, match='per-stage timeout'):
         cli.main([*command, '--timeout-seconds', '21601'])
+
+
+def test_full_validation_scope_rejects_subset_or_extra_condition():
+    from jscc.sharing_preparation import validate_task_template
+    template = task_template()
+    template.update(expected_items=10042, input_ids=list(range(10042)),
+                    source_family_ids=[f'family-{i}' for i in range(10042)], conditions=['no_noise'])
+    template['settings'].update(num_samples=10042, batch_size=16, num_fewshot=5, scoring_policy='fp32-v1')
+    config = {'model': {'dtype': 'float32', 'attn_implementation': 'eager'}}
+    validate_task_template(template, config, synthetic=False, final=True, no_noise_only=True)
+    assert final_panels(6400) == tuple((site, 'no_noise') for site in SITES)
+    assert len(final_panels(400)) == 36
+    with pytest.raises(ValueError, match='conditions differ'):
+        validate_task_template({**template, 'conditions': ['no_noise', 6]}, config,
+                               synthetic=False, final=True, no_noise_only=True)
+    with pytest.raises(ValueError, match='full ordered'):
+        validate_task_template({**template, 'input_ids': list(reversed(template['input_ids']))}, config,
+                               synthetic=False, final=True, no_noise_only=True)
+    with pytest.raises(ValueError, match='fixed HellaSwag panel'):
+        validate_task_template({**template, 'expected_items': 256}, config,
+                               synthetic=False, final=True, no_noise_only=True)
+
+
+def test_no_noise_only_lifecycle_and_evaluation_failure_preserves_freeze(tmp_path, monkeypatch):
+    calls = install_adapter(monkeypatch)
+    model, plan, batches, metadata = fixture()
+    output = tmp_path / 'train'
+    run_training(model, plan=plan, batches=batches, validation=batches[:1], metadata=metadata,
+                 output=output, guard=lambda: None)
+    state, freeze = open_terminal(output, metadata, plan)
+    before = (output / 'freeze.json').read_bytes()
+    # Exercise the real six-panel evaluator with the CPU q4 checkpoint and scorer adapter.
+    monkeypatch.setattr('jscc.encoder_shared_pilot.final_panels', lambda q: final_panels(6400))
+    template = task_template()
+    template.update(backend=model.base.config.decoder._attn_implementation, conditions=['no_noise'])
+    result = run_evaluation(model, object(), state=state, freeze_reference=freeze, template=template,
+                            output=tmp_path / 'evaluate', guard=lambda: None)
+    assert result['status'] == 'complete' and len(result['completed_panels']) == 6
+    assert [condition for _, condition in calls] == ['no_noise'] * 6
+    assert result['vanilla_reference'] is None and not (tmp_path / 'evaluate/vanilla').exists()
+    def expired():
+        raise TimeoutError('evaluation deadline')
+    with pytest.raises(TimeoutError):
+        run_evaluation(model, object(), state=state, freeze_reference=freeze, template=template,
+                       output=tmp_path / 'failed-evaluate', guard=expired)
+    assert json.loads((tmp_path / 'failed-evaluate/result.json').read_text())['status'] == 'incomplete'
+    assert (output / 'freeze.json').read_bytes() == before
+    monkeypatch.setattr('jscc.encoder_shared_pilot.final_panels', final_panels)
+    assert open_terminal(output, metadata, plan)[0].reference == state.reference

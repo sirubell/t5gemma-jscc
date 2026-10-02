@@ -322,7 +322,7 @@ def require_execution_ready(manifest):
         require_worker_authorization(manifest)
 
 
-def validate_task_template(template, config, *, synthetic, final=False):
+def validate_task_template(template, config, *, synthetic, final=False, no_noise_only=False):
     required = {"task", "expected_items", "conditions", "input_ids", "source_family_ids",
                 "prompt_policy", "noise", "layout", "backend", "precision", "scorer",
                 "reference_corpus", "settings", "data_settings"}
@@ -333,8 +333,8 @@ def validate_task_template(template, config, *, synthetic, final=False):
         raise ValueError("task request must bind the fixed HellaSwag panel")
     if final and not synthetic and template["input_ids"] != list(range(10042)):
         raise ValueError("final evaluation requires the full ordered official validation membership")
-    if template["conditions"] != ["no_noise", -6, 0, 6, 12, 18]:
-        raise ValueError("task request must retain all six conditions")
+    if template["conditions"] != (["no_noise"] if no_noise_only else ["no_noise", -6, 0, 6, 12, 18]):
+        raise ValueError("task request conditions differ from the fixed evaluation scope")
     ids, families = template["input_ids"], template["source_family_ids"]
     if (not isinstance(ids, list) or not isinstance(families, list)
             or len(ids) != count or len(families) != count
