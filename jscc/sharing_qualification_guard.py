@@ -16,7 +16,7 @@ from jscc.native64_baseline import cpu
 from jscc.presentation import tensor_digest
 from jscc.sharing_run import _controls
 from jscc.sharing_state import build_sharing_state
-from jscc.sharing_schedule import NATIVE16_PROTOCOL
+from jscc.sharing_schedule import NATIVE16_PROTOCOLS
 
 
 def require(value, message):
@@ -177,7 +177,7 @@ def capture_accumulated(learner):
     try:
         with patch('torch.nn.utils.clip_grad_norm_', clipping), patch.object(learner.scheduler, 'step', scheduling):
             yield audit
-        expected_micros = 1 if learner.schedule.plan.protocol_id == NATIVE16_PROTOCOL else 4
+        expected_micros = 1 if learner.schedule.plan.protocol_id in NATIVE16_PROTOCOLS else 4
         require([r['micro'] for r in audit['microbatches']] == list(range(expected_micros))
                 and 'gradient' in audit, 'incomplete physical-batch audit')
         require(audit['actions'] == {'clip': 1, 'optimizer': 1, 'scheduler': 1},
@@ -300,7 +300,7 @@ def same_shape_guard(reference, candidate, parents, *, checkpoint_path, metadata
     site = candidate.schedule.name.removeprefix('specialist_')
     require(site in ('enc_l9', 'enc_l19', 'enc_fn') and reference.schedule == candidate.schedule,
             'guard requires matching trained-site specialist schedules')
-    native16 = candidate.schedule.plan.protocol_id == NATIVE16_PROTOCOL
+    native16 = candidate.schedule.plan.protocol_id in NATIVE16_PROTOCOLS
     require(reference.microbatch_size == candidate.microbatch_size == (None if native16 else 16)
             and reference.effective_batch == candidate.effective_batch == (16 if native16 else 64),
             'guard requires explicit native16 or16x4')

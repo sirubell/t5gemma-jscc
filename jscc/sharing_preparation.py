@@ -20,7 +20,7 @@ from .baseline_protocol import read_prepared_batch, _check_batches
 from .config import load_config
 from .presentation import tensor_digest
 from .sharing_protocol import batch_view
-from .sharing_schedule import (SharingPlan, DEPTH_PROTOCOL, NATIVE16_PROTOCOL,
+from .sharing_schedule import (SharingPlan, DEPTH_PROTOCOL, NATIVE16_PROTOCOLS, NATIVE16_LONG_PROTOCOL,
                                NATIVE16_WEIGHT_DECAY, native16_exposure, validate_native16_horizon)
 from .sharing_accumulation import partition_policy
 
@@ -44,6 +44,8 @@ def source_inventory(source_root=None):
     names |= {"scripts/shared_codec.py", "scripts/sharing_production.py", "scripts/sharing_qualification.py",
               "scripts/render_experiment_report.py", "scripts/prepare_sharing_native16.py",
               "uv.lock", "pyproject.toml"}
+    if (root / "scripts/sharing_long_study.py").is_file():
+        names.add("scripts/sharing_long_study.py")
     if not (root / "scripts/prepare_sharing_native16.py").is_file():
         names.discard("scripts/prepare_sharing_native16.py")
     return {name: file_digest(root / name) for name in sorted(names)}
@@ -107,9 +109,11 @@ def _verify(manifest, root, *, source_root=None):
     partition = manifest.get("execution_partition")
     if partition is not None and (not isinstance(partition, dict) or partition != partition_policy(partition.get("microbatch_size"))):
         raise ValueError("explicit supported execution partition required")
-    native16 = manifest.get("protocol_id") == NATIVE16_PROTOCOL
+    native16 = manifest.get("protocol_id") in NATIVE16_PROTOCOLS
     if native16:
         validate_native16_horizon(q)
+        if manifest["protocol_id"] == NATIVE16_LONG_PROTOCOL and not synthetic and q != 6400:
+            raise ValueError("formal native16 long study requires q6400")
         if partition is not None or size != 16 or (synthetic and q != 4):
             raise ValueError("native16 requires physical16/accum1; CPU lifecycle q4 only")
         if manifest.get("exposure_binding") != native16_exposure(q):
@@ -169,6 +173,11 @@ def _verify(manifest, root, *, source_root=None):
     _geometry_contract(root, geometry)
     task_template = json.loads(_reference(root, manifest["task_request"]).read_text())
     validate_task_template(task_template, config, synthetic=synthetic)
+    if manifest.get("protocol_id") == NATIVE16_LONG_PROTOCOL:
+        if not synthetic and q != 6400:
+            raise ValueError("formal native16 long study requires q6400")
+        final_template = json.loads(_reference(root, manifest.get("final_task_request")).read_text())
+        validate_task_template(final_template, config, synthetic=synthetic, final=True)
     if not synthetic:
         _production_data_contract(root, manifest, task_template)
     initialization = manifest["initialization"]
@@ -232,7 +241,7 @@ def _config_contract(config, manifest):
             or model["revision"] != manifest["model_revision"]
             or model.get("numerical_policy", "native") != "native"):
         raise ValueError("config violates sharing task/seed/site/model contract")
-    native16 = manifest.get("protocol_id") == NATIVE16_PROTOCOL
+    native16 = manifest.get("protocol_id") in NATIVE16_PROTOCOLS
     if native16:
         q = validate_native16_horizon(manifest.get("q"))
         if (manifest.get("cell") != "D-N" or manifest.get("batch_size") != 16
@@ -241,12 +250,18 @@ def _config_contract(config, manifest):
                 or manifest.get("recipe_identity") != "K+0.1R-native-effective16-fresh-v1"
                 or manifest.get("initialization_policy") != {
                     "seed": 0, "fresh_cpu_codec": True, "baseline_state_reused": False}
-                or config.get("protocol") != NATIVE16_PROTOCOL
+                or config.get("protocol") != manifest["protocol_id"]
                 or training.get("max_steps") != q or training.get("schedule_steps") != q
                 or training.get("warmup_ratio") != .05 or training.get("min_lr_ratio") != 0
                 or training.get("valid_only_kl") is not True or training.get("loss_weights") is not None
                 or training.get("patience") is not None):
             raise ValueError("native16 requires explicit fresh D-N terminal horizon/exposure recipe")
+        if manifest["protocol_id"] == NATIVE16_LONG_PROTOCOL and not synthetic:
+            if (model["device"] != "cuda" or model["dtype"] != "bfloat16"
+                    or model.get("attn_implementation") != "sdpa"
+                    or config["channel"].get("train_noise") is not True
+                    or config["channel"].get("train_snr_range") != [-6, 18]):
+                raise ValueError("formal long study requires native BF16/SDPA and uniform -6..18 dB training")
     elif manifest.get("q") == 400 or manifest.get("protocol_id") == DEPTH_PROTOCOL:
         if (synthetic or manifest.get("q") != 400 or manifest.get("protocol_id") != DEPTH_PROTOCOL
                 or manifest.get("cell") != "D-N" or manifest.get("selected_bottleneck_dim") != 512
@@ -299,20 +314,25 @@ def _acceptance_receipt(root, manifest):
 
 
 def require_execution_ready(manifest):
+    if manifest.get("protocol_id") == NATIVE16_LONG_PROTOCOL:
+        from .sharing_long_run import require_long_entry
+        return require_long_entry(manifest)
     if not manifest["synthetic_cpu"] or os.environ.get("SHARING_CONTROLLER_CONTRACT"):
         from .sharing_controller import require_worker_authorization
         require_worker_authorization(manifest)
 
 
-def validate_task_template(template, config, *, synthetic):
+def validate_task_template(template, config, *, synthetic, final=False):
     required = {"task", "expected_items", "conditions", "input_ids", "source_family_ids",
                 "prompt_policy", "noise", "layout", "backend", "precision", "scorer",
                 "reference_corpus", "settings", "data_settings"}
     if not isinstance(template, dict) or not required <= template.keys():
         raise ValueError("task template requires complete static observation fields")
     count = template["expected_items"]
-    if type(count) is not int or count != (2 if synthetic else 256) or template["task"] != "hellaswag":
+    if type(count) is not int or count != (2 if synthetic else 10042 if final else 256) or template["task"] != "hellaswag":
         raise ValueError("task request must bind the fixed HellaSwag panel")
+    if final and not synthetic and template["input_ids"] != list(range(10042)):
+        raise ValueError("final evaluation requires the full ordered official validation membership")
     if template["conditions"] != ["no_noise", -6, 0, 6, 12, 18]:
         raise ValueError("task request must retain all six conditions")
     ids, families = template["input_ids"], template["source_family_ids"]
@@ -333,6 +353,10 @@ def validate_task_template(template, config, *, synthetic):
             or settings["num_samples"] != count or settings.get("numerical_policy", "native") != "native"
             or not isinstance(template["data_settings"], dict)):
         raise ValueError("task settings require exact sample count and native numerical policy")
+    if final and not synthetic and (settings.get("batch_size") != 16
+                                   or settings.get("num_fewshot") != 5
+                                   or settings.get("scoring_policy") != "fp32-v1"):
+        raise ValueError("final full validation requires batch16/five-shot/FP32 scoring")
     dtype = config["model"]["dtype"]
     alias = {"float32": "fp32", "bfloat16": "bf16", "float16": "fp16"}.get(dtype)
     if template["precision"] not in (alias, f"torch.{dtype}"):
@@ -367,6 +391,12 @@ def _geometry_contract(root, geometry):
 
 
 def preview(manifest):
+    if manifest["protocol_id"] == NATIVE16_LONG_PROTOCOL:
+        return {"schema": SCHEMA, "cell": manifest["cell"], "synthetic_cpu": manifest["synthetic_cpu"],
+                "physical_updates": 6 * manifest["q"], "learned_saves": 9, "initializations": 1,
+                "task_panels": 0, "vanilla_panels": 0, "objective_panels": 18,
+                "final_full_validation_panels": 42, "final_order": "all no_noise then -6/0/6/12/18",
+                "gpu_execution_ready": False, "prepared_identity": manifest["prepared_identity"]}
     return {"schema": SCHEMA, "cell": manifest["cell"], "synthetic_cpu": manifest["synthetic_cpu"],
             "physical_updates": manifest["q"] * 6, "learned_saves": 16, "initializations": 1,
             "task_panels": 108, "vanilla_panels": 1, "objective_panels": 192,
@@ -473,7 +503,7 @@ def _production_data_contract(root, manifest, task_template):
             or not set(role_rows["geometry_training"]) <= set(ids["train_rows"])
             or not set(role_rows["geometry_selection"]) <= set(ids["validation_rows"])):
         raise ValueError("actual batch rows violate declared optimization/selection roles")
-    if manifest.get("protocol_id") == NATIVE16_PROTOCOL:
+    if manifest.get("protocol_id") in NATIVE16_PROTOCOLS:
         from .presentation import PresentationSampler
         stream = manifest.get("presentation_stream")
         expected = {"policy": "epoch-permutations-v1", "seed": 20260920,

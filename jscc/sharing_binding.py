@@ -11,7 +11,8 @@ from .activation_replay import canonical_digest, file_digest
 from .config import load_config
 from .models.codec import Codec
 from .sharing_accumulation import partition_policy
-from .sharing_schedule import DEPTH_PROTOCOL, NATIVE16_PROTOCOL, native16_exposure, validate_native16_horizon
+from .sharing_schedule import (DEPTH_PROTOCOL, NATIVE16_PROTOCOLS, NATIVE16_LONG_PROTOCOL,
+                               native16_exposure, validate_native16_horizon)
 from .sharing_preparation import (_config_contract, _reference, source_inventory,
                                   state_dict_identity, write_prepared, read_native16_readiness_cases)
 
@@ -29,7 +30,7 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
     if file_digest(inputs_path) != inputs_sha256:
         raise ValueError('reviewed input manifest checksum mismatch')
     inputs = json.loads(inputs_path.read_text())
-    native16 = protocol_id == NATIVE16_PROTOCOL
+    native16 = protocol_id in NATIVE16_PROTOCOLS
     quota = validate_native16_horizon(inputs.get("q")) if native16 else 400 if protocol_id == DEPTH_PROTOCOL else 200
     size = 16 if native16 else 64
     if native16 and microbatch_size != 16:
@@ -56,12 +57,16 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
                         readiness_cases=inputs.get("readiness_cases"))
     if native16:
         manifest.pop("execution_partition")
+    if protocol_id == NATIVE16_LONG_PROTOCOL:
+        manifest["final_task_request"] = inputs["final_task_request"]
     _config_contract(config, manifest)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     references = [*manifest['updates'], *manifest['validation'], manifest['task_request'],
                   *manifest['producers'].values(),
                   *(ref for group in manifest['geometry'].values() for ref in group)]
+    if protocol_id == NATIVE16_LONG_PROTOCOL:
+        references.append(manifest["final_task_request"])
     if native16:
         references.extend(case["batch"] for case in manifest["readiness_cases"])
     copied = {}

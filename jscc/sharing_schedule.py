@@ -14,6 +14,8 @@ TRAINED_SITES = ("enc_l9", "enc_l19", "enc_fn")
 HELDOUT_SITE = "enc_l14"
 DEPTH_PROTOCOL = "sharing-dn-q400-effective64-v1"
 NATIVE16_PROTOCOL = "sharing-dn-native16-fresh-v1"
+NATIVE16_LONG_PROTOCOL = "sharing-dn-native16-long-v1"
+NATIVE16_PROTOCOLS = (NATIVE16_PROTOCOL, NATIVE16_LONG_PROTOCOL)
 NATIVE16_WEIGHT_DECAY = 0.002500001398541448
 
 
@@ -102,8 +104,10 @@ class SharingPlan:
             raise ValueError("quota must have four distinct integral quarters")
         if len({v.sequences for v in self.views}) != 1:
             raise ValueError("effective batch size must be constant")
-        if self.protocol_id == NATIVE16_PROTOCOL:
+        if self.protocol_id in NATIVE16_PROTOCOLS:
             validate_native16_horizon(self.q)
+            if self.protocol_id == NATIVE16_LONG_PROTOCOL and not self.synthetic and self.q != 6400:
+                raise ValueError("formal native16 long study requires q6400")
             if self.batch_size != 16 or len({v.view_sha256 for v in self.views}) != self.q:
                 raise ValueError("native16 requires distinct complete16 views; cycling subset forbidden")
         elif not self.synthetic:
@@ -142,6 +146,17 @@ class SharingPlan:
     @property
     def observations(self):
         result = []
+        if self.protocol_id == NATIVE16_LONG_PROTOCOL:
+            for site in TRAINED_SITES:
+                result.append(Observation("objective", "common_initialization", site, 0,
+                                          "pre_freeze", ("no_noise",)))
+            for name in self.learners:
+                sites = TRAINED_SITES if name == "shared" else (name.removeprefix("specialist_"),)
+                for site in sites:
+                    for step in self.learner(name).checkpoint_steps:
+                        result.append(Observation("objective", name, site, step,
+                                                  "pre_freeze", ("no_noise",)))
+            return tuple(result)
         for purpose in ("task", "objective"):
             for site in (*TRAINED_SITES, HELDOUT_SITE):
                 result.append(Observation(purpose, "common_initialization", site, 0,
@@ -163,7 +178,7 @@ class SharingPlan:
 
     @property
     def additional_vanilla_panels(self):
-        return 1
+        return 0 if self.protocol_id == NATIVE16_LONG_PROTOCOL else 1
 
 
 @dataclass(frozen=True)
@@ -189,6 +204,8 @@ class LearnerSchedule:
 
     @property
     def checkpoint_steps(self):
+        if self.plan.protocol_id == NATIVE16_LONG_PROTOCOL:
+            return (self.q, 2 * self.q, 3 * self.q) if self.name == "shared" else (self.q // 2, self.q)
         return tuple(self.horizon * fraction // 4 for fraction in (1, 2, 3, 4))
 
     @property
@@ -200,7 +217,8 @@ class LearnerSchedule:
             raise ValueError("update outside finite horizon")
         if self.name == "shared":
             local, position = divmod(index, 3)
-            site = TRAINED_SITES[(local % 3 + position) % 3]
+            site = TRAINED_SITES[position if self.plan.protocol_id == NATIVE16_LONG_PROTOCOL
+                                 else (local % 3 + position) % 3]
         else:
             local, site = index, self.name.removeprefix("specialist_")
         view = self.plan.views[local]
@@ -209,6 +227,20 @@ class LearnerSchedule:
                        condition="uniform", draw_schema="runtime-awgn-replay-v2")
         return ScheduledUpdate(self.name, index, site, local, view, key,
                                sharing_lr_factor(index, self.horizon))
+
+
+def long_final_panels(q: int) -> tuple[Observation, ...]:
+    """Terminal task/objective targets, with all no-noise panels before SNR work.
+
+    Callers bind task and objective obligations separately to these same frozen
+    terminal checkpoints. The held-out site appears only after the study freeze.
+    """
+    validate_native16_horizon(q)
+    targets = tuple((f"specialist_{site}", site, q) for site in TRAINED_SITES) + tuple(
+        ("shared", site, 3 * q) for site in (*TRAINED_SITES, HELDOUT_SITE)
+    )
+    return tuple(Observation("final", learner, site, step, "post_freeze", (condition,))
+                 for condition in CONDITIONS for learner, site, step in targets)
 
 
 class SharingExposureLedger:

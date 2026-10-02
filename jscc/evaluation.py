@@ -346,7 +346,10 @@ def codec_observation_identity(request):
         raise ValueError(f"Observation request missing fields: {sorted(missing)}")
     if request["schema"] != "codec-observation-v1":
         raise ValueError("Unsupported observation schema")
-    if tuple(request["conditions"]) != BASELINE_CONDITIONS:
+    from .sharing_schedule import NATIVE16_LONG_PROTOCOL
+    long_condition = (request["protocol"] == NATIVE16_LONG_PROTOCOL
+                      and len(request["conditions"]) == 1 and request["conditions"][0] in BASELINE_CONDITIONS)
+    if tuple(request["conditions"]) != BASELINE_CONDITIONS and not long_condition:
         raise ValueError("Baseline observation requires the exact six conditions")
     count = request["expected_items"]
     if type(count) is not int or count < 1:
@@ -437,7 +440,7 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
     try:
         model.codec.load_state_dict(validated_state.payload["model"])
         model.eval()
-        for condition in BASELINE_CONDITIONS:
+        for condition in request["conditions"]:
             condition_output = output / str(condition)
             condition_output.mkdir()
             started = time.perf_counter()

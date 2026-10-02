@@ -13,7 +13,7 @@ from .models.channel import AWGNChannel
 from .models.split_model import resolve_encoder_site
 from .native64_baseline import reuse_encoder
 from .presentation import derived_seed, tensor_digest
-from .sharing_schedule import NATIVE16_PROTOCOL, NATIVE16_WEIGHT_DECAY, BatchView, SharingExposureLedger
+from .sharing_schedule import NATIVE16_PROTOCOLS, NATIVE16_WEIGHT_DECAY, BatchView, SharingExposureLedger
 from .sharing_accumulation import micro_noise_key, partition_native64, partition_policy
 from .training import batch_losses
 
@@ -62,7 +62,7 @@ class SharingLearner(BaselineLearner):
                          pairing_id=plan.study_pairing_id, synthetic=True,
                          final_step=schedule.horizon, effective_batch=plan.batch_size,
                          event_sink=event_sink, audit_policy='sparse_first_final',
-                         weight_decay=NATIVE16_WEIGHT_DECAY if plan.protocol_id == NATIVE16_PROTOCOL else .01)
+                         weight_decay=NATIVE16_WEIGHT_DECAY if plan.protocol_id in NATIVE16_PROTOCOLS else .01)
         self.synthetic = plan.synthetic
         self.schedule = schedule
         self.exposure = SharingExposureLedger(schedule)
@@ -151,7 +151,7 @@ class SharingLearner(BaselineLearner):
         finally:
             self.active_site = self.active_local = self.pending_update = None
     
-    def validate_site(self, batches, site_id, *, authorization=None):
+    def validate_site(self, batches, site_id, *, authorization=None, conditions=None):
         if self.active_site is not None:
             raise RuntimeError('cannot nest objective validation')
         authorization = authorization or {'sites': {site: 'trained' for site in ('enc_l9','enc_l19','enc_fn')}}
@@ -170,6 +170,6 @@ class SharingLearner(BaselineLearner):
         self.active_site, self.active_local = site_id, 0
         try:
             with self.model.at_site(self.sites[site_id], purpose='evaluate', authorization=authorization):
-                return super().validate(batches, kind='combined')
+                return super().validate(batches, kind='combined', **({} if conditions is None else {'conditions': conditions}))
         finally:
             self.active_site = self.active_local = None

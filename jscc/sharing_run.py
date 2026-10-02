@@ -23,12 +23,17 @@ from .experiment_records import (append_event, artifact_ref, completion_status,
 from .experiment_state import open_state, restore_state, save_state
 from .models.split_model import build_model
 from .sharing_protocol import SharingLearner, batch_view
-from .sharing_schedule import NATIVE16_PROTOCOL, SharingPlan, TRAINED_SITES
+from .sharing_schedule import (NATIVE16_PROTOCOLS, NATIVE16_LONG_PROTOCOL,
+                               SharingPlan, TRAINED_SITES, long_final_panels)
 from .sharing_state import build_sharing_state, create_study_freeze, verify_study_freeze
 
 
 def panel_id(observation):
     return f'{observation.purpose}:{observation.learner}:{observation.site}:{observation.step}'
+
+
+def final_panel_id(observation):
+    return panel_id(observation) + ':' + str(observation.conditions[0])
 
 
 def _controls(learner, metadata):
@@ -60,6 +65,7 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
     if (partition is not None and plan.batch_size != 64) or (plan.synthetic and plan.batch_size == 64 and partition is None):
         raise ValueError("explicit accumulation requires parent effective64")
     metadata = copy.deepcopy(metadata)
+    long_study = plan.protocol_id == NATIVE16_LONG_PROTOCOL
     if partition is not None:
         if metadata.get("execution_partition", partition) != partition:
             raise ValueError("metadata execution partition differs")
@@ -97,9 +103,10 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
     campaign = {'schema': 'sharing-run-v1', 'status': 'incomplete',
                 'synthetic': plan.synthetic, 'recipe_identity': metadata['recipe_identity'],
                 'architecture_decision': metadata['architecture_decision'],
-                'planned_updates': 6 * plan.q, 'planned_checkpoints': 17,
+                'planned_updates': 6 * plan.q, 'planned_checkpoints': len(plan.saved_states),
                 'planned_panels': plan.condition_panels,
-                'obligations': [panel_id(o) for o in plan.observations] + ['vanilla', 'geometry:atlas'],
+                'obligations': [panel_id(o) for o in plan.observations] +
+                               ([] if long_study else ['vanilla', 'geometry:atlas']),
                 'completed_obligations': []}
     write_manifest(output / 'campaign.json', campaign)
 
@@ -122,7 +129,7 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
             identity={'source': metadata['source_identity'], 'config': metadata['config_identity'],
                       'data': metadata['data_identity'], 'parent': None},
             model_revision=metadata['model_revision'],
-            enc_fn_reuse=not plan.synthetic and plan.protocol_id != NATIVE16_PROTOCOL,
+            enc_fn_reuse=not plan.synthetic and plan.protocol_id not in NATIVE16_PROTOCOLS,
             microbatch_size=microbatch_size)
         def sink(event):
             append_event(root / 'metrics.jsonl', event)
@@ -202,7 +209,9 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
             request.update(site=site, role='heldout' if receipt else 'trained',
                 learner_kind='initialization' if observation.step == 0 else
                              'shared' if name == 'shared' else 'specialist',
-                step=observation.step, site_step=observation.step // 3 if name == 'shared' else observation.step,
+                step=observation.step,
+                site_step=details['sharing']['completed_per_site'].get(site, observation.step // 3),
+                conditions=list(observation.conditions),
                 comparison=details['comparison_controls'])
             identity = observation_identity(request)
         if receipt is None:
@@ -222,7 +231,8 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
                 model.codec.load_state_dict(state.payload['model'])
                 authorization = None if receipt is None else {
                     'sites': {site: 'heldout'}, 'heldout_freeze_receipt': canonical_digest(receipt)}
-                rows = learner.validate_site(validation_batches, site, authorization=authorization)
+                rows = learner.validate_site(validation_batches, site, authorization=authorization,
+                                             conditions=observation.conditions)
             finally:
                 model.codec.load_state_dict(before)
             write_manifest(path.with_suffix('.json'), {'request': request, 'conditions': rows})
@@ -272,25 +282,26 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
         shared = make('shared')
         initial_state = save(shared)
         trained_observations(shared, 0, initial_state)
-        # Vanilla belongs to the same input/scorer contract, but transmits no codec.
-        from . import evaluation
-        vanilla = output / 'vanilla'
-        vanilla.mkdir()
-        resource_guard()
-        vanilla_started = time.monotonic()
-        with torch.no_grad(), model.transmission(bypass=True):
-            model.eval()
-            metrics = evaluation.evaluate_hellaswag(model, processor, task_template['settings'], vanilla,
-                                                    'vanilla', task_template['data_settings'])
-        rows, ids, families = evaluation._observation_items(vanilla, 'hellaswag', 'vanilla')
-        if ids != task_template['input_ids'] or families != task_template['source_family_ids']:
-            raise ValueError('vanilla membership mismatch')
-        write_manifest(vanilla / 'receipt.json', {'status': 'complete', 'metrics': metrics,
-            'requested': task_template['expected_items'], 'completed': len(rows),
-            'source': metadata['source_identity'], 'data': metadata['data_identity'],
-            'request': task_template, 'output_hashes': {p.name: file_digest(p) for p in vanilla.iterdir() if p.is_file()}})
-        cost(shared, 'vanilla_evaluation', vanilla_started, 'bypass')
-        campaign['completed_obligations'].append('vanilla')
+        if not long_study:
+            # Vanilla belongs to the same input/scorer contract, but transmits no codec.
+            from . import evaluation
+            vanilla = output / 'vanilla'
+            vanilla.mkdir()
+            resource_guard()
+            vanilla_started = time.monotonic()
+            with torch.no_grad(), model.transmission(bypass=True):
+                model.eval()
+                metrics = evaluation.evaluate_hellaswag(model, processor, task_template['settings'], vanilla,
+                                                        'vanilla', task_template['data_settings'])
+            rows, ids, families = evaluation._observation_items(vanilla, 'hellaswag', 'vanilla')
+            if ids != task_template['input_ids'] or families != task_template['source_family_ids']:
+                raise ValueError('vanilla membership mismatch')
+            write_manifest(vanilla / 'receipt.json', {'status': 'complete', 'metrics': metrics,
+                'requested': task_template['expected_items'], 'completed': len(rows),
+                'source': metadata['source_identity'], 'data': metadata['data_identity'],
+                'request': task_template, 'output_hashes': {p.name: file_digest(p) for p in vanilla.iterdir() if p.is_file()}})
+            cost(shared, 'vanilla_evaluation', vanilla_started, 'bypass')
+            campaign['completed_obligations'].append('vanilla')
         trained_runs = {}
         for name in plan.learners:
             model.codec.load_state_dict(initial)
@@ -311,27 +322,35 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
             protocol_identity=metadata['protocol_identity'], recipe_identity=metadata['recipe_identity'],
             architecture_decision=metadata['architecture_decision'], site_policy=policy,
             trained_runs=trained_runs, synthetic=plan.synthetic,
-            obligation_plan={**{purpose: [panel_id(o) for o in plan.observations if o.purpose == purpose]
+            obligation_plan=({'task': [final_panel_id(o) for o in long_final_panels(plan.q)],
+                             'objective': [panel_id(o) for o in plan.observations],
+                             'geometry': []} if long_study else
+                             {**{purpose: [panel_id(o) for o in plan.observations if o.purpose == purpose]
                                 for purpose in ('task', 'objective')}, 'geometry': ['geometry:atlas'],
-                             'task': [panel_id(o) for o in plan.observations if o.purpose == 'task'] + [input_panel]})
-        for observation in plan.observations:
-            if observation.stage == 'post_freeze':
-                observe(shared, observation, states['shared'][observation.step], freeze)
-        from .sharing_geometry_capture import capture_geometry_atlas
-        resource_guard()
-        geometry_started = time.monotonic()
-        geometry = capture_geometry_atlas(model, geometry_batches, model_revision=metadata['model_revision'],
-            include_heldout=True, freeze_reference=freeze, obligation='geometry:atlas')
-        write_manifest(output / 'geometry.json', geometry)
-        cost(shared, 'geometry_capture_and_analysis', geometry_started, 'all', frozen=True)
-        campaign['completed_obligations'].append('geometry:atlas')
+                             'task': [panel_id(o) for o in plan.observations if o.purpose == 'task'] + [input_panel]}))
+        if not long_study:
+            for observation in plan.observations:
+                if observation.stage == 'post_freeze':
+                    observe(shared, observation, states['shared'][observation.step], freeze)
+            from .sharing_geometry_capture import capture_geometry_atlas
+            resource_guard()
+            geometry_started = time.monotonic()
+            geometry = capture_geometry_atlas(model, geometry_batches, model_revision=metadata['model_revision'],
+                include_heldout=True, freeze_reference=freeze, obligation='geometry:atlas')
+            write_manifest(output / 'geometry.json', geometry)
+            cost(shared, 'geometry_capture_and_analysis', geometry_started, 'all', frozen=True)
+            campaign['completed_obligations'].append('geometry:atlas')
         if set(campaign['completed_obligations']) != set(campaign['obligations']):
             raise ValueError('campaign mandatory observations incomplete')
         from .sharing_report import write_sharing_report
-        write_sharing_report(output, all_observations, plan, event_files={name: root / 'metrics.jsonl' for name, root in roots.items()})
-        campaign.update(status='complete', completed_updates=sum(item.completed for item in learners.values()),
+        if not long_study:
+            write_sharing_report(output, all_observations, plan, event_files={name: root / 'metrics.jsonl' for name, root in roots.items()})
+        campaign.update(status='training_frozen' if long_study else 'complete', completed_updates=sum(item.completed for item in learners.values()),
             completed_checkpoints=sum(len(s) for s in states.values()), freeze_reference=freeze,
             elapsed_seconds=time.monotonic() - begun)
+        if long_study:
+            campaign['final_evaluation_plan'] = [asdict(o) | {'panel_id': final_panel_id(o)} for o in long_final_panels(plan.q)]
+            campaign['full_validation_status'] = 'pending; already inspected validation, not untouched test'
         write_manifest(output / 'observations.json', all_observations)
         persist()
         inventory = {'schema': 'experiment-records-v1', 'mode': 'tensor-complete', 'omitted_tensors': [],
@@ -355,15 +374,20 @@ def execute_prepared(manifest, root, output):
     root = Path(root)
     started = time.monotonic()
     def guard():
-        from .sharing_controller import check_worker_resources
-        check_worker_resources(manifest)
+        if manifest['protocol_id'] == NATIVE16_LONG_PROTOCOL:
+            from .sharing_long_run import check_long_deadline
+            check_long_deadline()
+        else:
+            from .sharing_controller import check_worker_resources
+            check_worker_resources(manifest)
         if time.monotonic() - started >= manifest['hard_cap_seconds']:
             raise TimeoutError('sharing allocation deadline; partial work retained, no retry')
     config = manifest['resolved_config']
     require_execution_ready(manifest)
     guard()
-    from .sharing_controller import check_target_device
-    check_target_device(manifest)
+    if manifest['protocol_id'] != NATIVE16_LONG_PROTOCOL:
+        from .sharing_controller import check_target_device
+        check_target_device(manifest)
     from .runtime import configure_training_determinism, seed_everything
     configure_training_determinism(config['training'])
     seed_everything(config['seed'])
@@ -394,6 +418,12 @@ def execute_prepared(manifest, root, output):
                            [('config.yaml', 'config'), ('source.zip', 'source_archive'), ('task.json', 'task_request')]},
                          'prepared.json': {'path': manifest['prepared_path'],
                                            'sha256': file_digest(Path(manifest['prepared_path']))}}}}
+
+    if manifest['protocol_id'] == NATIVE16_LONG_PROTOCOL:
+        final_reference = manifest['final_task_request']
+        metadata['final_task_identity'] = final_reference['sha256']
+        metadata['prepared_package']['retained']['final-task.json'] = {
+            'path': str((root / final_reference['path']).resolve()), 'sha256': final_reference['sha256']}
 
     return run_sharing(model, processor, plan=plan, update_batches=batches, validation_batches=validation,
         metadata=metadata, task_template=manifest['task_template'], output=output,

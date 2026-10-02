@@ -345,15 +345,17 @@ class BaselineLearner:
             raise
 
     @torch.no_grad()
-    def validate(self, batches, *, kind="combined"):
-        """Six fixed paired streams; preserve training mode/RNG and all denominators."""
+    def validate(self, batches, *, kind="combined", conditions=CONDITIONS):
+        """Fixed paired streams; preserve training mode/RNG and all denominators."""
+        if not conditions or any(condition not in CONDITIONS for condition in conditions):
+            raise ValueError("unsupported objective condition")
         _check_batches(batches, kind)
         was_training = self.model.training
         self.model.eval()
         records = []
         try:
             with isolated_rng(derived_seed(0, self.pairing_id + ":objective_validation")):
-                for condition in CONDITIONS:
+                for condition in conditions:
                     evaluated = [self._values(b, kind, 0, micro, "objective_validation", condition)
                                  for micro, b in enumerate(batches)]
                     values = [value[0] for value in evaluated]
@@ -741,7 +743,7 @@ def validate_task_receipt(receipt, expected_request):
     if receipt.get("request") != expected_request or receipt.get("identity") != expected_identity:
         raise ValueError("task observation identity differs from required panel/noise/scorer contract")
     rows = receipt.get("conditions", [])
-    if receipt.get("status") != "complete" or [r.get("condition") for r in rows] != list(CONDITIONS):
+    if receipt.get("status") != "complete" or [r.get("condition") for r in rows] != expected_request["conditions"]:
         raise ValueError("task observation conditions incomplete")
     count = expected_request["expected_items"]
     for row in rows:

@@ -88,7 +88,11 @@ def observation_identity(request: dict[str, Any]) -> str:
     _count(request["step"], "step")
     _count(request["expected_items"], "expected_items")
     _require(request["expected_items"] > 0, "empty panel")
-    _require(request["conditions"] == CONDITIONS or request["conditions"] == ["vanilla"], "unsupported condition grid")
+    from .sharing_schedule import NATIVE16_LONG_PROTOCOL
+    long_condition = (request["protocol"] == NATIVE16_LONG_PROTOCOL
+                      and len(request["conditions"]) == 1 and request["conditions"][0] in CONDITIONS)
+    _require(request["conditions"] == CONDITIONS or request["conditions"] == ["vanilla"] or long_condition,
+             "unsupported condition grid")
     _require((request["conditions"] == ["vanilla"]) == (request["learner_kind"] == "vanilla"), "vanilla bypass identity mismatch")
     return hashlib.sha256(b"codec-observation-v1\0" + canonical_bytes(request)).hexdigest()
 

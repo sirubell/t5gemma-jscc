@@ -11,7 +11,9 @@ from pathlib import Path
 import tempfile
 
 from .activation_replay import file_digest
-from .sharing_schedule import DEPTH_PROTOCOL, NATIVE16_PROTOCOL, validate_native16_horizon
+from .sharing_schedule import (
+    DEPTH_PROTOCOL, NATIVE16_LONG_PROTOCOL, NATIVE16_PROTOCOLS, validate_native16_horizon,
+)
 from .experiment_records import canonical_bytes, completion_status, read_events, verify_inventory
 
 SITES = ("enc_l9", "enc_l19", "enc_fn")
@@ -27,8 +29,10 @@ def _count(value, label):
     _require(type(value) is int and value >= 0, f"invalid {label}")
 
 
-def _updates(learner, q):
+def _updates(learner, q, protocol_id=None):
     if learner == "shared":
+        if protocol_id == NATIVE16_LONG_PROTOCOL:
+            return [SITES[index % 3] for index in range(3 * q)]
         return [SITES[(sweep + position) % 3] for sweep in range(q) for position in range(3)]
     _require(learner in LEARNERS, "unknown sharing learner")
     return [learner.removeprefix("specialist_")] * q
@@ -46,16 +50,18 @@ not individual examples. Their full ordered identities are frozen at step zero.
     for value in (ordered_view_identities, source_valid_per_view, target_valid_per_view, padded_per_view):
         _require(isinstance(value, (list, tuple)), "sharing views/counts must be ordered sequences")
     identities = list(ordered_view_identities)
-    native16 = protocol_id == NATIVE16_PROTOCOL
+    native16 = protocol_id in NATIVE16_PROTOCOLS
     q = len(identities) if synthetic or native16 else (400 if protocol_id == DEPTH_PROTOCOL else 200)
     if native16:
         validate_native16_horizon(q)
+        _require(synthetic or protocol_id != NATIVE16_LONG_PROTOCOL or q == 6400,
+                 "formal native16 long state requires q6400")
         _require(batch_size == 16 and len(set(identities)) == q, "native16 state requires distinct16 views")
     if not synthetic and q == 400:
         _require(len(set(identities)) == 400, "q400 state requires400 distinct views")
     _require(q >= 4 and q % 4 == 0, "invalid sharing batch horizon")
     _require(type(batch_size) is int and batch_size in ((16,) if native16 else (2, 64) if synthetic else (64,)), "sharing batch size mismatch")
-    order = _updates(learner, q)
+    order = _updates(learner, q, protocol_id)
     _count(completed_updates, "completed updates")
     _require(completed_updates <= len(order), "sharing horizon exceeded")
     _require(len(identities) == q and all(isinstance(v, str) and v for v in identities)
@@ -184,9 +190,12 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
         horizon = phases[0].get("updates")
         _count(horizon, "freeze horizon")
         factor = 3 if learner == "shared" else 1
-        native16 = protocol_identity == NATIVE16_PROTOCOL
+        native16 = protocol_identity in NATIVE16_PROTOCOLS
+        long = protocol_identity == NATIVE16_LONG_PROTOCOL
         if native16:
             validate_native16_horizon(horizon // factor)
+            _require(synthetic or not long or horizon == 6400 * factor,
+                     "formal native16 long freeze requires q6400")
         _require(horizon > 0 and horizon % (4 * factor) == 0
                  and (synthetic or native16 or horizon == (400 if protocol_identity == DEPTH_PROTOCOL else 200) * factor), "freeze horizon mismatch")
         _require(manifest["phases"] == [{"phase_id": "combined", "updates": horizon,
@@ -197,8 +206,13 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
         trained_sites = SITES if learner == "shared" else (learner.removeprefix("specialist_"),)
         task_steps = [horizon // 2, horizon]
         objective_steps = [horizon * i // 4 for i in range(1, 5)]
+        if long:
+            task_steps = []
+            objective_steps = ([horizon // 3, 2 * horizon // 3, horizon] if learner == "shared"
+                               else [horizon // 2, horizon])
         if learner == "shared":
-            task_steps.insert(0, 0)
+            if not long:
+                task_steps.insert(0, 0)
             objective_steps.insert(0, 0)
         expected_panels = {(purpose, site, step) for purpose, points in
                            (("task", task_steps), ("objective", objective_steps))
@@ -211,7 +225,7 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
             observation = event["payload"]
             request = observation["request"]
             _require(observation["status"] == "complete" and request["role"] == "trained"
-                     and request["task"] == "hellaswag" and request["conditions"] == ["no_noise", -6, 0, 6, 12, 18],
+                     and request["task"] == "hellaswag" and request["conditions"] == (["no_noise"] if long else ["no_noise", -6, 0, 6, 12, 18]),
                      "freeze requires complete trained-site observations")
             observed_panels.append((request["purpose"], request["site"], request["step"]))
             observed_ids.append(observation["identity"])
@@ -249,14 +263,15 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
             steps.append(metadata["completed_updates"])
             checkpoints_by_step[metadata["completed_updates"]] = artifact["sha256"]
             checkpoint_hashes.append(artifact["sha256"])
-        expected_steps = [horizon * i // 4 for i in range(1, 5)]
+        expected_steps = ([horizon // 3, 2 * horizon // 3, horizon] if learner == "shared"
+                          else [horizon // 2, horizon]) if long else [horizon * i // 4 for i in range(1, 5)]
         if learner == "shared":
             expected_steps.insert(0, 0)
         _require(sorted(steps) == expected_steps, "missing/duplicate report checkpoint cadence")
         if checkpoint_sharing is None:
             raise ValueError("freeze requires sharing checkpoints")
         local_counts: dict[str, int] = dict.fromkeys(SITES, 0)
-        expected_order = _updates(learner, checkpoint_sharing["q"])
+        expected_order = _updates(learner, checkpoint_sharing["q"], protocol_identity)
         updates = [event["payload"] for event in events if event["event_type"] == "update"]
         _require(len(updates) == len(expected_order), "freeze update count mismatch")
         for row, site in zip(updates, expected_order):
@@ -298,8 +313,10 @@ and geometry work; these pending obligations cannot make trained runs circular.
     _require(isinstance(obligation_plan, dict) and set(obligation_plan) == {"task", "objective", "geometry"},
              "freeze must bind task/objective/geometry obligations")
     panels = []
-    for values in obligation_plan.values():
-        _require(isinstance(values, list) and bool(values) and all(isinstance(v, str) and v for v in values),
+    for purpose, values in obligation_plan.items():
+        optional_geometry = protocol_identity == NATIVE16_LONG_PROTOCOL and purpose == "geometry"
+        _require(isinstance(values, list) and (bool(values) or optional_geometry)
+                 and all(isinstance(v, str) and v for v in values),
                  "empty freeze obligation plan")
         panels.extend(values)
     _require(len(panels) == len(set(panels)), "duplicate freeze obligations")
@@ -346,7 +363,9 @@ def verify_study_freeze(reference, *, checkpoint_sha256=None, protocol_identity=
     _require(type(receipt["synthetic"]) is bool, "invalid freeze synthetic flag")
     plan = receipt["obligation_plan"]
     _require(isinstance(plan, dict) and set(plan) == {"task", "objective", "geometry"}
-             and all(isinstance(v, list) and v and all(isinstance(p, str) and p for p in v) for v in plan.values()),
+             and all(isinstance(v, list)
+                     and (bool(v) or (receipt["protocol_identity"] == NATIVE16_LONG_PROTOCOL and k == "geometry"))
+                     and all(isinstance(p, str) and p for p in v) for k, v in plan.items()),
              "invalid freeze obligations")
     panels = [panel for values in plan.values() for panel in values]
     _require(len(set(panels)) == len(panels) and set(panels) == set(receipt["observation_plan"]), "freeze obligation mismatch")
