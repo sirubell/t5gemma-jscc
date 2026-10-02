@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 
 from .activation_replay import file_digest
-from .sharing_schedule import DEPTH_PROTOCOL
+from .sharing_schedule import DEPTH_PROTOCOL, NATIVE16_PROTOCOL, validate_native16_horizon
 from .experiment_records import canonical_bytes, completion_status, read_events, verify_inventory
 
 SITES = ("enc_l9", "enc_l19", "enc_fn")
@@ -46,11 +46,15 @@ not individual examples. Their full ordered identities are frozen at step zero.
     for value in (ordered_view_identities, source_valid_per_view, target_valid_per_view, padded_per_view):
         _require(isinstance(value, (list, tuple)), "sharing views/counts must be ordered sequences")
     identities = list(ordered_view_identities)
-    q = len(identities) if synthetic else (400 if protocol_id == DEPTH_PROTOCOL else 200)
+    native16 = protocol_id == NATIVE16_PROTOCOL
+    q = len(identities) if synthetic or native16 else (400 if protocol_id == DEPTH_PROTOCOL else 200)
+    if native16:
+        validate_native16_horizon(q)
+        _require(batch_size == 16 and len(set(identities)) == q, "native16 state requires distinct16 views")
     if not synthetic and q == 400:
         _require(len(set(identities)) == 400, "q400 state requires400 distinct views")
     _require(q >= 4 and q % 4 == 0, "invalid sharing batch horizon")
-    _require(type(batch_size) is int and batch_size in ((2, 64) if synthetic else (64,)), "sharing batch size mismatch")
+    _require(type(batch_size) is int and batch_size in ((16,) if native16 else (2, 64) if synthetic else (64,)), "sharing batch size mismatch")
     order = _updates(learner, q)
     _count(completed_updates, "completed updates")
     _require(completed_updates <= len(order), "sharing horizon exceeded")
@@ -75,8 +79,8 @@ not individual examples. Their full ordered identities are frozen at step zero.
                "target_valid_per_site": {s: sum(vectors["target_valid_per_view"][:n]) for s, n in counts.items()},
                "padded_per_site": {s: sum(vectors["padded_per_view"][:n]) for s, n in counts.items()},
                "next_site": order[completed_updates] if completed_updates < len(order) else None}
-    if not synthetic and q == 400:
-        sharing["protocol_id"] = DEPTH_PROTOCOL
+    if native16 or (not synthetic and q == 400):
+        sharing["protocol_id"] = protocol_id
     stream = {"completed_updates": completed_updates, "offset": completed_updates * batch_size,
               "view_offsets": dict(counts), "next_site": sharing["next_site"]}
     return sharing, stream
@@ -180,8 +184,11 @@ def _verified_runs(trained_runs, *, synthetic, protocol_identity, site_policy, r
         horizon = phases[0].get("updates")
         _count(horizon, "freeze horizon")
         factor = 3 if learner == "shared" else 1
+        native16 = protocol_identity == NATIVE16_PROTOCOL
+        if native16:
+            validate_native16_horizon(horizon // factor)
         _require(horizon > 0 and horizon % (4 * factor) == 0
-                 and (synthetic or horizon == (400 if protocol_identity == DEPTH_PROTOCOL else 200) * factor), "freeze horizon mismatch")
+                 and (synthetic or native16 or horizon == (400 if protocol_identity == DEPTH_PROTOCOL else 200) * factor), "freeze horizon mismatch")
         _require(manifest["phases"] == [{"phase_id": "combined", "updates": horizon,
                     "start_step": 0, "start_valid_tokens": 0}], "freeze trained horizon mismatch")
         events = read_events(paths["events"])

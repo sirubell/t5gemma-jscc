@@ -23,7 +23,7 @@ from .experiment_records import (append_event, artifact_ref, completion_status,
 from .experiment_state import open_state, restore_state, save_state
 from .models.split_model import build_model
 from .sharing_protocol import SharingLearner, batch_view
-from .sharing_schedule import SharingPlan, TRAINED_SITES
+from .sharing_schedule import NATIVE16_PROTOCOL, SharingPlan, TRAINED_SITES
 from .sharing_state import build_sharing_state, create_study_freeze, verify_study_freeze
 
 
@@ -121,7 +121,8 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
         learner = SharingLearner(model, schedule=plan.learner(name), run_id=name,
             identity={'source': metadata['source_identity'], 'config': metadata['config_identity'],
                       'data': metadata['data_identity'], 'parent': None},
-            model_revision=metadata['model_revision'], enc_fn_reuse=not plan.synthetic,
+            model_revision=metadata['model_revision'],
+            enc_fn_reuse=not plan.synthetic and plan.protocol_id != NATIVE16_PROTOCOL,
             microbatch_size=microbatch_size)
         def sink(event):
             append_event(root / 'metrics.jsonl', event)

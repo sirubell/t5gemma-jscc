@@ -13,6 +13,21 @@ from .experiment_schedule import CONDITIONS, NoiseKey
 TRAINED_SITES = ("enc_l9", "enc_l19", "enc_fn")
 HELDOUT_SITE = "enc_l14"
 DEPTH_PROTOCOL = "sharing-dn-q400-effective64-v1"
+NATIVE16_PROTOCOL = "sharing-dn-native16-fresh-v1"
+NATIVE16_WEIGHT_DECAY = 0.002500001398541448
+
+
+def validate_native16_horizon(q):
+    if type(q) is not int or not 4 <= q <= 6400 or q % 4:
+        raise ValueError("native16 requires explicit q4..6400 in complete quarters")
+    return q
+
+
+def native16_exposure(q):
+    validate_native16_horizon(q)
+    return {"q_per_site": q, "effective_batch": 16, "presentations_per_site": 16 * q,
+            "specialist_updates": q, "shared_updates": 3 * q,
+            "schedule": "full-horizon-warmup5pct-cosine-terminal-v1"}
 
 
 @dataclass(frozen=True)
@@ -87,7 +102,11 @@ class SharingPlan:
             raise ValueError("quota must have four distinct integral quarters")
         if len({v.sequences for v in self.views}) != 1:
             raise ValueError("effective batch size must be constant")
-        if not self.synthetic:
+        if self.protocol_id == NATIVE16_PROTOCOL:
+            validate_native16_horizon(self.q)
+            if self.batch_size != 16 or len({v.view_sha256 for v in self.views}) != self.q:
+                raise ValueError("native16 requires distinct complete16 views; cycling subset forbidden")
+        elif not self.synthetic:
             quota = 400 if self.protocol_id == DEPTH_PROTOCOL else 200
             if self.q != quota or self.batch_size != 64:
                 raise ValueError("production requires q200 or explicit q400 depth protocol and effective batch64")
