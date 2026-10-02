@@ -31,7 +31,8 @@ CONDITIONS = ('no_noise', -6, 0, 6, 18)
 
 def stages_source_inventory():
     root = Path(__file__).resolve().parents[1]
-    return {**source_inventory(root), 'scripts/encoder_stages.py': file_digest(root / 'scripts/encoder_stages.py')}
+    return {**source_inventory(root), **{name: file_digest(root / name) for name in
+            ('scripts/encoder_stages.py', 'scripts/render_encoder_stages.py')}}
 
 
 class EncoderStagesLearner(SharingLearner):
@@ -179,7 +180,8 @@ def save_stages(learner, metadata, path):
                     'initialization': metadata['initialization_identity'], 'training_data': metadata['stream_identity'],
                     'objective': canonical_digest({'combined': {'K': 1, 'R': .1}, 'reconstruction': {'R': .1}}),
                     'exposure': canonical_digest({'sites': SITES, 'q': learner.schedule.q, 'batch': 16}),
-                    'schedule': canonical_digest({'arm': learner.schedule.arm, 'horizon': learner.schedule.horizon,
+                    'schedule': canonical_digest({'segments': [s.horizon for s in learner.schedule.stages],
+                                                   'reset_steps': learner.schedule.reset_steps, 'horizon': learner.schedule.horizon,
                                                    'warmup_ratio': .05, 'lr': 2e-4})}}
     if learner.reset_parent is not None:
         details['parent_identity'] = learner.reset_parent['sha256']
@@ -196,9 +198,16 @@ def save_stages(learner, metadata, path):
     return validated
 
 
-def run_stages_training(model, *, plan, batches, metadata, output, guard):
+def run_stages_training(model, *, plan, batches, metadata, output, guard, config=None, data_ids=None):
+    if not plan.synthetic and (config is None or data_ids is None):
+        raise ValueError('real trajectory requires resolved configuration and exact data membership')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    if config is not None:
+        from .config import save_config
+        save_config(config, output / 'config.yaml')
+    if data_ids is not None:
+        write_manifest(output / 'data_ids.json', data_ids)
     learner = EncoderStagesLearner(model, plan=plan, metadata=metadata)
     learner.event_sink = AppendOnlyEventWriter(output / 'metrics.jsonl').append
     begun = time.monotonic()
@@ -288,6 +297,8 @@ def run_stages_evaluation(model, processor, *, state, freeze_reference, template
     if template['conditions'] != list(CONDITIONS):
         raise ValueError('terminal five-condition template required')
     result = {'schema': 'encoder-stages-evaluation-v1', 'status': 'incomplete',
+              'arm': details['sharing']['arm'], 'width': details['sharing']['width'],
+              'prepared_identity': details['prepared_identity'],
               'checkpoint': asdict(state.reference), 'freeze_reference': freeze_reference, 'completed_panels': [],
               'interpretation': 'previously inspected validation, six trained encoder sites, one seed',
               'vanilla_execution': 'reuse compatible external evidence after identity matching'}
@@ -304,6 +315,8 @@ def run_stages_evaluation(model, processor, *, state, freeze_reference, template
                     'comparison': details['comparison_controls'], 'panel': f'final:{site}:{condition}',
                     'source': details['source_identity'], 'config': details['config_identity'],
                     'data': details['data_identity'], 'protocol': details['protocol_identity']}
+                request.update(study_arm=details['sharing']['arm'], study_width=details['sharing']['width'],
+                               prepared_identity=details['prepared_identity'])
                 request['settings'] = {**request['settings'], 'evidence_mode': 'compact-v1'}
                 path = output / f'{site}_{condition}'
                 receipt = evaluate_checkpoint(state, request, model=model, processor=processor, output=path)

@@ -59,7 +59,7 @@ def main(argv=None):
                     config['model']['name'] = args.model_path
                 config['protocol'] = ENCODER_STAGES_PROTOCOL
                 config['run']['output_dir'] = str(root / 'runs')
-                path = root / f'runtime-b{width}.yaml'
+                path = root / f'runtime-{args.approved_source[:8]}-b{width}.yaml'
                 if path.exists():
                     raise ValueError('fresh runtime configuration required')
                 path.write_text(yaml.safe_dump(config, sort_keys=False))
@@ -106,7 +106,8 @@ def main(argv=None):
             raise ValueError('qualification is authorized only on RTX 5090')
         result = qualify_stages(model, plan=plan, batches=batches, metadata=metadata, output=args.output, guard=guard)
     elif args.mode == 'train':
-        result = run_stages_training(model, plan=plan, batches=batches, metadata=metadata, output=args.output, guard=guard)
+        result = run_stages_training(model, plan=plan, batches=batches, metadata=metadata, output=args.output,
+                                     guard=guard, config=config, data_ids=manifest['data_ids'])
     else:
         result = run_stages_evaluation(model, processor, state=state, freeze_reference=freeze,
                                       template=template, output=args.output, guard=guard)
