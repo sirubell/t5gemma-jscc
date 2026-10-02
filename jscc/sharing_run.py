@@ -317,12 +317,13 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
                     state = save(learner)
                     trained_observations(learner, learner.completed, state)
             trained_runs[name] = finish_run(name)
+        resource_guard()
         policy = initial_state.payload['metadata']['evaluation_sites']
         freeze = create_study_freeze(output / 'study-freeze.json',
             protocol_identity=metadata['protocol_identity'], recipe_identity=metadata['recipe_identity'],
             architecture_decision=metadata['architecture_decision'], site_policy=policy,
             trained_runs=trained_runs, synthetic=plan.synthetic,
-            obligation_plan=({'task': [final_panel_id(o) for o in long_final_panels(plan.q)],
+            obligation_plan=({'task': [final_panel_id(o) for o in long_final_panels(plan.q)] + ['final:vanilla'],
                              'objective': [panel_id(o) for o in plan.observations],
                              'geometry': []} if long_study else
                              {**{purpose: [panel_id(o) for o in plan.observations if o.purpose == purpose]
@@ -345,6 +346,7 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
         from .sharing_report import write_sharing_report
         if not long_study:
             write_sharing_report(output, all_observations, plan, event_files={name: root / 'metrics.jsonl' for name, root in roots.items()})
+        resource_guard()
         campaign.update(status='training_frozen' if long_study else 'complete', completed_updates=sum(item.completed for item in learners.values()),
             completed_checkpoints=sum(len(s) for s in states.values()), freeze_reference=freeze,
             elapsed_seconds=time.monotonic() - begun)
@@ -359,6 +361,7 @@ def run_sharing(model, processor, *, plan, update_batches, validation_batches,
         from .experiment_records import verify_inventory
         verify_inventory(output, inventory)
         write_manifest(output / 'inventory.json', inventory)
+        resource_guard()
         return campaign
     except Exception as error:
         campaign.update(status='incomplete', error={'type': type(error).__name__, 'message': str(error)},

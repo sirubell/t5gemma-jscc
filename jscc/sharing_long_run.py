@@ -75,7 +75,7 @@ def evaluate_long(manifest, root, training_run, output):
         raise ValueError('final evaluation plan differs from frozen training')
     freeze_reference = campaign['freeze_reference']
     freeze = verify_study_freeze(freeze_reference, protocol_identity=manifest['protocol_id'])
-    if freeze['obligation_plan']['task'] != [final_panel_id(o) for o in panels]:
+    if freeze['obligation_plan']['task'] != [final_panel_id(o) for o in panels] + ['final:vanilla']:
         raise ValueError('final panels differ from the trained-study freeze')
     template_reference = manifest['final_task_request']
     template = json.loads(_reference(root, template_reference).read_text())
@@ -106,11 +106,15 @@ def evaluate_long(manifest, root, training_run, output):
     result = {'schema': 'sharing-long-final-evaluation-v1', 'status': 'incomplete',
               'prepared_identity': manifest['prepared_identity'], 'freeze_reference': freeze_reference,
               'data_interpretation': 'already inspected official validation; not an untouched test',
-              'planned_panels': len(panels), 'completed_panels': [], 'expected_items_per_panel': template['expected_items']}
+              'planned_codec_panels': len(panels), 'planned_vanilla_panels': 1,
+              'vanilla_reference': None, 'completed_panels': [], 'expected_items_per_panel': template['expected_items']}
     started = time.monotonic()
     write_manifest(output / 'result.json', result)
     try:
-        for observation in panels:
+        for index, observation in enumerate(panels):
+            if index == 7:
+                result['vanilla_reference'] = evaluate_long_vanilla(model, processor, template, manifest, output / 'vanilla')
+                write_manifest(output / 'result.json', result)
             check_long_deadline()
             state = checkpoints[observation.learner]
             details = state.payload['metadata']
@@ -130,6 +134,7 @@ def evaluate_long(manifest, root, training_run, output):
             receipt = evaluate_checkpoint(state, request, model=model, processor=processor, output=path)
             validate_task_receipt(receipt, request)
             verify_observation_artifacts(receipt, path)
+            check_long_deadline()
             result['completed_panels'].append({'panel_id': tag, 'learner': observation.learner,
                 'site': observation.site, 'condition': observation.conditions[0],
                 'checkpoint': state.reference.sha256, 'observation': {'path': str((path / 'observation.json').resolve()),
@@ -138,6 +143,9 @@ def evaluate_long(manifest, root, training_run, output):
                 'completed_items': receipt['conditions'][0]['completed']})
             result['elapsed_seconds'] = time.monotonic() - started
             write_manifest(output / 'result.json', result)
+        check_long_deadline()
+        if result['vanilla_reference'] is None:
+            raise ValueError('matched full vanilla reference incomplete')
         result.update(status='complete', elapsed_seconds=time.monotonic() - started)
         write_manifest(output / 'result.json', result)
         return result
@@ -146,3 +154,44 @@ def evaluate_long(manifest, root, training_run, output):
                       elapsed_seconds=time.monotonic() - started)
         write_manifest(output / 'result.json', result)
         raise
+
+
+def evaluate_long_vanilla(model, processor, template, manifest, output):
+    """Full matched bypass reference, using the same model/runtime and scorer."""
+    from . import evaluation
+    from .experiment_state import isolated_rng
+    check_long_deadline()
+    output.mkdir(parents=True, exist_ok=False)
+    settings = copy.deepcopy(template['settings'])
+    settings['noise_seed'] = template['noise']['seed']
+    settings['noise_namespace'] = template['noise']['namespace']
+    started = time.monotonic()
+    was_training = model.training
+    try:
+        with isolated_rng(settings['noise_seed']), torch.no_grad(), model.transmission(bypass=True):
+            model.eval()
+            metrics = evaluation.evaluate_hellaswag(model, processor, settings, output,
+                                                    'vanilla', template['data_settings'])
+    finally:
+        model.train(was_training)
+    rows, ids, families = evaluation._observation_items(output, 'hellaswag', 'vanilla')
+    if (ids != template['input_ids'] or families != template['source_family_ids']
+            or len(rows) != template['expected_items']):
+        raise ValueError('full vanilla membership differs from the codec panels')
+    if any(model.channel_uses.values()):
+        raise ValueError('vanilla reference must bypass codec and channel')
+    receipt = {'schema': 'sharing-long-vanilla-reference-v1', 'status': 'complete',
+        'condition': 'vanilla', 'transmission': 'bypass', 'request': template,
+        'source_identity': manifest['source_identity'], 'prepared_identity': manifest['prepared_identity'],
+        'model': manifest['resolved_config']['model'], 'metrics': metrics,
+        'runtime': {'torch_version': str(torch.__version__), 'cuda_version': torch.version.cuda,
+                    'device': str(next(model.base.parameters()).device),
+                    'dtype': str(next(model.base.parameters()).dtype),
+                    'slurm_job_id': os.environ.get('SLURM_JOB_ID')},
+        'requested': template['expected_items'], 'completed': len(rows),
+        'elapsed_seconds': time.monotonic() - started,
+        'output_hashes': {p.name: file_digest(p) for p in output.iterdir() if p.is_file()}}
+    write_manifest(output / 'receipt.json', receipt)
+    check_long_deadline()
+    return {'path': str((output / 'receipt.json').resolve()), 'sha256': file_digest(output / 'receipt.json'),
+            'completed_items': len(rows), 'metrics': metrics}

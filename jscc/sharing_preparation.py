@@ -395,7 +395,7 @@ def preview(manifest):
         return {"schema": SCHEMA, "cell": manifest["cell"], "synthetic_cpu": manifest["synthetic_cpu"],
                 "physical_updates": 6 * manifest["q"], "learned_saves": 9, "initializations": 1,
                 "task_panels": 0, "vanilla_panels": 0, "objective_panels": 18,
-                "final_full_validation_panels": 42, "final_order": "all no_noise then -6/0/6/12/18",
+                "final_full_validation_panels": 42, "final_vanilla_panels": 1, "final_order": "all no_noise then -6/0/6/12/18",
                 "gpu_execution_ready": False, "prepared_identity": manifest["prepared_identity"]}
     return {"schema": SCHEMA, "cell": manifest["cell"], "synthetic_cpu": manifest["synthetic_cpu"],
             "physical_updates": manifest["q"] * 6, "learned_saves": 16, "initializations": 1,

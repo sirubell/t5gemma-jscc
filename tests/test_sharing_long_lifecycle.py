@@ -98,13 +98,27 @@ def test_train_freeze_and_no_noise_first_final_cli(tmp_path, monkeypatch):
     final = cli.main(['evaluate', '--prepared', str(prepared), '--training-run', str(trained),
                      '--output', str(tmp_path / 'final'), '--timeout-seconds', '240'])
     assert final['status'] == 'complete' and len(final['completed_panels']) == 42
-    assert [condition for _, condition in calls] == ['no_noise'] * 7 + [c for c in (-6, 0, 6, 12, 18) for _ in range(7)]
+    assert [condition for _, condition in calls] == ['no_noise'] * 7 + ['vanilla'] + [c for c in (-6, 0, 6, 12, 18) for _ in range(7)]
+    assert final['vanilla_reference']['completed_items'] == 2
     shared_hashes = {p['checkpoint'] for p in final['completed_panels'] if p['learner'] == 'shared'}
     assert len(shared_hashes) == 1
     assert sum(p['site'] == 'enc_l14' for p in final['completed_panels']) == 6
     assert not torch.cuda.is_initialized()
     with pytest.raises(ValueError, match='fresh'):
         cli.main(['train', '--prepared', str(prepared), '--output', str(trained), '--timeout-seconds', '240'])
+    # A final panel that crosses its deadline cannot publish completion.
+    calls.clear()
+    original_deadline = sharing_long_run.check_long_deadline
+    def expire_when_last_panel_returns():
+        original_deadline()
+        if len(calls) == 43:
+            raise TimeoutError('fixture final panel crossed deadline')
+    monkeypatch.setattr(sharing_long_run, 'check_long_deadline', expire_when_last_panel_returns)
+    with pytest.raises(TimeoutError):
+        cli.main(['evaluate', '--prepared', str(prepared), '--training-run', str(trained),
+                  '--output', str(tmp_path / 'late-final'), '--timeout-seconds', '240'])
+    assert json.loads((tmp_path / 'late-final/result.json').read_text())['status'] == 'incomplete'
+    monkeypatch.setattr(sharing_long_run, 'check_long_deadline', original_deadline)
     # Training freeze evidence is immutable. Tampering fails before model loading.
     (trained / 'shared/metrics.jsonl').write_text('')
     monkeypatch.setattr(sharing_long_run, 'build_model', lambda config: pytest.fail('tampered freeze reached model'))
@@ -127,3 +141,48 @@ def test_requires_explicit_long_entry_and_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv('SHARING_LONG_DEADLINE_MONOTONIC', '0')
     with pytest.raises(TimeoutError):
         check_long_deadline()
+
+
+def test_timeout_after_training_inventory_is_incomplete(tmp_path, monkeypatch):
+    from jscc import sharing_run, sharing_long_run
+    torch.set_num_threads(1)
+    prepared, cli = fixture_package(tmp_path)
+    trained = tmp_path / 'trained'
+    monkeypatch.setattr(sharing_run, 'build_model', lambda config: (object(), sharing_model('D-N')))
+    original = sharing_long_run.check_long_deadline
+    def expire_after_inventory():
+        original()
+        if (trained / 'inventory.json').exists():
+            raise TimeoutError('fixture final inventory crossed deadline')
+    monkeypatch.setattr(sharing_long_run, 'check_long_deadline', expire_after_inventory)
+    with pytest.raises(TimeoutError):
+        cli.main(['train', '--prepared', str(prepared), '--output', str(trained), '--timeout-seconds', '240'])
+    result = json.loads((trained / 'campaign.json').read_text())
+    assert result['status'] == 'incomplete' and result['completed_updates'] == 24
+    assert (trained / 'study-freeze.json').exists()  # evidence retained, final evaluation still blocked
+
+
+def test_audited_final_task_is_retained_with_hash_and_rejects_corruption(tmp_path):
+    source = Path(__file__).resolve().parents[1] / 'scripts/prepare_sharing_native16.py'
+    spec = importlib.util.spec_from_file_location('retain_final_task_test', source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    task = task_template()
+    task.update(expected_items=10042, input_ids=list(range(10042)),
+                source_family_ids=[f'validation-{i}' for i in range(10042)], precision='bf16', backend='sdpa')
+    task['settings'].update(num_samples=10042, numerical_policy='native', batch_size=16,
+                            num_fewshot=5, scoring_policy='fp32-v1')
+    path = tmp_path / 'audited.json'
+    path.write_text(json.dumps(task))
+    output = tmp_path / 'output'
+    output.mkdir()
+    reference = module.retain_final_task(path, file_digest(path), output)
+    assert reference == {'path': 'final-task.json', 'sha256': file_digest(path)}
+    assert (output / reference['path']).read_bytes() == path.read_bytes()
+    with pytest.raises(ValueError, match='checksum'):
+        module.retain_final_task(path, '0' * 64, output)
+    task['input_ids'][-1] = 0
+    path.write_text(json.dumps(task))
+    with pytest.raises(ValueError, match='membership'):
+        module.retain_final_task(path, file_digest(path), output)

@@ -55,14 +55,19 @@ Layer 14 never participates in training or selection.
 
 Final evaluation uses the three terminal specialist checkpoints at their own
 sites and the **same terminal shared checkpoint** at layers 9, 19, final and
-held-out layer 14. The seven complete no-noise panels run first, followed by
+held-out layer 14. The seven complete codec no-noise panels and one matched full vanilla bypass
+reference run first, followed by
 seven panels each at −6, 0, 6, 12 and 18 dB. Each panel covers all 10,042 rows with
 five-shot lm-eval, FP32 scoring, compact per-item evidence, native BF16/SDPA and
 batch 16. A failed panel stops later work and preserves partial evidence. There
-is no best-checkpoint fallback or automatic retry. This makes 42 codec panels
-per width, without rerunning the already available vanilla baseline.
+is no best-checkpoint fallback or automatic retry. This makes 42 codec panels plus one full vanilla panel per width. The vanilla
+reference uses the same source, scorer and runtime; a 256-row baseline or a
+reference from a different runtime cannot substitute.
 
-Prepare real batches with the existing CPU-only script, then bind each named
+Prepare real batches with the existing CPU-only script, supplying the audited
+full-validation JSON with `--final-task FINAL_TASK.json --final-task-sha256 SHA256`.
+The script validates and retains that exact request as `final_task_request`;
+missing final requests cannot bind a long package. Then bind each named
 long task through `jscc.sharing_binding.bind_production`, using the explicit
 `sharing-dn-native16-long-v1` protocol and
 `K+0.1R-native-effective16-fresh-v1` recipe. The raw input manifest retains its
@@ -79,10 +84,13 @@ GPU entry commands require a clean tracked checkout at the approved commit and a
 Slurm allocation. Use the scheduler time limit plus an external `timeout` around
 the command; timeout values are per job. The entry uses the recorded training
 path rather than searching for a recent checkpoint. The simplest execution is
-three width training jobs and three matching final evaluation jobs after all
-training jobs succeed. Splitting individual learners would require collecting
+three width training jobs and three matching final evaluation job dependent on its own completed/frozen training job. The widths
+and configurations are fixed before launch; held-out results never retune
+other widths. A cross-width training barrier is unnecessary. Splitting individual learners would require collecting
 four jobs into the same verified freeze; that extra scheduling is deferred.
 No H200 smoke job, cumulative ledger or automatic publication is introduced.
+The inherited event writer rewrites each learner log per update; its long-horizon
+CPU/I/O cost is unmeasured and must be included in provisional timing.
 Actual submission waits for approval of the exact source, commands and finish
 window. CPU lifecycle tests establish software behavior, not native16 H200
 throughput, full-weight width-wide memory fit or scientific performance.

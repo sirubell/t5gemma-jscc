@@ -58,6 +58,8 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
     if native16:
         manifest.pop("execution_partition")
     if protocol_id == NATIVE16_LONG_PROTOCOL:
+        if quota != 6400 or "final_task_request" not in inputs:
+            raise ValueError("long binding requires q6400 inputs prepared with --final-task and its checksum")
         manifest["final_task_request"] = inputs["final_task_request"]
     _config_contract(config, manifest)
     output = Path(output).resolve()

@@ -23,17 +23,38 @@ from jscc.baseline_protocol import batch_identity, read_prepared_batch  # noqa: 
 from jscc.data.hellaswag import Collator  # noqa: E402
 from jscc.data.hellaswag_prompts import PromptBuilder, digest  # noqa: E402
 from jscc.presentation import PresentationSampler  # noqa: E402
-from jscc.sharing_preparation import _geometry_contract, _production_data_contract, _reference  # noqa: E402
+from jscc.sharing_preparation import (_geometry_contract, _production_data_contract, _reference,
+                                      validate_task_template)  # noqa: E402
 from jscc.sharing_schedule import NATIVE16_PROTOCOL, validate_native16_horizon  # noqa: E402
 from jscc.sharing_accumulation import partition_native64  # noqa: E402
 
 
-def prepare(*, template_path, template_sha256, assets, arrow, q, output):
+def retain_final_task(path, sha256, output, *, synthetic=False):
+    """Retain an explicitly audited final panel; never infer a new test split."""
+    path, output = Path(path), Path(output)
+    if file_digest(path) != sha256:
+        raise ValueError('final task checksum differs')
+    task = json.loads(path.read_text())
+    validate_task_template(task, {'model': {'dtype': 'float32' if synthetic else 'bfloat16',
+                                          'attn_implementation': task['backend']}},
+                           synthetic=synthetic, final=True)
+    target = output / 'final-task.json'
+    if target.resolve() != path.resolve():
+        shutil.copyfile(path, target)
+    return {'path': 'final-task.json', 'sha256': file_digest(target)}
+
+
+def prepare(*, template_path, template_sha256, assets, arrow, q, output,
+            final_task_path=None, final_task_sha256=None):
     """Regenerate prompts/padding from original rows, without cycling saved batches."""
     from datasets import Dataset
     from transformers import AutoConfig, AutoTokenizer, T5Gemma2ForConditionalGeneration
 
     q = validate_native16_horizon(q)
+    if (final_task_path is None) != (final_task_sha256 is None):
+        raise ValueError('final task path and checksum must be supplied together')
+    if final_task_path is not None and file_digest(Path(final_task_path)) != final_task_sha256:
+        raise ValueError('final task checksum differs')
     template_path, assets, arrow, output = map(lambda p: Path(p).resolve(),
                                              (template_path, assets, arrow, output))
     if file_digest(template_path) != template_sha256:
@@ -60,6 +81,8 @@ def prepare(*, template_path, template_sha256, assets, arrow, q, output):
     manifest = {key: copy.deepcopy(original[key]) for key in (
         'schema', 'status', 'model_revision', 'data_ids', 'validation', 'geometry',
         'producers', 'task_template', 'dataset_file', 'tokenizer_assets', 'provenance_policy')}
+    if final_task_path is not None:
+        manifest['final_task_request'] = retain_final_task(final_task_path, final_task_sha256, output)
     # Retain original panels for provenance, then explicitly split full rows to16.
     for reference in [*manifest['validation'], manifest['task_template'],
                       *manifest['geometry']['train'], *manifest['geometry']['selection'],
@@ -200,10 +223,13 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--template-sha256', required=True)
     parser.add_argument('--q', type=int, required=True)
+    parser.add_argument('--final-task', type=Path, help='explicit audited full10042 final-task JSON for long binding')
+    parser.add_argument('--final-task-sha256')
     args = parser.parse_args()
     torch.set_num_threads(1)
     path = prepare(template_path=args.template, template_sha256=args.template_sha256,
-                   assets=args.assets, arrow=args.arrow, q=args.q, output=args.output)
+                   assets=args.assets, arrow=args.arrow, q=args.q, output=args.output,
+                   final_task_path=args.final_task, final_task_sha256=args.final_task_sha256)
     print(path)
 
 
