@@ -130,6 +130,9 @@ def _site_policy(policy, *, learner="shared"):
 
 def validate_sharing_state(payload):
     """Reject drift in sharing kind, phase, schedule, views and exposure."""
+    if payload.get('metadata', {}).get('protocol_identity') == 'encoder-original6-native16-stages-v1':
+        from .encoder_stages_plan import validate_stages_state
+        return validate_stages_state(payload)
     if payload.get('metadata', {}).get('protocol_identity') == 'encoder-original6-native16-pilot-v1':
         from .encoder_pilot_plan import validate_pilot_state
         return validate_pilot_state(payload)

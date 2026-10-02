@@ -89,7 +89,8 @@ def observation_identity(request: dict[str, Any]) -> str:
     _count(request["expected_items"], "expected_items")
     _require(request["expected_items"] > 0, "empty panel")
     from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
-    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL)
+    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL,
+                                             'encoder-original6-native16-stages-v1')
                       and len(request["conditions"]) == 1 and request["conditions"][0] in CONDITIONS)
     _require(request["conditions"] == CONDITIONS or request["conditions"] == ["vanilla"] or long_condition,
              "unsupported condition grid")

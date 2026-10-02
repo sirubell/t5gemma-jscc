@@ -347,7 +347,8 @@ def codec_observation_identity(request):
     if request["schema"] != "codec-observation-v1":
         raise ValueError("Unsupported observation schema")
     from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
-    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL)
+    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL,
+                                             'encoder-original6-native16-stages-v1')
                       and len(request["conditions"]) == 1 and request["conditions"][0] in BASELINE_CONDITIONS)
     if tuple(request["conditions"]) != BASELINE_CONDITIONS and not long_condition:
         raise ValueError("Baseline observation requires the exact six conditions")

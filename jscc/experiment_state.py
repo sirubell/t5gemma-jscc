@@ -111,6 +111,9 @@ def _validate(payload):
         ):
             raise ValueError(f"missing {key}")
     count = metadata["completed_updates"]
+    phase_count = count
+    if metadata.get('protocol_identity') == 'encoder-original6-native16-stages-v1':
+        phase_count = metadata['sharing']['phase_local_completed']
     if payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
         from .sharing_state import validate_sharing_state
         validate_sharing_state(payload)
@@ -135,11 +138,11 @@ def _validate(payload):
             raise ValueError("inconsistent stream/update counters")
     if not isinstance(metadata["lineage"], list):
         raise ValueError("phase lineage must be explicit")
-    if payload["scheduler"].get("last_epoch") != count:
+    if payload["scheduler"].get("last_epoch") != phase_count:
         raise ValueError("scheduler/global update mismatch")
     if set(payload["rng"]) != {"python", "numpy", "torch", "cuda"}:
         raise ValueError("incomplete RNG state")
-    if count > 0 and not payload["optimizer"].get("state"):
+    if phase_count > 0 and not payload["optimizer"].get("state"):
         raise ValueError("missing optimizer moments")
     if payload["scaler"] is not None and not isinstance(payload["scaler"], dict):
         raise ValueError("invalid scaler state")
@@ -184,11 +187,11 @@ def _validate(payload):
                 or str(model_state[name].dtype) != dtype
             ):
                 raise ValueError("state parameter-map shape/dtype mismatch")
-            if count:
+            if phase_count:
                 moments = payload["optimizer"]["state"].get(identifier, {})
                 if not {"step", "exp_avg", "exp_avg_sq"} <= moments.keys():
                     raise ValueError("missing AdamW moments")
-                if moments["step"].item() != count:
+                if moments["step"].item() != phase_count:
                     raise ValueError("optimizer/global update mismatch")
                 for key in ("exp_avg", "exp_avg_sq"):
                     value = moments[key]
