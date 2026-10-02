@@ -1,5 +1,9 @@
 # Project guide
 
+## Research session quick start
+
+For research, experiment or Colab sessions, start with the concise [research workflow](docs/research-roadmap.md#研究工作流程2026-10-02), then the current local HANDOFF and assigned ticket. Colab setup is in [the runbook](docs/running.md#colab-runbook2026-10-02).
+
 ## Read the relevant documents
 
 - Start with README.md for both task workflows.
@@ -30,6 +34,10 @@ Keep passwords, access tokens and private keys out of both portable and local Ma
 
 Earlier real-environment checks predate the receiver-only decoder-memory correction and HellaSwag selection holdout. CPU regression tests do not establish full-weight performance of those changes. New GPU work requires a concrete experiment scope and budget; a historical COCO timeout is not a pending request to resume training.
 
+## Research validation
+
+Validate fixed input/model/checkpoint identities when loading the experiment. During training, retain GPU-assignment, nonfinite-value and save-success checks. Select checks below for the changed research behavior; unchanged configurations do not require a repeated whole experiment audit. Record training, evaluation and collection status separately so reporting or upload failures do not erase verified scientific results.
+
 ## Checks
 
 ```bash
@@ -41,7 +49,7 @@ uv run --locked python train.py --config configs/tasks/coco.yaml --check
 uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
 ```
 
-Use focused CPU tests for behavior changes. For documentation-only edits, check content, links and commands rather than starting model runs. Preserve unrelated user edits.
+For documentation-only edits, check content, links and commands rather than starting model runs. Preserve unrelated user edits.
 
 Use the project's uv-managed Pyright/Ruff rather than assuming the owner's editor tools exist. Model code is CUDA-generic; Slurm is optional. Do not claim that a full configuration fits an RTX 5090 based on an H200 run, or that a full sweep has been GPU-tested because its small-model tests pass.
 

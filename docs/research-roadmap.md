@@ -1,5 +1,25 @@
 # Research scope and open questions
 
+## 研究工作流程（2026-10-02）
+
+採用輕量的碩士研究流程。目標是在 **2026年10月6日（星期二）** 推進「所有原始 split points 共用 codec」研究；三個 encoder 位置是初步驗證，不是永久範圍。這是研究目標，不是完成保證或額外 GPU 授權。最新決策、執行狀態與結果以本機 [HANDOFF](local/research/HANDOFF.md) 和 [研究 tickets](local/research/wayfinder/codec-research/map.md) 為準；下方舊研究背景不代表目前尚未開始實驗。
+
+1. 開始時只確認任務、目前 owner、source commit、既有結果及下一步。固定實驗 branch 與完整 Git SHA，開發使用獨立、短名稱 worktree（例如 `development`）。不要修改正在執行的 pinned source；既有 [本機配置](local/research/analysis/git-deployment-layout-audit-20261001/WORKFLOW.md) 保留歷史路徑。
+2. Server 使用固定 checkout、必要 config／input／checkpoint／model assets，以及已存在的直接執行指令。先 `uv sync --locked` 建立環境，再使用該環境固定的 `.venv/bin/python`；已有驗證過的 host runtime 可沿用。不要為每個 config 重建部署框架或重做全套稽核。
+3. 改動行為才跑相應的 focused tests；共用核心變動或實際失敗需要時再擴大。每個 job 保留必要的 GPU assignment、input/checkpoint 身分與可讀性、nonfinite 停止、儲存成功檢查，以及每 job 終止上限與真實耗時。不要新增累積 GPU 剩餘額度報表；歷史 accounting 原樣保留。
+4. 可並行處理不重疊的工作，由一位 owner 負責整合與 deployment。明確交接一次；不要反覆詢問閒置 worker。完成後立即更新 ticket、evidence/result 路徑、科學結論與完成時間。Training、evaluation、collection/report/upload 分開記錄狀態；收集或上傳失敗不能抹去已驗證成功的科學工作，缺少必要 evaluation 時也不能宣稱整體完成。
+5. 對使用者用繁體中文，worker prompts 用英文；架構寫全名，例如「transmitter/receiver 各一層 Linear、無外部 LayerNorm」，不只寫 D-LN。Local sessions 偏好 GPT-6.1 Sol、High、Standard、非 Fast；這是使用者設定偏好，文件不會替 session 切換模型。
+
+新 canonical session 從 AGENTS.md 進入本節。新 worktree 應確認是否含此文件版本；**舊 frozen checkout 不會自動繼承新文件**，可直接讀 canonical 文件而不修改實驗 SHA。外部 server／Colab session 需由 owner 提供本指南、[Colab runbook](running.md#colab-runbook2026-10-02) 與必要任務摘要；ignored `docs/local/` 不會隨 clone 出現。不要假設文件尚未 commit／publish 時外部 clone 能讀到。
+
+可交給 worker 的簡短英文 prompt：
+
+> Read the current research workflow and assigned task handoff. Keep the experiment source pinned. Use the existing command and validated Python runtime, run focused checks for changed behavior, and report scientific status, elapsed time, artifact paths, and the next concrete blocker. Coordinate disjoint ownership with the integration owner; do not redesign the workflow or launch extra jobs.
+
+上述是流程偏好，不是 blanket authorization；沿用本次任務已給的 scope，缺少具體 action/target 時只指出真正缺口，不複製自訂 permission 規則。
+
+## Earlier research context
+
 The September report and project cleanup are complete. This document records research questions and possible comparisons, not an approved experiment plan or report deadline. The owner has selected local implementation of the COCO query/endpoint diagnostic and HellaSwag enc_l9 two-stage pilot; actual experiment jobs still await confirmation. The main research question remains how split location changes task quality and communication cost across COCO and HellaSwag. New model runs, including timing preflights, require an agreed question, protocol and budget.
 
 ## Current working baseline
