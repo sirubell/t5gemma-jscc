@@ -16,11 +16,12 @@ import torch
 import yaml
 
 from .activation_replay import canonical_digest, file_digest
-from .baseline_protocol import read_prepared_batch
+from .baseline_protocol import read_prepared_batch, _check_batches
 from .config import load_config
 from .presentation import tensor_digest
 from .sharing_protocol import batch_view
-from .sharing_schedule import SharingPlan, DEPTH_PROTOCOL
+from .sharing_schedule import (SharingPlan, DEPTH_PROTOCOL, NATIVE16_PROTOCOL,
+                               NATIVE16_WEIGHT_DECAY, native16_exposure, validate_native16_horizon)
 from .sharing_accumulation import partition_policy
 
 SCHEMA = "sharing-prepared-v1"
@@ -41,8 +42,10 @@ def source_inventory(source_root=None):
     root = Path(source_root or Path(__file__).resolve().parents[1]).resolve()
     names = {str(path.relative_to(root)) for path in (root / "jscc").rglob("*.py")}
     names |= {"scripts/shared_codec.py", "scripts/sharing_production.py", "scripts/sharing_qualification.py",
-              "scripts/render_experiment_report.py",
+              "scripts/render_experiment_report.py", "scripts/prepare_sharing_native16.py",
               "uv.lock", "pyproject.toml"}
+    if not (root / "scripts/prepare_sharing_native16.py").is_file():
+        names.discard("scripts/prepare_sharing_native16.py")
     return {name: file_digest(root / name) for name in sorted(names)}
 
 
@@ -104,9 +107,16 @@ def _verify(manifest, root, *, source_root=None):
     partition = manifest.get("execution_partition")
     if partition is not None and (not isinstance(partition, dict) or partition != partition_policy(partition.get("microbatch_size"))):
         raise ValueError("explicit supported execution partition required")
-    expected_size = 64 if partition is not None or not synthetic else 2
+    native16 = manifest.get("protocol_id") == NATIVE16_PROTOCOL
+    if native16:
+        validate_native16_horizon(q)
+        if partition is not None or size != 16 or (synthetic and q != 4):
+            raise ValueError("native16 requires physical16/accum1; CPU lifecycle q4 only")
+        if manifest.get("exposure_binding") != native16_exposure(q):
+            raise ValueError("native16 requires explicit horizon/exposure binding")
+    expected_size = 16 if native16 else 64 if partition is not None or not synthetic else 2
     quota = 400 if manifest.get("protocol_id") == DEPTH_PROTOCOL else 200
-    if type(q) is not int or type(size) is not int or (q, size) != (4 if synthetic else quota, expected_size):
+    if type(q) is not int or type(size) is not int or (q, size) != (q if native16 else 4 if synthetic else quota, expected_size):
         raise ValueError("production requires q200 or explicit q400/native64; synthetic CPU requires q4/batch2")
     for key in ("protocol_id", "model_revision", "study_pairing_id", "recipe_identity", "architecture_decision"):
         if not isinstance(manifest[key], str) or not manifest[key].strip():
@@ -144,6 +154,8 @@ def _verify(manifest, root, *, source_root=None):
         views.append(view)
     SharingPlan(tuple(views), manifest["study_pairing_id"], synthetic=synthetic,
                 protocol_id=manifest["protocol_id"])
+    if native16 and not synthetic:
+        read_native16_readiness_cases(root, manifest.get("readiness_cases"))
     validation = _batch_group(root, manifest["validation"])
     if sum(view.sequences for view in validation) != (2 if synthetic else 128):
         raise ValueError("objective validation panel count mismatch")
@@ -163,13 +175,13 @@ def _verify(manifest, root, *, source_root=None):
     state = torch.load(_reference(root, initialization), map_location="cpu", weights_only=True)
     if state_dict_identity(state) != initialization.get("state_identity"):
         raise ValueError("initial codec state identity mismatch")
-    if not synthetic and manifest["q"] == 400:
+    if not synthetic and (native16 or manifest["q"] == 400):
         from .models.codec import Codec
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(0)
             expected_initial = Codec(1152, config["codec"]).state_dict()
         if state_dict_identity(state) != state_dict_identity(expected_initial):
-            raise ValueError("q400 initialization must be fresh seed0; trained state cannot be reused")
+            raise ValueError("q400/native16 initialization must be fresh seed0; trained state cannot be reused")
     acceptance = manifest.get("gpu_acceptance")
     if acceptance is not None:
         _acceptance_receipt(root, manifest)
@@ -187,6 +199,29 @@ def _batch_group(root, references):
     return result
 
 
+def read_native16_readiness_cases(root, cases):
+    """Check immutable diagnostic inputs on CPU before constructing a model."""
+    if (not isinstance(cases, list) or len(cases) != 3
+            or any(not isinstance(case, dict) for case in cases)
+            or [case.get("label") for case in cases]
+            != ["representative", "longest_source", "longest_target"]):
+        raise ValueError("explicit native16 readiness cases required")
+    batches, identities = [], []
+    for case in cases:
+        reference = case.get("batch")
+        _reference(root, reference)
+        batch = read_prepared_batch(reference, root)
+        _check_batches([batch], "combined", 16)
+        view = batch_view(batch)
+        if view.sequences != 16:
+            raise ValueError("native16 readiness case requires physical16")
+        batches.append(batch)
+        identities.append(view.view_sha256)
+    if len(set(identities)) != 3:
+        raise ValueError("three distinct native16 readiness cases required")
+    return batches
+
+
 def _config_contract(config, manifest):
     synthetic = manifest["synthetic_cpu"]
     codec, model, training = config["codec"], config["model"], config["training"]
@@ -197,7 +232,22 @@ def _config_contract(config, manifest):
             or model["revision"] != manifest["model_revision"]
             or model.get("numerical_policy", "native") != "native"):
         raise ValueError("config violates sharing task/seed/site/model contract")
-    if manifest.get("q") == 400 or manifest.get("protocol_id") == DEPTH_PROTOCOL:
+    native16 = manifest.get("protocol_id") == NATIVE16_PROTOCOL
+    if native16:
+        q = validate_native16_horizon(manifest.get("q"))
+        if (manifest.get("cell") != "D-N" or manifest.get("batch_size") != 16
+                or manifest.get("execution_partition") is not None
+                or manifest.get("exposure_binding") != native16_exposure(q)
+                or manifest.get("recipe_identity") != "K+0.1R-native-effective16-fresh-v1"
+                or manifest.get("initialization_policy") != {
+                    "seed": 0, "fresh_cpu_codec": True, "baseline_state_reused": False}
+                or config.get("protocol") != NATIVE16_PROTOCOL
+                or training.get("max_steps") != q or training.get("schedule_steps") != q
+                or training.get("warmup_ratio") != .05 or training.get("min_lr_ratio") != 0
+                or training.get("valid_only_kl") is not True or training.get("loss_weights") is not None
+                or training.get("patience") is not None):
+            raise ValueError("native16 requires explicit fresh D-N terminal horizon/exposure recipe")
+    elif manifest.get("q") == 400 or manifest.get("protocol_id") == DEPTH_PROTOCOL:
         if (synthetic or manifest.get("q") != 400 or manifest.get("protocol_id") != DEPTH_PROTOCOL
                 or manifest.get("cell") != "D-N" or manifest.get("selected_bottleneck_dim") != 512
                 or manifest.get("batch_size") != 64 or codec["bottleneck_dim"] != 512
@@ -218,7 +268,7 @@ def _config_contract(config, manifest):
             raise ValueError("production codec differs from reviewed D-N/D-LN/R-LN/T-LN topology")
         if manifest.get("selected_bottleneck_dim") != width or width not in (512, 1152, 2304):
             raise ValueError("production requires explicit reviewed bottleneck binding")
-        if partition is None:
+        if partition is None and not native16:
             raise ValueError("production requires explicit qualified execution partition")
     if partition is None:
         microbatch, accumulation = manifest["batch_size"], 1
@@ -229,7 +279,7 @@ def _config_contract(config, manifest):
             raise ValueError("explicit selected bottleneck binding required")
         microbatch, accumulation = partition["microbatch_size"], partition["gradient_accumulation"]
     if (training["batch_size"] != microbatch or training["gradient_accumulation"] != accumulation
-            or training["lr"] != 2e-4 or training["weight_decay"] != .01
+            or training["lr"] != 2e-4 or training["weight_decay"] != (NATIVE16_WEIGHT_DECAY if native16 else .01)
             or training["grad_clip"] != 1 or training["temperature"] != 1
             or training["kl_weight"] != 1 or training["mse_weight"] != .1):
         raise ValueError("config differs from accepted native-batch optimizer/objective")
@@ -423,6 +473,17 @@ def _production_data_contract(root, manifest, task_template):
             or not set(role_rows["geometry_training"]) <= set(ids["train_rows"])
             or not set(role_rows["geometry_selection"]) <= set(ids["validation_rows"])):
         raise ValueError("actual batch rows violate declared optimization/selection roles")
+    if manifest.get("protocol_id") == NATIVE16_PROTOCOL:
+        from .presentation import PresentationSampler
+        stream = manifest.get("presentation_stream")
+        expected = {"policy": "epoch-permutations-v1", "seed": 20260920,
+                    "total_presentations": manifest["q"] * 16, "start_presentation": 0,
+                    "pool_identity": canonical_digest(ids["train_rows"])}
+        if stream != expected:
+            raise ValueError("native16 requires explicit complete-pool fresh presentation stream")
+        sampler = PresentationSampler(ids["train_rows"], manifest["q"] * 16, seed=stream["seed"])
+        if role_rows["optimization"] != sampler.actual_ids.tolist():
+            raise ValueError("native16 ordered rows differ from complete-pool epoch permutations")
     allowed = set(specs["optimization"]["data"]["source_family_ids"])
     if allowed != set(catalogs["train"].values()):
         raise ValueError("optimization producer pool differs from complete training family catalog")

@@ -13,7 +13,7 @@ from .models.channel import AWGNChannel
 from .models.split_model import resolve_encoder_site
 from .native64_baseline import reuse_encoder
 from .presentation import derived_seed, tensor_digest
-from .sharing_schedule import BatchView, SharingExposureLedger
+from .sharing_schedule import NATIVE16_PROTOCOL, NATIVE16_WEIGHT_DECAY, BatchView, SharingExposureLedger
 from .sharing_accumulation import micro_noise_key, partition_native64, partition_policy
 from .training import batch_losses
 
@@ -61,7 +61,8 @@ class SharingLearner(BaselineLearner):
         super().__init__(model, run_id=run_id, task='hellaswag', identity=identity,
                          pairing_id=plan.study_pairing_id, synthetic=True,
                          final_step=schedule.horizon, effective_batch=plan.batch_size,
-                         event_sink=event_sink, audit_policy='sparse_first_final')
+                         event_sink=event_sink, audit_policy='sparse_first_final',
+                         weight_decay=NATIVE16_WEIGHT_DECAY if plan.protocol_id == NATIVE16_PROTOCOL else .01)
         self.synthetic = plan.synthetic
         self.schedule = schedule
         self.exposure = SharingExposureLedger(schedule)

@@ -16,6 +16,7 @@ from jscc.native64_baseline import cpu
 from jscc.presentation import tensor_digest
 from jscc.sharing_run import _controls
 from jscc.sharing_state import build_sharing_state
+from jscc.sharing_schedule import NATIVE16_PROTOCOL
 
 
 def require(value, message):
@@ -176,8 +177,9 @@ def capture_accumulated(learner):
     try:
         with patch('torch.nn.utils.clip_grad_norm_', clipping), patch.object(learner.scheduler, 'step', scheduling):
             yield audit
-        require([r['micro'] for r in audit['microbatches']] == [0, 1, 2, 3]
-                and 'gradient' in audit, 'incomplete four-microbatch audit')
+        expected_micros = 1 if learner.schedule.plan.protocol_id == NATIVE16_PROTOCOL else 4
+        require([r['micro'] for r in audit['microbatches']] == list(range(expected_micros))
+                and 'gradient' in audit, 'incomplete physical-batch audit')
         require(audit['actions'] == {'clip': 1, 'optimizer': 1, 'scheduler': 1},
                 'effective update action counts differ')
     finally:
@@ -196,12 +198,12 @@ def audited_update(learner, parent):
     return audit
 
 
-def compare_accumulated(reference, actual):
+def compare_accumulated(reference, actual, *, expected_micros=4):
     target, gradient = reference['gradient'], actual['gradient']
     shape = target.shape == gradient.shape
     finite = bool(torch.isfinite(target).all() and torch.isfinite(gradient).all())
     failures = int((abs(gradient - target) > .0005 + .03 * abs(target)).sum()) if shape else -1
-    micros = (len(reference['microbatches']) == len(actual['microbatches']) == 4
+    micros = (len(reference['microbatches']) == len(actual['microbatches']) == expected_micros
               and state_exact(reference['microbatches'], actual['microbatches']))
     objective = all(abs(actual['losses'][k] - reference['losses'][k])
                     <= .0005 + .005 * abs(reference['losses'][k]) for k in ('K', 'R', 'total'))
@@ -212,7 +214,8 @@ def compare_accumulated(reference, actual):
             'gradient_failed_coordinates': failures, 'gradient_finite': finite,
             'gradient_relative_l2': float(torch.linalg.vector_norm(gradient - target)
                 / torch.linalg.vector_norm(target).clamp_min(1e-30)) if shape else None,
-            'all_four_micro_features_teachers_snr_draws_exact': micros,
+            'all_four_micro_features_teachers_snr_draws_exact': micros and expected_micros == 4,
+            'all_physical_features_teachers_snr_draws_exact': micros,
             'objective_tolerance_passed': objective, 'denominators_exact': denominators,
             'one_clip_optimizer_scheduler': actions, 'lr_exact': lr}
 
@@ -226,12 +229,18 @@ def checkpoint_roundtrip(learner, *, checkpoint_path, metadata):
         target_valid_per_view=[v.target_tokens for v in plan.views],
         padded_per_view=[v.padded_tokens for v in plan.views], batch_size=plan.batch_size,
         protocol_id=plan.protocol_id)
-    site = learner.sites[name.removeprefix('specialist_')]
+    sites = {key: learner.sites[key] for key in ('enc_l9', 'enc_l19', 'enc_fn')} if name == 'shared' else {
+        name.removeprefix('specialist_'): learner.sites[name.removeprefix('specialist_')]}
     details = {**metadata, 'parent_identity': None, 'lineage': [], 'phase': 'both',
         'sharing': sharing, 'completed_updates': learner.completed,
-        'evaluation_sites': {site.site_id: {'site': asdict(site), 'role': 'trained'}},
-        'site': asdict(site), 'snapshot_role': 'trained', 'execution_partition': learner.execution_partition,
+        'evaluation_sites': {key: {'site': asdict(site), 'role': 'trained'} for key, site in sites.items()},
+        'snapshot_role': 'trained', 'execution_partition': learner.execution_partition,
         'model_state_contract': 'codec-only-stateless-channel-v1', 'numerical_policy': 'native'}
+    if name != 'shared':
+        details['site'] = asdict(next(iter(sites.values())))
+    else:
+        details['evaluation_sites']['enc_l14'] = {
+            'site': asdict(learner.sites['enc_l14']), 'role': 'heldout_after_freeze'}
     details['comparison_controls'] = _controls(learner, details)
     before = snapshot(learner)
     reference = save_state(Path(checkpoint_path), model=learner.model.codec,
@@ -291,9 +300,11 @@ def same_shape_guard(reference, candidate, parents, *, checkpoint_path, metadata
     site = candidate.schedule.name.removeprefix('specialist_')
     require(site in ('enc_l9', 'enc_l19', 'enc_fn') and reference.schedule == candidate.schedule,
             'guard requires matching trained-site specialist schedules')
-    require(reference.microbatch_size == candidate.microbatch_size == 16
-            and reference.effective_batch == candidate.effective_batch == 64, 'guard requires explicit16x4')
-    require(not reference.enc_fn_reuse and candidate.enc_fn_reuse == (site == 'enc_fn'),
+    native16 = candidate.schedule.plan.protocol_id == NATIVE16_PROTOCOL
+    require(reference.microbatch_size == candidate.microbatch_size == (None if native16 else 16)
+            and reference.effective_batch == candidate.effective_batch == (16 if native16 else 64),
+            'guard requires explicit native16 or16x4')
+    require(not reference.enc_fn_reuse and candidate.enc_fn_reuse == (not native16 and site == 'enc_fn'),
             'reference must be generic; candidate cache is enc_fn only')
     zeros = snapshot(reference), snapshot(candidate)
     require(state_exact(comparable_state(zeros[0]), comparable_state(zeros[1]))
@@ -318,7 +329,8 @@ def same_shape_guard(reference, candidate, parents, *, checkpoint_path, metadata
         after_first = snapshot(candidate)
         cand_second = call(candidate, 1)
         terminal = snapshot(candidate)
-        comparisons = [compare_accumulated(ref_first, cand_first), compare_accumulated(ref_second, cand_second)]
+        comparisons = [compare_accumulated(ref_first, cand_first, expected_micros=1 if native16 else 4),
+                      compare_accumulated(ref_second, cand_second, expected_micros=1 if native16 else 4)]
         require(all(row['passed'] for row in comparisons), 'same-shape16x4 numerical guard failed')
         require(all(lr > 0 for lr in cand_second['lr_used'])
                 and not state_exact(zeros[1]['codec'], terminal['codec']), 'second update must change weights at nonzero LR')

@@ -18,8 +18,9 @@ import sys
 import time
 
 from .activation_replay import canonical_digest, file_digest
-from .baseline_protocol import bind_batch_identity, read_prepared_batch
+from .baseline_protocol import batch_identity, bind_batch_identity, read_prepared_batch
 from .sharing_accumulation import partition_policy
+from .sharing_schedule import NATIVE16_PROTOCOL
 from .sharing_controller import (
     binding_identity,
     _cleanup_group,
@@ -28,10 +29,21 @@ from .sharing_controller import (
     _watchdog,
     output_bytes,
 )
-from .sharing_preparation import load_prepared, state_dict_identity
+from .sharing_preparation import load_prepared, state_dict_identity, read_native16_readiness_cases
 
-GUARD_SHA256 = "1547ddf362d4bc5430f42d1f1e147895856b9d6646bc7d7554409dee88ac7ada"
+GUARD_SHA256 = "1f939a9c7c57e4ada3171a94a731754867d4364e43c62ea255ed8adc3f5d8d93"
 SITES = ("enc_l9", "enc_l19", "enc_fn")
+NATIVE16_PROBE_WORKLOAD = {"physical_updates": 30, "scientific_updates": 0,
+    "effective_batch": 16, "accumulation": 1, "sites": list(SITES),
+    "specialist_guard_updates": 15, "stress_updates": 9, "shared_updates": 6,
+    "objective_sequences": 16, "objective_conditions": ["no_noise", -6, 0, 6, 12, 18],
+    "task_documents": 16, "task_conditions": ["no_noise", 0],
+    "encoder_reuse": False, "production_qualification": False}
+NATIVE16_RUNNABILITY_WORKLOAD = {"physical_updates": 6, "scientific_updates": 0,
+    "effective_batch": 16, "accumulation": 1, "sites": list(SITES),
+    "shared_updates": 6, "checkpoint_roundtrips": 1, "task_documents": 0,
+    "objective_conditions": [], "encoder_reuse": False, "production_qualification": False}
+NATIVE16_MODES = ("native16-readiness-v1", "native16-runnability-v1")
 CONDITIONS = ["no_noise", -6, 0, 6, 12, 18]
 FINISH_BEFORE_EPOCH = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc).timestamp()
 
@@ -51,11 +63,16 @@ def validate_contract(path):
     _read_ref(contract["prepared"])
     manifest = load_prepared(contract["prepared"]["path"])
     config = manifest["resolved_config"]
+    native16 = contract.get("probe_mode") in NATIVE16_MODES
+    if native16:
+        _require(contract.get("target_class", "RTX5090") in ("RTX5090", "Spark"), "explicit supported local target required")
     _require(
         not manifest["synthetic_cpu"]
         and manifest["cell"] == "D-N"
         and manifest["selected_bottleneck_dim"] in (512, 1152, 2304)
-        and manifest["execution_partition"] == partition_policy(16)
+        and ((manifest.get("protocol_id") == NATIVE16_PROTOCOL and manifest["q"] == 8
+              and manifest["batch_size"] == 16 and manifest.get("execution_partition") is None)
+             if native16 else manifest.get("execution_partition") == partition_policy(16))
         and config["codec"]["architecture"] == "direct_affine"
         and config["codec"]["layernorm"] == "none",
         "exact D-N width/native16x4 package required",
@@ -80,7 +97,7 @@ def validate_contract(path):
     )
     cap = contract.get("hard_cap_seconds")
     _require(
-        type(cap) is int and 20 <= cap <= min(1200, manifest["hard_cap_seconds"]),
+        type(cap) is int and 20 <= cap <= min(600 if native16 else 1200, manifest["hard_cap_seconds"]),
         "explicit bounded cap required",
     )
     _require(
@@ -204,6 +221,38 @@ def preflight(path):
 def _admission(contract):
     from .sharing_admission import validate_overnight_admission
 
+    if contract.get("probe_mode") in NATIVE16_MODES:
+        # Future native16 dispatch needs exact owner approval and resource release,
+        # not a new cumulative-accounting schema or an old16x4 budget approval.
+        payload = _read_ref(contract["payload_receipt"])
+        workload = NATIVE16_RUNNABILITY_WORKLOAD if contract["probe_mode"] == "native16-runnability-v1" else NATIVE16_PROBE_WORKLOAD
+        _require(payload.get("schema") == "overnight-run-payload-approval-v1"
+                 and payload.get("status") == "APPROVED_FOR_BOUND_PAYLOAD"
+                 and payload.get("template_only") is False
+                 and payload.get("diagnostic_only") is True
+                 and payload.get("automatic_retry") is False
+                 and payload.get("scientific_promotion") is False
+                 and payload.get("ledger_owner") == "task-7"
+                 and all(payload.get(k) == contract[k] for k in (
+                     "run_id", "binding", "prepared", "target_assets", "expected_panel", "proposal", "finish_before_epoch"))
+                 and payload.get("cap_device_seconds") == contract["hard_cap_seconds"]
+                 and payload.get("workload") == workload,
+                 "exact coordinator-approved native16 diagnostic payload required")
+        proposal = _read_ref(contract["proposal"])
+        _require(proposal.get("probe_mode") == contract["probe_mode"]
+                 and proposal.get("target_class", "RTX5090") == contract.get("target_class", "RTX5090")
+                 and proposal.get("binding") == contract["binding"]
+                 and proposal.get("hard_cap_seconds") == contract["hard_cap_seconds"]
+                 and proposal.get("workload") == workload,
+                 "native16 immutable probe scope differs")
+        handoff = _read_ref(payload["owner_handoff"])
+        host = "Spark" if contract.get("target_class") == "Spark" else "5090B"
+        _require(handoff.get("status") == "released" and handoff.get("host") == host
+                 and handoff.get("run_id") == contract["run_id"]
+                 and bool(payload.get("sole_execution_owner"))
+                 and handoff.get("to_owner") == payload["sole_execution_owner"],
+                 "fresh execution-owner release required")
+        return payload
     return validate_overnight_admission(contract, diagnostic_only=True)
 
 
@@ -403,9 +452,21 @@ def controller(path):
 
 
 def validate_result(result, contract):
+    if contract.get("probe_mode") == "native16-runnability-v1":
+        _require(result.get("status") == "runnability_completed"
+                 and result.get("completed_updates") == 6 and result.get("scientific_updates") == 0
+                 and result.get("diagnostic_only") is True and result.get("production_qualified") is False
+                 and result.get("binding") == contract["binding"]
+                 and result.get("per_site_updates") == dict.fromkeys(SITES, 2)
+                 and result.get("checkpoint", {}).get("exact") is True
+                 and result.get("restored_fresh_state") is True
+                 and len(result.get("update_timings", [])) == 6,
+                 "six-step native16 runnability receipt required")
+        return
+    native16 = contract.get("probe_mode") == "native16-readiness-v1"
     _require(
         result.get("status") == "diagnostic_completed"
-        and result.get("completed_updates") == 24
+        and result.get("completed_updates") == (30 if native16 else 24)
         and result.get("diagnostic_only") is True
         and result.get("production_qualified") is False
         and result.get("binding") == contract["binding"]
@@ -423,18 +484,21 @@ def validate_result(result, contract):
             and guard.get("checkpoint", {}).get("exact") is True
             and guard.get("restored_second_update_exact") is True
             and len(record.get("stress_timings", [])) == 3
-            and objective.get("sequences") == 128
+            and objective.get("sequences") == (16 if native16 else 128)
             and len(objective.get("rows", [])) == 6
             and [row.get("condition") for row in objective["rows"]] == CONDITIONS
             and all(
-                row.get("completed") == 128 and row.get("failed") == 0
+                row.get("completed") == (16 if native16 else 128) and row.get("failed") == 0
                 for row in objective["rows"]
             )
-            and [row.get("condition") for row in tasks] == CONDITIONS
-            and all(row.get("candidate_forward_requests") == 1024 for row in tasks),
+            and [row.get("condition") for row in tasks] == (["no_noise", 0] if native16 else CONDITIONS)
+            and all(row.get("candidate_forward_requests") == (64 if native16 else 1024) for row in tasks),
             "all three guards/reloads/full128objective/full256task panels required",
         )
 
+    if native16:
+        _require(result.get("shared_updates") == 6 and result.get("shared_per_site_updates") == dict.fromkeys(SITES, 2)
+                 and result.get("scientific_updates") == 0, "native16 balanced shared diagnostic required")
 
 def worker(path):
     """All admission and actual-target checks precede any model construction."""
@@ -496,6 +560,8 @@ def worker(path):
         root,
         guard,
         expected_panel=_read_ref(contract["expected_panel"]),
+        target_class=contract.get("target_class", "RTX5090"),
+        few_steps_only=contract.get("probe_mode") == "native16-runnability-v1",
     )
 
 
@@ -523,8 +589,72 @@ def _verify_panel(directory, expected):
             )
 
 
+def _run_native16_few_steps(manifest, model, plan, batches, output, guard, model_loading_seconds):
+    """Six diagnostic shared updates and durable reload using the existing learner."""
+    import torch
+    from .sharing_protocol import SharingLearner
+    from .sharing_qualification_guard import checkpoint_roundtrip, snapshot, restore, state_exact
+
+    shared = SharingLearner(model, schedule=plan.learner("shared"), run_id="native16-runnability",
+        identity={"source": manifest["source_identity"], "config": manifest["config_identity"],
+                  "data": canonical_digest(manifest["data_ids"]), "parent": None},
+        model_revision=manifest["model_revision"], enc_fn_reuse=False, microbatch_size=None)
+    fresh = snapshot(shared)
+    metadata = {key: manifest[key] for key in ("source_identity", "config_identity", "model_revision",
+                                             "recipe_identity", "architecture_decision")}
+    metadata.update(initialization_identity=manifest["initialization"]["state_identity"],
+                    stream_identity=canonical_digest([asdict(view) for view in plan.views]),
+                    protocol_identity=manifest["protocol_id"])
+    def sync():
+        if not manifest["synthetic_cpu"]:
+            torch.cuda.synchronize()
+    result = {"status": "incomplete_no_retry", "diagnostic_only": True,
+        "production_qualified": False, "scientific_updates": 0, "completed_updates": 0,
+        "binding": binding_identity(manifest), "model_loading_seconds": model_loading_seconds,
+        "update_timings": [], "task_documents": 0, "objective_panels": 0,
+        "case_coverage": ["representative", "longest_source"],
+        "limits": ["Six updates test program execution; no numerical equivalence or quality acceptance.",
+                   "Longest-target case is CPU-verified but not exercised in this six-step path."]}
+    handle = model.base.register_forward_pre_hook(lambda *_: guard())
+    try:
+        for index in range(6):
+            guard()
+            update = shared.schedule.update_at(index)
+            sync()
+            started = time.monotonic()
+            event = shared.update([batches[update.site_local_index]])
+            sync()
+            seconds = time.monotonic() - started
+            exposure = event["payload"]["exposure"]
+            result["completed_updates"] += 1
+            result["update_timings"].append({"site": update.site, "seconds": seconds,
+                "exposure": exposure, "examples_per_second": exposure["sequences"] / seconds,
+                "source_valid_tokens_per_second": exposure["source_tokens"] / seconds,
+                "target_valid_tokens_per_second": exposure["target_tokens"] / seconds})
+        result["per_site_updates"] = {site: counts["updates"] for site, counts in shared.exposure.per_site.items()}
+        guard()
+        sync()
+        started = time.monotonic()
+        result["checkpoint"] = checkpoint_roundtrip(shared, checkpoint_path=output / "shared-checkpoint.pt",
+                                                    metadata=metadata)
+        sync()
+        result["checkpoint_seconds"] = time.monotonic() - started
+        result["six_updates_seconds"] = sum(row["seconds"] for row in result["update_timings"])
+        if not manifest["synthetic_cpu"]:
+            result["memory"] = {"peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                                "peak_reserved_bytes": torch.cuda.max_memory_reserved()}
+        restore(shared, fresh)
+        result["restored_fresh_state"] = state_exact(fresh, snapshot(shared))
+        _require(result["restored_fresh_state"], "few-step probe changed fresh state")
+        result["status"] = "runnability_completed"
+        return result
+    finally:
+        handle.remove()
+        _put(output / "result.json", result)
+
+
 def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
-                   model_bundle=None, target_class="RTX5090"):
+                   model_bundle=None, target_class="RTX5090", few_steps_only=False):
     """Actual reviewed numerical guard and panels; tiny CPU fixtures use this core."""
     import torch
     from .models.split_model import build_model
@@ -536,6 +666,9 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
     from .experiment_state import isolated_rng
     from .evaluation import evaluate_hellaswag
 
+    native16 = manifest.get("protocol_id") == NATIVE16_PROTOCOL
+    _require(not few_steps_only or native16, "few-step path requires native16")
+    stress = read_native16_readiness_cases(package_root, manifest.get("readiness_cases")) if native16 else []
     config = copy.deepcopy(manifest["resolved_config"])
     guard()
     configure_training_determinism(config["training"])
@@ -544,10 +677,15 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
         _require(
             torch.cuda.device_count() == 1
             and ((target_class == "RTX5090" and torch.cuda.get_device_name() == "NVIDIA GeForce RTX 5090")
+                 or (target_class == "Spark" and torch.cuda.get_device_name() == "NVIDIA GB10")
                  or (target_class == "H200" and torch.cuda.get_device_name().startswith("NVIDIA H200"))),
             "one exact requested diagnostic target required",
         )
+    load_started = time.monotonic()
     processor, model = build_model(config) if model_bundle is None else model_bundle
+    if not manifest["synthetic_cpu"]:
+        torch.cuda.synchronize()
+    model_loading_seconds = time.monotonic() - load_started
     if not manifest["synthetic_cpu"]:
         parameter = next(model.base.parameters())
         _require(
@@ -566,6 +704,11 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
         "actual model initialization mismatch",
     )
     batches = [read_prepared_batch(ref, package_root) for ref in manifest["updates"]]
+    if native16:
+        stress_views = {batch_identity(batch) for batch in stress}
+        remaining = [batch for batch in batches if batch_identity(batch) not in stress_views]
+        batches = stress + remaining[:5]
+        _require(len(batches) == 8, "eight distinct diagnostic views required")
     indexes = [
         0,
         max(
@@ -577,6 +720,8 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
             key=lambda i: int((batches[i]["labels"] != -100).sum(1).max()),
         ),
     ]
+    if native16:
+        indexes = [0, 1, 2]
     order = list(dict.fromkeys(indexes)) + [
         i for i in range(len(batches)) if i not in indexes
     ]
@@ -590,16 +735,24 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
         synthetic=manifest["synthetic_cpu"],
         protocol_id=manifest["protocol_id"],
     )
+    if few_steps_only:
+        return _run_native16_few_steps(manifest, model, plan, [batches[i] for i in order],
+                                      output, guard, model_loading_seconds)
     parents = [batches[i] for i in indexes]
     validation = [
         read_prepared_batch(ref, package_root) for ref in manifest["validation"]
     ]
+    if native16:
+        validation = validation[:1]
     template = manifest["task_template"]
     settings = copy.deepcopy(template["settings"])
     settings.update(
         noise_seed=template["noise"]["seed"],
         noise_namespace=template["noise"]["namespace"],
     )
+    if native16:
+        settings["num_samples"] = 16
+        expected_panel = {name: rows[:16] for name, rows in expected_panel.items()}
     result = {
         "status": "incomplete_no_retry",
         "diagnostic_only": True,
@@ -610,6 +763,8 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
         "diagnostic_order": order,
         "binding": binding_identity(manifest),
         "guard_sha256": GUARD_SHA256,
+        "scientific_updates": 0,
+        "native16_probe": native16,
     }
 
     def save():
@@ -617,7 +772,7 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
 
     def checked_update():
         guard()
-        _require(result["completed_updates"] < 24, "diagnostic update budget exhausted")
+        _require(result["completed_updates"] < (30 if native16 else 24), "diagnostic update budget exhausted")
 
     def sync():
         if not manifest["synthetic_cpu"]:
@@ -647,10 +802,10 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
                     "parent": None,
                 },
                 model_revision=manifest["model_revision"],
-                microbatch_size=16,
+                microbatch_size=None if native16 else 16,
             )
             reference = SharingLearner(model, enc_fn_reuse=False, **kwargs)
-            candidate = SharingLearner(model, enc_fn_reuse=site == "enc_fn", **kwargs)
+            candidate = SharingLearner(model, enc_fn_reuse=not native16 and site == "enc_fn", **kwargs)
             zero = snapshot(candidate)
             metadata = {
                 key: manifest[key]
@@ -727,7 +882,7 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
             directory = output / ("task-" + site)
             directory.mkdir()
             record["task"] = []
-            for condition in CONDITIONS:
+            for condition in (["no_noise", 0] if native16 else CONDITIONS):
                 guard()
                 sync()
                 started = time.monotonic()
@@ -755,7 +910,7 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
                 _verify_panel(directory, expected_panel)
                 _require(
                     metrics["candidate_forward_requests"]
-                    == 4 * template["expected_items"],
+                    == 4 * (16 if native16 else template["expected_items"]),
                     "candidate task request count differs",
                 )
                 record["task"].append(
@@ -772,9 +927,28 @@ def run_diagnostic(manifest, package_root, output, guard, *, expected_panel,
             restore(candidate, zero)
             record["status"] = "diagnostic_completed"
             save()
-        _require(
-            result["completed_updates"] == 24, "exact24 diagnostic updates required"
-        )
+        if native16:
+            model.codec.load_state_dict(manifest["initialization_state"], strict=True)
+            shared = SharingLearner(model, schedule=plan.learner("shared"), run_id="native16-shared-probe",
+                identity={"source": manifest["source_identity"], "config": manifest["config_identity"],
+                          "data": canonical_digest(manifest["data_ids"]), "parent": None},
+                model_revision=manifest["model_revision"], enc_fn_reuse=False)
+            zero = snapshot(shared)
+            timings = []
+            for index in range(6):
+                checked_update()
+                update = shared.schedule.update_at(index)
+                sync()
+                started = time.monotonic()
+                event = shared.update([batches[order[update.site_local_index]]])
+                sync()
+                result["completed_updates"] += 1
+                timings.append({"site": update.site, "seconds": time.monotonic() - started,
+                                "exposure": event["payload"]["exposure"]})
+            result.update(shared_updates=6, shared_per_site_updates={site: counts["updates"]
+                for site, counts in shared.exposure.per_site.items()}, shared_timings=timings)
+            restore(shared, zero)
+        _require(result["completed_updates"] == (30 if native16 else 24), "exact diagnostic updates required")
         result["status"] = "diagnostic_completed"
         return result
     finally:

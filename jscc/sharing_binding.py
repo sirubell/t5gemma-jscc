@@ -11,9 +11,9 @@ from .activation_replay import canonical_digest, file_digest
 from .config import load_config
 from .models.codec import Codec
 from .sharing_accumulation import partition_policy
-from .sharing_schedule import DEPTH_PROTOCOL
+from .sharing_schedule import DEPTH_PROTOCOL, NATIVE16_PROTOCOL, native16_exposure, validate_native16_horizon
 from .sharing_preparation import (_config_contract, _reference, source_inventory,
-                                  state_dict_identity, write_prepared)
+                                  state_dict_identity, write_prepared, read_native16_readiness_cases)
 
 
 def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck_dim,
@@ -29,15 +29,19 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
     if file_digest(inputs_path) != inputs_sha256:
         raise ValueError('reviewed input manifest checksum mismatch')
     inputs = json.loads(inputs_path.read_text())
-    quota = 400 if protocol_id == DEPTH_PROTOCOL else 200
+    native16 = protocol_id == NATIVE16_PROTOCOL
+    quota = validate_native16_horizon(inputs.get("q")) if native16 else 400 if protocol_id == DEPTH_PROTOCOL else 200
+    size = 16 if native16 else 64
+    if native16 and microbatch_size != 16:
+        raise ValueError("native16 binding requires physical16/accum1")
     if (inputs.get('schema') != 'sharing-production-inputs-v1'
             or inputs.get('status') != 'cpu_contracts_verified'
-            or (inputs.get('q'), inputs.get('batch_size')) != (quota, 64)):
+            or (inputs.get('q'), inputs.get('batch_size')) != (quota, size)):
         raise ValueError('reviewed complete production inputs required')
     config = load_config(config_path)
-    manifest = dict(schema='sharing-prepared-v1', synthetic_cpu=False, q=quota, batch_size=64,
+    manifest = dict(schema='sharing-prepared-v1', synthetic_cpu=False, q=quota, batch_size=size,
         cell=cell, selected_bottleneck_dim=bottleneck_dim,
-        execution_partition=partition_policy(microbatch_size),
+        execution_partition=None if native16 else partition_policy(microbatch_size),
         model_revision=inputs['model_revision'], architecture_decision=architecture_decision,
         protocol_id=protocol_id, study_pairing_id=study_pairing_id, recipe_identity=recipe_identity,
         hard_cap_seconds=hard_cap_seconds, config_identity=canonical_digest(config),
@@ -45,12 +49,21 @@ def bind_production(*, inputs_path, inputs_sha256, config_path, cell, bottleneck
         task_request=inputs['task_template'],
         production_input_origin={'sha256': inputs_sha256, 'path': str(inputs_path)},
         initialization_policy={'seed': 0, 'fresh_cpu_codec': True, 'baseline_state_reused': False})
+    if native16:
+        read_native16_readiness_cases(inputs_path.parent, inputs.get("readiness_cases"))
+        manifest.update(exposure_binding=native16_exposure(quota),
+                        presentation_stream=inputs.get("presentation_stream"),
+                        readiness_cases=inputs.get("readiness_cases"))
+    if native16:
+        manifest.pop("execution_partition")
     _config_contract(config, manifest)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     references = [*manifest['updates'], *manifest['validation'], manifest['task_request'],
                   *manifest['producers'].values(),
                   *(ref for group in manifest['geometry'].values() for ref in group)]
+    if native16:
+        references.extend(case["batch"] for case in manifest["readiness_cases"])
     copied = {}
     for reference in references:
         source = _reference(inputs_path.parent, reference)
