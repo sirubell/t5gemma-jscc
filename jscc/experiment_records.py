@@ -210,6 +210,9 @@ def _original13_objective_value(objective, site):
     decoder = site.startswith('dec_')
     weights = {'kl': float(objective['kind'] == 'combined'),
                'hidden': .05 if decoder else .1, 'memory': .05 if decoder else 0.}
+    _fields(objective['resolved_weights'], 'kl hidden memory', 'original13 weights')
+    for value in objective['resolved_weights'].values():
+        _number(value, 'original13 weight')
     _require(objective['resolved_weights'] == weights, 'original13 objective weights differ')
     total = 0.0
     for name, component in objective['components'].items():
@@ -242,24 +245,24 @@ def _update(p: dict[str, Any]) -> None:
         _require(type(p[key]) is bool, f"{key} must be boolean")
     _require(p["completed_step"] == p["attempted_step"] - int(p["skipped"] or p["nonfinite"]), "invalid completed axis")
     exposure = p["exposure"]
+    original13 = 'resolved_weights' in p['objective']
     _fields(exposure, "source_tokens target_tokens sequences padded_tokens valid_tokens cumulative_valid_tokens latent_width hidden_coordinates hidden_coordinates_allocated memory_coordinates memory_coordinates_allocated", "exposure")
     for key, value in exposure.items():
-        if key in ("memory_coordinates", "memory_coordinates_allocated"):
+        if key in ("memory_coordinates", "memory_coordinates_allocated") and not original13:
             _measure(value)
         else:
             _count(value, key)
     _require(exposure["padded_tokens"] >= exposure["valid_tokens"] and exposure["cumulative_valid_tokens"] >= exposure["valid_tokens"], "invalid token counters")
     _require(exposure["latent_width"] > 0, "latent width must be positive")
     _require(exposure["hidden_coordinates_allocated"] >= exposure["hidden_coordinates"], "invalid allocated hidden coordinates")
-    memory = exposure["memory_coordinates"]["value"]
-    allocated = exposure["memory_coordinates_allocated"]["value"]
+    memory = exposure["memory_coordinates"] if original13 else exposure["memory_coordinates"]["value"]
+    allocated = exposure["memory_coordinates_allocated"] if original13 else exposure["memory_coordinates_allocated"]["value"]
     _require((memory is None) == (allocated is None), "memory coordinate availability mismatch")
     if memory is not None:
         _count(memory, "memory_coordinates")
         _count(allocated, "memory_coordinates_allocated")
         _require(allocated >= memory, "invalid allocated memory coordinates")
     objective = p["objective"]
-    original13 = 'resolved_weights' in objective
     _fields(objective, "kind total components resolved_weights" if original13 else "kind total components", "objective")
     _require(objective["kind"] in (("reconstruction", "combined") if original13 else ("local", "combined")), "invalid objective kind")
     _measure(objective["total"])
