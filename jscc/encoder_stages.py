@@ -692,12 +692,14 @@ def original13_execution_guard(config, *, synthetic, timeout_seconds, device_uui
 
 def verify_original13_execution_source(manifest, approved_source):
     import subprocess
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     root = Path(__file__).resolve().parents[1]
-    current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+    current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, env=env, text=True).strip()
     if current != approved_source or manifest['source_commit'] != current:
         raise ValueError('original13 exact approved source commit required')
     names = sorted(manifest['source_inventory'])
     subprocess.run(['git', 'ls-files', '--error-unmatch', '--', *names], cwd=root,
-                   stdout=subprocess.DEVNULL, check=True)
+                   stdout=subprocess.DEVNULL, check=True, env=env)
     subprocess.run(['git', 'diff', '--exit-code', current, '--', *names], cwd=root,
-                   stdout=subprocess.DEVNULL, check=True)
+                   stdout=subprocess.DEVNULL, check=True, env=env)

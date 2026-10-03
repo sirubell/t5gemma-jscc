@@ -187,3 +187,17 @@ observations must match it in checkpoint `metadata.numerical_policy` and request
 `settings.numerical_policy`; their `precision` remains the stored-weight dtype.
 Objective requests and HellaSwag evaluation identities include the compute
 policy. No task-quality or GPU-fit improvement follows from selecting it.
+
+## Original13 universal codec experiment
+
+The opt-in original13 runner shares one direct-affine codec body across six
+encoder hidden boundaries, seven decoder hidden boundaries and receiver-memory
+transmission. It preserves clean memory on the transmitter prefix and reuses
+one reconstructed memory on the receiver suffix. The independent-memory-codec
+default above remains unchanged. The three widths and reconstruction/functional
+ratios are a fixed experimental cohort; see [training and state contracts](original13-training.md).
+Encoder reconstruction weights hidden nMSE by0.1; decoder reconstruction weights
+hidden and memory by0.05 each, with independent valid-sample denominators.
+Functional training adds valid-target-token KL with weight1.0. The durable update
+records keep each stream's raw/weighted value and numerator/denominator;
+uncomputed reconstruction KL and unneeded encoder memory stay unavailable.

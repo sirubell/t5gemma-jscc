@@ -222,3 +222,23 @@ def test_actual_stream_events_persist_and_reject_science_drift(tmp_path):
             p['exposure']['memory_coordinates_allocated'] = 0
         with pytest.raises(RecordError):
             validate_event(event)
+
+
+def test_execution_guard_rejects_unbounded_or_wrong_assignment_and_git_redirects(prepared, monkeypatch):
+    from jscc.encoder_stages import original13_execution_guard, verify_original13_execution_source
+    _, manifest = prepared
+    config = manifest['configs']['8']
+    for timeout in (None, 0, -1, float('nan'), float('inf')):
+        with pytest.raises(ValueError, match='finite positive'):
+            original13_execution_guard(config, synthetic=True, timeout_seconds=timeout)
+    with pytest.raises(ValueError, match='assigned CUDA'):
+        original13_execution_guard(config, synthetic=False, timeout_seconds=10)
+    gpu = deepcopy(config)
+    gpu['model']['device'] = 'cuda'
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'wrong')
+    with pytest.raises(ValueError, match='GPU UUID'):
+        original13_execution_guard(gpu, synthetic=False, timeout_seconds=10, device_uuid='GPU-required')
+    # Git process redirects must not change attribution of this source root.
+    monkeypatch.setenv('GIT_DIR', '/nonexistent/redirect.git')
+    verify_original13_execution_source(manifest, manifest['source_commit'])
+    assert not torch.cuda.is_initialized()

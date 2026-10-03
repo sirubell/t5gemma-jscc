@@ -2,8 +2,10 @@
 
 This extends the retained six-encoder A/E/R implementation with a separate,
 versioned original13 plan. It does not change legacy `EncoderStagesPlan`.
-The M1 interfaces include deliberately failing consumer stubs; this revision
-cannot train or score an original13 model until those consumers are integrated.
+The final routing and evaluation consumers are integrated. The direct CLI loads
+source-bound cached assets and supports fresh training, explicit complete-state
+continuation and frozen-terminal scoring. GPU fit and scientific results require
+separate target qualification and execution.
 
 ## Plan and input binding
 
@@ -42,13 +44,20 @@ uv run --locked python scripts/original13_training.py check \
   --prepared /absolute/new-prepared.json --prepared-sha256 PREPARED_FILE_SHA256
 ```
 
-The training CLI owns `bind` and `check` at M1; model construction and the
-train/resume command surface remain pending integration. The existing
+The training CLI supports `bind`, `check`, `train` and `resume`. Binding may
+record an explicit `--model-path` for an existing local snapshot. Execution uses
+that saved path with `local_files_only=True`; it cannot switch model paths.
+The prepared manifest records its full source commit and inventory. Execution
+requires `--approved-source`, a finite `--timeout-seconds`, and, on CUDA, an
+explicit `--device-uuid` matching CUDA_VISIBLE_DEVICES. Production requires CUDA;
+synthetic tiny CPU fixtures remain a separate software-validation path. The existing
 `scripts/encoder_stages.py` retains the legacy A/E/R CLI.
 
 ## Routing consumer API
 
-`jscc/original13_routing.py` is routing-owned. Its stubs fail explicitly.
+`jscc/original13_routing.py` supplies the real universal routes and role objectives.
+The integration owner consumed both reviewed routing commits, including final
+idle-runtime validation, and the evaluation delivery without changing the recipe.
 
 - `create_original13_learner(model, *, plan, metadata, event_sink)` returns a
   learner with the documented counters, exposure ledger, canonical parameters,
@@ -86,7 +95,7 @@ Supported continuation is within the same backend; cross-backend bitwise
 identity is not promised.
 
 `run_original13_training(model, processor, *, plan, batches, metadata,
-observation_request, output, guard, routing=None, observe=None, resume=None)`
+observation_request, output, guard, routing=None, observe=None, resume=None, config=None, data_ids=None)`
 runs into a fresh output directory. `resume` is an explicit `CheckpointRef`,
 not a best/latest search. A segment logs only its newly completed updates and
 retains its parent checkpoint and ancestry; global exposure is restored once.
@@ -113,7 +122,49 @@ questions. Initial terminal requests bind13 sites × two conditions and10042
 questions, five-shot/candidate16/FP32 scoring. Optional0/+6/+18 support remains
 separate. Real scorer/loader acceptance belongs to the consumer and final join.
 
-CPU tests with a mechanical routing adapter prove plan/state/runner behavior,
-including actual optimizer LR consumption and continuation. They do not prove
-real encoder/decoder routes, gradients, aliasing, scorer behavior or full-weight
-hardware fit. Final integration requires those real consumer implementations.
+Final joined CPU tests load a real tiny26-layer backbone/tokenizer from local
+serialized assets and exercise fresh native16 training, both real256-question
+observations, pre-reset continuation, canonical weights/Adam equivalence, isolated
+scoring failure and fatal restoration. The real decoder/harness consumer test
+runs without a routing skip. Mechanical26+39 terminal tests remain orchestration
+evidence, not full10042 task-quality results. Full-weight hardware fit remains
+unmeasured.
+
+## Direct execution after target qualification
+
+These commands are execution interfaces, not authorization to run them. Bind the
+exact source, target assets/UUID and finite caps in the experiment record first.
+Both training modes create a fresh output directory. Resume requires all three
+checkpoint reference fields; no best/latest selection or automatic retry occurs.
+
+```bash
+uv run --locked python scripts/original13_training.py train \
+  --prepared /absolute/prepared.json --prepared-sha256 PREPARED_SHA \
+  --width 2304 --ratio 90 --approved-source FULL_SOURCE_SHA \
+  --device-uuid GPU_UUID --timeout-seconds APPROVED_CAP \
+  --output /absolute/new-training-segment
+uv run --locked python scripts/original13_training.py resume \
+  --prepared /absolute/prepared.json --prepared-sha256 PREPARED_SHA \
+  --width 2304 --ratio 90 --approved-source FULL_SOURCE_SHA \
+  --device-uuid GPU_UUID --timeout-seconds APPROVED_CAP \
+  --resume-checkpoint /absolute/checkpoint.pt --resume-sha256 CHECKPOINT_SHA \
+  --resume-size CHECKPOINT_BYTES --output /absolute/new-continuation-segment
+uv run --locked python scripts/original13_evaluation.py request \
+  --training-run /absolute/frozen-segment --template /absolute/terminal-template.json \
+  --template-sha256 TEMPLATE_SHA --scope initial --output /absolute/new-request.json
+uv run --locked python scripts/original13_evaluation.py run \
+  --request /absolute/new-request.json --request-sha256 REQUEST_SHA \
+  --prepared /absolute/prepared.json --prepared-sha256 PREPARED_SHA \
+  --approved-source FULL_SOURCE_SHA --device-uuid GPU_UUID \
+  --timeout-seconds APPROVED_CAP --output /absolute/new-evaluation
+```
+
+The source guard checks the real repository with Git environment redirects
+removed and only runtime-inventory paths compared to the approved commit;
+unrelated local documentation edits do not change runtime identity. Fresh
+source changes require a new binding. The loader checks actual local input
+bytes/order, recipe, initializer and model dtype/backend/routes before execution.
+Each training segment retains config.yaml and data_ids.json, observation receipt
+references, explicit segment ancestry and separate observation status. Event
+validation accepts adopted per-role records with raw and weighted measures and
+valid denominators; legacy K/R records retain their existing checks.
