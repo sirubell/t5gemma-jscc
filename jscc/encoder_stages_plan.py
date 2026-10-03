@@ -418,7 +418,25 @@ def validate_original13_state(payload):
         raise ValueError('original13 complete exposure, ancestry or body contract differs')
     if progress['reset_count']:
         entry = metadata['lineage'][-1]
-        if (entry['completed_updates'] != plan.reconstruction_stop
+        if (len(metadata['lineage']) != 1 or set(entry) != {
+                'parent_sha256', 'parent_checkpoint', 'completed_updates', 'transfer'}
+                or entry['completed_updates'] != plan.reconstruction_stop
                 or entry['transfer'] != 'weights_only_reset_adam_lr'
                 or entry['parent_checkpoint']['sha256'] != metadata['parent_identity']):
             raise ValueError('original13 reset lineage differs')
+        _validate_original13_reference(entry['parent_checkpoint'])
+    elif metadata['lineage'] != []:
+        raise ValueError('original13 reconstruction state cannot have reset lineage')
+    for reference in metadata['segment_ancestry']:
+        _validate_original13_reference(reference)
+    if len({r['sha256'] for r in metadata['segment_ancestry']}) != len(metadata['segment_ancestry']):
+        raise ValueError('original13 segment ancestry repeats a checkpoint')
+
+
+def _validate_original13_reference(reference):
+    if (not isinstance(reference, dict) or set(reference) != {'path', 'sha256', 'size'}
+            or not isinstance(reference['path'], str) or not reference['path'].strip()
+            or not isinstance(reference['sha256'], str) or len(reference['sha256']) != 64
+            or any(c not in '0123456789abcdef' for c in reference['sha256'])
+            or type(reference['size']) is not int or reference['size'] <= 0):
+        raise ValueError('original13 ancestry requires complete checkpoint references')

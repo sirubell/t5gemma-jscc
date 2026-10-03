@@ -106,4 +106,3 @@ def run_stages_evaluation(model, processor, *, state, freeze_reference, template
         result.update(error={'type': type(error).__name__, 'message': str(error)}, elapsed_seconds=time.monotonic() - begun)
         write_manifest(output / 'result.json', result)
         raise
-

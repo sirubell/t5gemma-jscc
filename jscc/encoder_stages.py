@@ -453,21 +453,22 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
                                 'requires_explicit_completion': False} for step, role in plan.observations],
               'segment_parent': None if resume is None else asdict(resume)}
     write_manifest(output / 'campaign.json', result)
-    learner = routing.create_original13_learner(model, plan=plan, metadata=metadata,
-                                               event_sink=AppendOnlyEventWriter(output / 'metrics.jsonl').append)
-    state_machine = Original13TrainingState(learner, plan=plan, metadata=metadata, routing=routing)
-    if resume is not None:
-        restored = state_machine.restore(resume)
-        for observation in result['observations']:
-            if observation['step'] <= learner.completed:
-                observation.update(status='pending_prior_segment', requires_explicit_completion=True)
-        if learner.completed == plan.reconstruction_stop and learner.phase_start_step == 0:
-            state_machine.reset(restored)
-            reset = state_machine.save(output / f'step_{learner.completed:06d}_post_reset.pt')
-            result['checkpoints'].append({'role': 'post_reset', **asdict(reset.reference)})
-    initial_completed = learner.completed
-    bindings = [bind_batch_identity(b, expected_identity=v.view_sha256) for b, v in zip(batches, plan.views)]
+    learner = None
     try:
+        learner = routing.create_original13_learner(model, plan=plan, metadata=metadata,
+                                                   event_sink=AppendOnlyEventWriter(output / 'metrics.jsonl').append)
+        state_machine = Original13TrainingState(learner, plan=plan, metadata=metadata, routing=routing)
+        if resume is not None:
+            restored = state_machine.restore(resume)
+            for observation in result['observations']:
+                if observation['step'] <= learner.completed:
+                    observation.update(status='pending_prior_segment', requires_explicit_completion=True)
+            if learner.completed == plan.reconstruction_stop and learner.phase_start_step == 0:
+                state_machine.reset(restored)
+                reset = state_machine.save(output / f'step_{learner.completed:06d}_post_reset.pt')
+                result['checkpoints'].append({'role': 'post_reset', **asdict(reset.reference)})
+        initial_completed = learner.completed
+        bindings = [bind_batch_identity(b, expected_identity=v.view_sha256) for b, v in zip(batches, plan.views)]
         while True:
             guard()
             step = learner.completed
@@ -546,6 +547,7 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
         write_manifest(output / 'campaign.json', result)
         return result
     except Exception as exc:
-        result.update(completed_updates=learner.completed, error={'type': type(exc).__name__, 'message': str(exc)})
+        result.update(completed_updates=0 if learner is None else learner.completed,
+                      error={'type': type(exc).__name__, 'message': str(exc)})
         write_manifest(output / 'campaign.json', result)
         raise

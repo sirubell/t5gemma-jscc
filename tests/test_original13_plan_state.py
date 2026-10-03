@@ -290,7 +290,7 @@ def test_partial_payload_and_duplicate_body_are_rejected(tmp_path):
     with pytest.raises(ValueError, match='invalid checkpoint'):
         open_state(ref, expected=valid.payload['metadata'])
     original = state.routing
-    state.routing = type('DuplicateBody', (), {
+    cast(Any, state).routing = type('DuplicateBody', (), {
         'export_codec': staticmethod(lambda model: {**model.state_dict(), 'memory.weight': model.weight}),
         'observation_state': original.observation_state,
     })
@@ -298,3 +298,90 @@ def test_partial_payload_and_duplicate_body_are_rejected(tmp_path):
         state.save(tmp_path/'duplicate.pt')
     assert not (tmp_path/'duplicate.pt').exists()
     assert asdict(valid.reference)['sha256'] != ref.sha256
+
+
+def test_malformed_ancestry_rejected_and_multiple_segments_retained(tmp_path):
+    _, _, batches, _, state = mechanics()
+    advance(state, batches, 3)
+    state.ancestry = ['not-a-checkpoint-reference']
+    with pytest.raises(ValueError, match='complete checkpoint references'):
+        state.save(tmp_path/'bad.pt')
+    state.ancestry = []
+    first = state.save(tmp_path/'first.pt')
+    _, _, _, _, second = mechanics()
+    second.restore(first.reference)
+    advance(second, batches, 6)
+    second_saved = second.save(tmp_path/'second.pt')
+    _, _, _, _, third = mechanics()
+    third.restore(second_saved.reference)
+    assert [r['sha256'] for r in third.ancestry] == [first.reference.sha256, second_saved.reference.sha256]
+    assert third.learner.completed == 6
+    assert third.learner.exposure.completed == 6
+    assert len(third.learner.exposure.receipts) == 6
+
+
+def test_runner_pre_reset_resume_preserves_diagnostics_and_obligations(tmp_path):
+    import json
+    from pathlib import Path
+    from jscc.experiment_state import CheckpointRef, restore_rng
+    model, plan, batches, metadata, state = mechanics()
+    advance(state, batches, plan.reconstruction_stop)
+    saved = state.save(tmp_path/'pre-reset.pt')
+    rng = capture_rng()
+    state.reset(saved)
+    advance(state, batches, plan.horizon)
+    expected = deepcopy(model.state_dict())
+    fresh, _, _, _, _ = mechanics()
+    restore_rng(rng)
+    calls = []
+    def observe(*args, **kwargs):
+        calls.append(kwargs['request']['step'])
+        return observe_complete(*args, **kwargs)
+    result = run_original13_training(fresh, None, plan=plan, batches=batches, metadata=metadata,
+        observation_request={'panel': panel()}, output=tmp_path/'resumed', guard=lambda: None,
+        routing=MechanicalRouting, observe=observe, resume=saved.reference)
+    assert state_exact(fresh.state_dict(), expected)
+    assert result['segment_updates'] == plan.horizon-plan.reconstruction_stop
+    assert len(result['checkpoints']) == 6
+    assert calls == [plan.observations[1][0]]
+    assert result['observations'][0]['status'] == 'pending_prior_segment'
+    assert result['observations_status'] == 'pending'
+    freeze = json.loads(Path(result['freeze_reference']['path']).read_text())
+    assert freeze['segment_ancestry'][-1]['sha256'] == saved.reference.sha256
+    fresh, _, _, _, _ = mechanics()
+    bad = tmp_path/'bad-resume.pt'
+    bad.write_bytes(b'bad')
+    with pytest.raises(ValueError, match='checkpoint bytes differ'):
+        run_original13_training(fresh, None, plan=plan, batches=batches, metadata=metadata,
+            observation_request={'panel': panel()}, output=tmp_path/'bad-resumed', guard=lambda: None,
+            routing=MechanicalRouting, observe=observe, resume=CheckpointRef(str(bad), 'a'*64, 99))
+    failed = json.loads((tmp_path/'bad-resumed'/'campaign.json').read_text())
+    assert failed['status'] == 'incomplete' and failed['error']['type'] == 'ValueError'
+
+
+def test_factory_and_resumed_save_failures_record_campaign_errors(tmp_path, monkeypatch):
+    import json
+    import jscc.encoder_stages as stages
+    class BrokenRouting(MechanicalRouting):
+        @staticmethod
+        def create_original13_learner(*args, **kwargs):
+            raise RuntimeError('injected factory failure')
+    fresh, plan, batches, metadata, state = mechanics()
+    with pytest.raises(RuntimeError, match='factory failure'):
+        run_original13_training(fresh, None, plan=plan, batches=batches, metadata=metadata,
+            observation_request={'panel': panel()}, output=tmp_path/'factory', guard=lambda: None,
+            routing=BrokenRouting, observe=observe_complete)
+    assert json.loads((tmp_path/'factory'/'campaign.json').read_text())['error']['type'] == 'RuntimeError'
+    advance(state, batches, plan.reconstruction_stop)
+    saved = state.save(tmp_path/'pre-reset.pt')
+    fresh, _, _, _, _ = mechanics()
+    def failed_save(*args, **kwargs):
+        raise OSError('injected resumed save failure')
+    monkeypatch.setattr(stages, 'save_state', failed_save)
+    with pytest.raises(OSError, match='resumed save failure'):
+        run_original13_training(fresh, None, plan=plan, batches=batches, metadata=metadata,
+            observation_request={'panel': panel()}, output=tmp_path/'resumed-save', guard=lambda: None,
+            routing=MechanicalRouting, observe=observe_complete, resume=saved.reference)
+    failed = json.loads((tmp_path/'resumed-save'/'campaign.json').read_text())
+    assert failed['completed_updates'] == plan.reconstruction_stop
+    assert failed['error']['type'] == 'OSError'
