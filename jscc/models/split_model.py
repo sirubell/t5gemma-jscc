@@ -153,6 +153,7 @@ class SplitModel(nn.Module):
         self._payload_observer = None
         self._routing_active = False
         self._forward_active = 0
+        self._transmission_active = 0
         # Generation can call encoder/decoder stacks without base.forward.
         for guarded in (stack_module(base, "enc"), stack_module(base, "dec")):
             guarded.register_forward_pre_hook(self._enter_base_forward)
@@ -333,9 +334,11 @@ class SplitModel(nn.Module):
             )
         self.channel_uses = {"hidden": 0, "memory": 0}
         self.channel_uses_valid = {"hidden": 0, "memory": 0}
+        self._transmission_active += 1
         try:
             yield
         finally:
+            self._transmission_active -= 1
             (self.snr_db, self.bypass, self._encoder_valid_mask,
              self._decoder_valid_mask, self._active_encoder_valid_mask,
              self._encoder_mask_representation, self._decoder_mask_representation,

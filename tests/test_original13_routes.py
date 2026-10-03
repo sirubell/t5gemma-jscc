@@ -142,7 +142,14 @@ def test_separate_reconstruction_role_gradients_share_parameters(role):
 
 
 def test_alias_movement_strict_body_and_idle_restore():
-    model = make_model().to("cpu")
+    model = make_model()
+    parameter_ids = [id(p) for p in model.codec.parameters()]
+    model.to(dtype=torch.bfloat16)
+    assert all(p.dtype == torch.bfloat16 for p in model.codec.parameters())
+    assert model.memory_codec is model.codec
+    prepare_trainable_parameters(model)
+    assert all(p.dtype == torch.float32 for p in model.codec.parameters())
+    assert [id(p) for p in model.codec.parameters()] == parameter_ids
     assert model.memory_codec is model.codec
     assert len(list(model.parameters())) == len({id(p) for p in model.parameters()})
     weights = export_codec(model)
@@ -196,3 +203,110 @@ def test_generation_reuses_one_memory_transmission():
                            max_new_tokens=3, min_new_tokens=3, do_sample=False)
         assert len([event for event in events if event["stream"] == "memory"]) == 1
         assert len([event for event in events if event["stream"] == "hidden"]) == 3
+
+
+@pytest.mark.parametrize('invalid', (
+    'bypass', 'snr_nan', 'snr_shape', 'counter_negative', 'counter_missing', 'counter_bool',
+    'valid_exceeds_allocated', 'channel_stream', 'mask_shape', 'mask_value', 'mask_representation',
+    'additive_mask', 'backbone_mode', 'draw_shape', 'draw_hash', 'draw_missing', 'extra_field',
+))
+def test_runtime_rejects_malformed_state_before_mutation(invalid):
+    from jscc.sharing_qualification_guard import state_exact
+    model = make_model()
+    before = observation_state(model)
+    bad = deepcopy(before)
+    fields = bad['fields']
+    if invalid == 'bypass':
+        fields['bypass'] = 'yes'
+    elif invalid == 'snr_nan':
+        fields['snr_db'] = float('nan')
+    elif invalid == 'snr_shape':
+        fields['snr_db'] = torch.ones(2, 3)
+    elif invalid == 'counter_negative':
+        fields['channel_uses']['hidden'] = -1
+    elif invalid == 'counter_missing':
+        del fields['channel_uses']['memory']
+    elif invalid == 'counter_bool':
+        fields['channel_uses']['hidden'] = True
+    elif invalid == 'valid_exceeds_allocated':
+        fields['channel_uses_valid']['memory'] = 1
+    elif invalid == 'channel_stream':
+        bad['channel_stream'] = 'unknown'
+    elif invalid.startswith('mask_') or invalid == 'additive_mask':
+        fields['_encoder_valid_mask'] = torch.ones(2, 3)
+        fields['_encoder_mask_representation'] = 'binary'
+        if invalid == 'mask_shape':
+            fields['_encoder_valid_mask'] = torch.ones(2, 3, 4)
+        elif invalid == 'mask_value':
+            fields['_encoder_valid_mask'][0, 0] = float('nan')
+        elif invalid == 'mask_representation':
+            fields['_encoder_mask_representation'] = 'unsupported'
+        else:
+            fields['_encoder_mask_representation'] = 'additive'
+    elif invalid == 'backbone_mode':
+        bad['modes']['base'] = True
+    elif invalid.startswith('draw_'):
+        bad['draw_summaries'] = [{'stream': 'hidden', 'shape': [2, 3, 8],
+                                 'dtype': 'torch.float32', 'epsilon_sha256': 'a'*64}]
+        if invalid == 'draw_shape':
+            bad['draw_summaries'][0]['shape'][0] = -1
+        elif invalid == 'draw_hash':
+            bad['draw_summaries'][0]['epsilon_sha256'] = 'unsupported'
+        else:
+            del bad['draw_summaries'][0]['dtype']
+    else:
+        fields['active_route'] = True
+    with pytest.raises(ValueError):
+        restore_runtime_state(model, bad)
+    assert state_exact(observation_state(model), before)
+
+
+def test_open_transmission_and_replay_cannot_export_or_restore_idle_state():
+    model = make_model()
+    before = observation_state(model)
+    with model.transmission(3., bypass=True):
+        assert model._transmission_active == 1
+        with pytest.raises(ValueError, match='idle'):
+            observation_state(model)
+        with pytest.raises(ValueError, match='idle'):
+            restore_runtime_state(model, before)
+        with model.transmission(None):
+            assert model._transmission_active == 2
+    assert model._transmission_active == 0
+    with model.channel.replay(0, 'active-test'):
+        with pytest.raises(ValueError, match='idle'):
+            observation_state(model)
+    restore_runtime_state(model, before)
+    assert observation_state(model) == before
+
+
+def test_native_bos2_pad0_decoder_prefix_capture(monkeypatch):
+    model, data = make_model(), batch()
+    decoder = model.base.get_decoder()
+    original_forward = decoder.forward
+    seen = []
+    def record(*args, **kwargs):
+        seen.append(kwargs['input_ids'].clone())
+        return original_forward(*args, **kwargs)
+    monkeypatch.setattr(decoder, 'forward', record)
+    site = resolve_original13_site(model.base, 'dec_l8', 'tiny-original13')
+    with model.at_site(site, purpose='capture', authorization={'sites': {site.site_id: 'trained'}}):
+        capture_online_original13_targets(model, data, site)
+    assert len(seen) == 1
+    assert torch.equal(seen[0], torch.tensor([[2, 7, 8, 1], [2, 9, 1, 0]]))
+
+
+@pytest.mark.parametrize('site_id', ('enc_emb', 'enc_fn', 'dec_l0', 'dec_l24'))
+def test_universal_role_power_policies(site_id, monkeypatch):
+    import jscc.models.split_model as split_module
+    model, data = make_model(), batch()
+    site = resolve_original13_site(model.base, site_id, 'tiny-original13')
+    calls = []
+    normalize = split_module.normalize_power
+    def record(z, valid_mask=None, *, token_wise=False, mask_representation=None):
+        calls.append(token_wise)
+        return normalize(z, valid_mask, token_wise=token_wise, mask_representation=mask_representation)
+    monkeypatch.setattr(split_module, 'normalize_power', record)
+    with model.at_site(site, purpose='train', authorization={'sites': {site_id: 'trained'}}):
+        original13_reconstruction_batch_values(model, data, None, settings(site_id), site=site)
+    assert calls == ([True, False] if site_id.startswith('dec_') else [False])
