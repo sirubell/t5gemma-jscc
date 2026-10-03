@@ -248,15 +248,18 @@ def _update(p: dict[str, Any]) -> None:
     original13 = 'resolved_weights' in p['objective']
     _fields(exposure, "source_tokens target_tokens sequences padded_tokens valid_tokens cumulative_valid_tokens latent_width hidden_coordinates hidden_coordinates_allocated memory_coordinates memory_coordinates_allocated", "exposure")
     for key, value in exposure.items():
-        if key in ("memory_coordinates", "memory_coordinates_allocated") and not original13:
+        if key in ("memory_coordinates", "memory_coordinates_allocated") and (not original13 or isinstance(value, dict)):
             _measure(value)
         else:
             _count(value, key)
     _require(exposure["padded_tokens"] >= exposure["valid_tokens"] and exposure["cumulative_valid_tokens"] >= exposure["valid_tokens"], "invalid token counters")
     _require(exposure["latent_width"] > 0, "latent width must be positive")
     _require(exposure["hidden_coordinates_allocated"] >= exposure["hidden_coordinates"], "invalid allocated hidden coordinates")
-    memory = exposure["memory_coordinates"] if original13 else exposure["memory_coordinates"]["value"]
-    allocated = exposure["memory_coordinates_allocated"] if original13 else exposure["memory_coordinates_allocated"]["value"]
+    memory_field, allocated_field = exposure['memory_coordinates'], exposure['memory_coordinates_allocated']
+    memory = memory_field['value'] if isinstance(memory_field, dict) else memory_field
+    allocated = allocated_field['value'] if isinstance(allocated_field, dict) else allocated_field
+    if original13:
+        _require((memory is not None) == p['site_id'].startswith('dec_'), 'original13 memory payload role differs')
     _require((memory is None) == (allocated is None), "memory coordinate availability mismatch")
     if memory is not None:
         _count(memory, "memory_coordinates")

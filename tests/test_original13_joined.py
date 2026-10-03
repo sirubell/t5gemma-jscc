@@ -195,3 +195,30 @@ def test_loader_identity_rejection_before_model_construction(prepared, monkeypat
         load_original13_prepared(path, checksum=file_digest(path), width=8, ratio=90)
     with pytest.raises(ValueError, match='prepared SHA'):
         load_original13_prepared(path, checksum='a'*64, width=8, ratio=90)
+
+
+def test_actual_stream_events_persist_and_reject_science_drift(tmp_path):
+    from jscc.experiment_records import AppendOnlyEventWriter, RecordError, read_events, validate_event
+    from test_original13_objectives import real_setup, advance
+    learner, _, batches = real_setup()
+    learner.event_sink = AppendOnlyEventWriter(tmp_path/'metrics.jsonl').append
+    for _ in range(7):
+        advance(learner, batches)
+    events = read_events(tmp_path/'metrics.jsonl')
+    assert len(events) == 7
+    assert events[0]['payload']['exposure']['memory_coordinates']['value'] is None
+    assert events[0]['payload']['objective']['components']['memory']['raw']['value'] is None
+    assert events[-1]['payload']['exposure']['memory_coordinates'] > 0
+    for mutation in ('coefficient', 'partial_component', 'denominator', 'payload'):
+        event = deepcopy(events[-1])
+        p = event['payload']
+        if mutation == 'coefficient':
+            p['objective']['resolved_weights']['hidden'] = .1
+        elif mutation == 'partial_component':
+            p['objective']['components']['kl']['weighted'] = {'value': 0, 'reason': None}
+        elif mutation == 'denominator':
+            p['objective']['components']['memory']['denominator'] = 0
+        else:
+            p['exposure']['memory_coordinates_allocated'] = 0
+        with pytest.raises(RecordError):
+            validate_event(event)
