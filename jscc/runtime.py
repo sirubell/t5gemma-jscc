@@ -148,6 +148,9 @@ def precision_telemetry(model, optimizer=None):
         "frozen_parameters": _dtype_counts(value for _, value in frozen),
         "trainable_parameter_names": [name for name, _ in trainable],
     }
+    if getattr(model, "numerical_policy", "native") != "native":
+        from .models.precision import compute_provenance
+        telemetry["numerical_runtime"] = compute_provenance(model, include_cache=True)
     if optimizer is not None:
         optimizer_values = [value for state in optimizer.state.values()
                             for value in state.values()

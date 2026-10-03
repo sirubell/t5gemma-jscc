@@ -21,3 +21,8 @@ uv run --locked python scripts/recompute_coco.py path/to/captions_no_noise.jsonl
 ```
 
 Keep historical manifests, source hashes and result paths with their archived evidence. A new execution needs a fresh recipe and source binding; moving a script does not revise an earlier result or authorize another run.
+
+## Versioned baseline and local records
+
+- `encfn_baseline.py` previews the finite four-cell plan, executes one explicitly prepared segment, or writes exact comparisons for a complete campaign. See [baseline guide](../docs/encfn-baseline.md).
+- `render_experiment_report.py` verifies saved scalar/artifact inventories and creates local PNG/CSV/HTML reports. See [records guide](../docs/experiment-records.md). It does not load models or launch jobs.

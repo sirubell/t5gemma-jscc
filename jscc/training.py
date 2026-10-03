@@ -237,6 +237,8 @@ def train(config, resume: str | Path | None = None,
         raise ValueError("fixed presentation study is fresh-only; exact resume unsupported")
     resume_path = Path(resume) if resume is not None else None
     state = torch.load(resume_path, map_location="cpu", weights_only=True) if resume_path else None
+    if state and state.get("schema") == "experiment-state-v2":
+        raise ValueError("versioned state requires the baseline lifecycle, not legacy resume")
     transfer = None
     if initial_checkpoint is not None:
         from .local_reconstruction import validate_phase_transfer

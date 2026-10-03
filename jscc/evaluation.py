@@ -228,7 +228,8 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
             evidence = write_compact_evidence(
                 output, result, adapter, identity, condition, model,
                 {"algorithm": "awgn-independent-streams-shared-epsilon-v1", "seed": settings["noise_seed"],
-                 "namespace": "evaluation-v1"} if "noise_seed" in settings else "legacy-global-rng",
+                 "namespace": settings.get("noise_namespace", "evaluation-v1")}
+                if "noise_seed" in settings else "legacy-global-rng",
                 settings.get("run_identity"), fewshots=fewshots)
         else:
             with (output / f"samples_{condition}.jsonl").open("w") as stream:
@@ -252,6 +253,8 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
     state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     from .checkpoint_policy import validate_checkpoint_step
     validate_checkpoint_step(state, expected_step)
+    if state.get("schema") == "experiment-state-v2" or state.get("kind") in ("single_site_v2", "shared_encoder_v2"):
+        raise ValueError("Versioned checkpoints require evaluate_checkpoint and its metadata gate")
     config = copy.deepcopy(state["config"])
     settings = config["evaluation"]
     if overrides_path:
@@ -326,3 +329,429 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
         }, indent=2) + "\n")
     print(f"Evaluation: {output}", flush=True)
     return output
+
+
+BASELINE_CONDITIONS = ("no_noise", -6, 0, 6, 12, 18)
+
+
+def codec_observation_identity(request):
+    """Bind result reuse to the entire execution request, unlike input comparability."""
+    required = {"schema", "checkpoint_sha256", "target_site", "target_role", "task",
+                "input_ids", "source_family_ids", "prompt_policy", "noise", "layout",
+                "backend", "precision", "scorer", "reference_corpus", "source",
+                "expected_items", "settings", "data_settings", "conditions", "config", "data",
+                "parent", "panel", "protocol", "learner_kind", "step"}
+    missing = required - request.keys()
+    if missing:
+        raise ValueError(f"Observation request missing fields: {sorted(missing)}")
+    if request["schema"] != "codec-observation-v1":
+        raise ValueError("Unsupported observation schema")
+    from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
+    long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL,
+                                             'encoder-original6-native16-stages-v1')
+                      and len(request["conditions"]) == 1 and request["conditions"][0] in BASELINE_CONDITIONS)
+    if tuple(request["conditions"]) != BASELINE_CONDITIONS and not long_condition:
+        raise ValueError("Baseline observation requires the exact six conditions")
+    count = request["expected_items"]
+    if type(count) is not int or count < 1:
+        raise ValueError("expected_items must be a positive integer")
+    if (len(request["input_ids"]) != count or len(request["source_family_ids"]) != count
+            or len(set(request["input_ids"])) != count
+            or any(value is None or value == "" for value in request["source_family_ids"])):
+        raise ValueError("Observation requires unique input IDs and actual source-family IDs")
+    if request["task"] not in ("hellaswag", "coco"):
+        raise ValueError("Unsupported observation task")
+    if (type(request["noise"].get("seed")) is not int
+            or not request["noise"].get("namespace")):
+        raise ValueError("Observation requires explicit noise seed and namespace")
+    for key in ("checkpoint_sha256", "target_site", "target_role", "prompt_policy", "layout",
+                "backend", "precision", "scorer", "reference_corpus", "source"):
+        if not request[key]:
+            raise ValueError(f"Observation identity requires {key}")
+    import hashlib
+    projected = observation_record_request(request)
+    encoded = json.dumps(projected, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(b"codec-observation-v1\0" + encoded).hexdigest()
+
+
+def _observation_items(output, task, condition):
+    """Read the actual adapter evidence, never infer completion from requested count."""
+    name = f"captions_{condition}.jsonl" if task == "coco" else f"compact_{condition}.jsonl"
+    path = output / name
+    if not path.exists():
+        raise ValueError(f"Missing per-item evidence: {name}")
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if task == "coco":
+        ids = [row["image_id"] for row in rows]
+        families = ids  # Each COCO image is the source family for its captions.
+    else:
+        document_path = output / "documents.jsonl"
+        if document_path.exists():
+            documents = {row["sample_id"]: row for row in
+                         (json.loads(line) for line in document_path.read_text().splitlines() if line.strip())}
+            for row in rows:
+                document = documents[row["sample_id"]]
+                prediction = row["normalized_prediction"]
+                row["tokens"] = document["requests"][prediction]["continuation_token_ids"]
+                row["tokens_policy"] = "normalized-prediction-continuation-v1"
+        ids = [row["sample_id"] for row in rows]
+        families = [row["source_id"] for row in rows]
+    return rows, ids, families
+
+
+def evaluate_checkpoint(validated_state, request, *, model, processor, data=None, output):
+    """Run a gated v2 six-condition observation through the existing task adapters.
+
+    The caller opens the checkpoint through experiment_state first. Each condition
+    has a fresh directory; partial evidence and failures remain in the receipt.
+    No count here certifies scientific quality or a validation threshold.
+    """
+    from .experiment_state import capture_rng, restore_rng, isolated_rng as state_isolated_rng, open_state
+    identity = codec_observation_identity(request)
+    reopened = open_state(validated_state.reference, expected=validated_state.payload["metadata"])
+    if not _state_payload_equal(validated_state.payload, reopened.payload):
+        raise ValueError("Validated state payload was modified after checkpoint validation")
+    validated_state = reopened
+    site, authorization = validate_evaluation_target(validated_state, request, model)
+    settings = copy.deepcopy(request["settings"])
+    settings["noise_seed"] = request["noise"]["seed"]
+    settings["noise_namespace"] = request["noise"]["namespace"]
+    if request["task"] == "hellaswag":
+        settings["evidence_mode"] = "compact-v1"
+    if settings.get("num_samples") != request["expected_items"]:
+        raise ValueError("Adapter sample limit differs from observation request")
+    if request["task"] == "coco" and (data is None or len(data.report) != request["expected_items"]):
+        raise ValueError("COCO report membership must be prepared before evaluation")
+    if not hasattr(model.channel, "replay"):
+        raise ValueError("Versioned evaluation requires replay-capable channel")
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    receipt = {"schema": "codec-observation-v1", "identity": identity,
+               "request": copy.deepcopy(request), "status": "incomplete", "conditions": [], "reuse": None}
+
+    def persist():
+        temporary = output / "observation.json.tmp"
+        temporary.write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
+        temporary.replace(output / "observation.json")
+
+    persist()
+    previous_state = copy.deepcopy(model.codec.state_dict())
+    previous_rng = capture_rng()
+    previous_training = model.training
+    try:
+        model.codec.load_state_dict(validated_state.payload["model"])
+        model.eval()
+        for condition in request["conditions"]:
+            condition_output = output / str(condition)
+            condition_output.mkdir()
+            started = time.perf_counter()
+            row = {"condition": condition, "requested": request["expected_items"],
+                   "completed": 0, "failed": 0, "unobserved": request["expected_items"],
+                   "denominator": 0, "status": "incomplete", "metrics": {}, "items": []}
+            try:
+                snr = None if condition == "no_noise" else float(condition)
+                with state_isolated_rng(settings["noise_seed"]), model.channel.replay(
+                        settings["noise_seed"], request["noise"]["namespace"]), \
+                        model.at_site(site, purpose="evaluate", authorization=authorization), model.transmission(snr):
+                    if request["task"] == "coco":
+                        metrics = evaluate_coco(model, processor, data, settings, condition_output,
+                                                condition, request["data_settings"])
+                    else:
+                        metrics = evaluate_hellaswag(model, processor, settings, condition_output,
+                                                     condition, request["data_settings"])
+                items, ids, families = _observation_items(condition_output, request["task"], condition)
+                row.update(completed=len(items), denominator=len(items), items=items, metrics=metrics,
+                           unobserved=max(0, request["expected_items"] - len(items)))
+                if ids != request["input_ids"] or families != request["source_family_ids"]:
+                    raise ValueError("Observed item/source-family order differs from request")
+                row.update(completed=len(items), denominator=len(items), unobserved=0,
+                           metrics=metrics, items=items, status="complete",
+                           channel_uses_allocated=dict(getattr(model, "channel_uses_allocated", model.channel_uses)),
+                           channel_uses_valid=(dict(model.valid_payload_counts)
+                                               if model.valid_payload_counts is not None else None))
+                observation_event_payload({**receipt, "conditions": [*receipt["conditions"], row]})
+            except Exception as error:
+                # Adapters may have durably emitted a strict subset before failing.
+                if not row["items"]:
+                    try:
+                        partial, _, _ = _observation_items(condition_output, request["task"], condition)
+                        row.update(items=partial, completed=len(partial), denominator=len(partial),
+                                   unobserved=max(0, request["expected_items"] - len(partial)))
+                    except (OSError, ValueError, KeyError):
+                        pass
+                row.update(status="incomplete", error={"type": type(error).__name__, "message": str(error)},
+                           failure_scope="condition; per-item failure count unavailable", failed=None)
+            row["elapsed_seconds"] = time.perf_counter() - started
+            row["output_hashes"] = {path.name: file_digest(path) for path in sorted(condition_output.iterdir())
+                                    if path.is_file()}
+            receipt["conditions"].append(row)
+            persist()
+            if row["status"] != "complete":
+                break
+    finally:
+        try:
+            model.codec.load_state_dict(previous_state)
+            model.train(previous_training)
+        finally:
+            restore_rng(previous_rng)
+    receipt["status"] = ("complete" if all(row["status"] == "complete" for row in receipt["conditions"])
+                         else "incomplete")
+    persist()
+    return receipt
+
+
+def validate_evaluation_target(validated_state, request, model):
+    """Authorize exact checkpoint/site identities before any codec weight load."""
+    from dataclasses import asdict
+    from .experiment_state import ValidatedState
+    from .models.split_model import ResolvedSite, resolve_encoder_site
+    if not isinstance(validated_state, ValidatedState):
+        raise ValueError("Evaluation requires a validated versioned state")
+    payload, reference = validated_state.payload, validated_state.reference
+    if request["checkpoint_sha256"] != reference.sha256:
+        raise ValueError("Observation checkpoint hash mismatch")
+    metadata = payload["metadata"]
+    if request["learner_kind"] != payload["kind"]:
+        raise ValueError("Observation learner kind mismatch")
+    if request["data"] != metadata.get("data_identity"):
+        raise ValueError("Observation data identity mismatch")
+    if request["comparison"] != metadata.get("comparison_controls"):
+        raise ValueError("Observation comparison controls differ from checkpoint")
+    if metadata.get("model_state_contract") != "codec-only-stateless-channel-v1":
+        raise ValueError("Unsupported checkpoint codec/channel state contract")
+    if any(True for _ in model.channel.parameters()):
+        raise ValueError("Versioned codec-only evaluation requires a stateless channel")
+    role = metadata.get("snapshot_role")
+    step = metadata["completed_updates"]
+    if role not in ("initialization", "trained") or (role == "initialization") != (step == 0):
+        raise ValueError("Invalid initialization/trained snapshot role")
+    if request["step"] != step:
+        raise ValueError("Observation completed update count mismatch")
+    for field, key in (("config", "config_identity"), ("source", "source_identity"),
+                       ("protocol", "protocol_identity"), ("parent", "parent_identity")):
+        if request[field] != metadata[key]:
+            raise ValueError(f"Observation {field} identity mismatch")
+    numerical_policy = getattr(model, "numerical_policy", "native")
+    if request["settings"].get("numerical_policy", "native") != numerical_policy:
+        raise ValueError("Observation numerical policy differs from actual model")
+    if metadata.get("numerical_policy", "native") != numerical_policy:
+        raise ValueError("Checkpoint numerical policy differs from actual model")
+    site = ResolvedSite(**request["target_site"])
+    base_config = getattr(model.base, "config", None)
+    backend = getattr(getattr(base_config, "decoder", base_config), "_attn_implementation", None)
+    if backend is not None and request["backend"] != backend:
+        raise ValueError("Observation attention backend differs from model")
+    if hasattr(model.base, "parameters"):
+        parameter = next(model.base.parameters(), None)
+        dtype_names = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
+        if parameter is not None and request["precision"] not in (
+                str(parameter.dtype), dtype_names.get(parameter.dtype)):
+            raise ValueError("Observation precision differs from frozen backbone")
+    resolved = resolve_encoder_site(model.base, site.split, site.model_revision)
+    if asdict(resolved) != asdict(site):
+        raise ValueError("Target site does not match actual backbone metadata")
+    if payload["kind"] == "single_site_v2":
+        if request["target_site"] != metadata.get("site") or request["target_role"] != "trained":
+            raise ValueError("Single-site checkpoint cannot override its saved site")
+        return site, {"sites": {site.site_id: "trained"}}
+    if payload["kind"] != "shared_encoder_v2":
+        raise ValueError("Unsupported evaluation checkpoint kind")
+    declaration = metadata.get("evaluation_sites", {}).get(site.site_id)
+    if not declaration or declaration.get("site") != request["target_site"]:
+        raise ValueError("Shared checkpoint does not declare the requested exact site")
+    if declaration.get("role") != request["target_role"]:
+        raise ValueError("Shared checkpoint site role mismatch")
+    if request["target_role"] == "trained":
+        return site, {"sites": {site.site_id: "trained"}}
+    if request["target_role"] != "heldout_after_freeze" or site.site_id != "enc_l14":
+        raise ValueError("Unsupported shared heldout request")
+    freeze = request.get("freeze_receipt", {})
+    required = ("recipe_identity", "architecture_decision", "trained_run_inventory", "observation_plan")
+    if (freeze.get("schema") != "study-freeze-v1" or freeze.get("status") != "complete"
+            or any(not freeze.get(field) for field in required)
+            or reference.sha256 not in freeze.get("checkpoint_hashes", [])
+            or freeze.get("protocol_identity") != metadata["protocol_identity"]
+            or freeze.get("site_policy") != metadata.get("evaluation_sites")
+            or request["panel"] not in freeze.get("observation_plan", [])):
+        raise ValueError("Heldout evaluation requires a complete bound study freeze receipt")
+    from .evaluation_policy import digest
+    freeze_reference = request.get("freeze_reference", {})
+    freeze_path = Path(freeze_reference.get("path", ""))
+    if (not freeze_path.is_file()
+            or file_digest(freeze_path) != freeze_reference.get("sha256")
+            or json.loads(freeze_path.read_text()) != freeze):
+        raise ValueError("Freeze receipt differs from its immutable file reference")
+    return site, {"sites": {site.site_id: "heldout"}, "heldout_freeze_receipt": digest(freeze)}
+
+
+
+def observation_record_request(request):
+    """Project execution inputs into the model-free records request schema.
+
+    The complete execution request is retained inline in details.outputs, so no
+    input, scorer, source-family, freeze, or runtime binding disappears in this
+    projection. This is a reference to planned output evidence, not its results.
+    """
+    from .evaluation_policy import digest
+    from .models.split_model import ResolvedSite
+    def reference(value):
+        return value if isinstance(value, str) and value else "sha256:" + digest(value)
+
+    comparison = request.get("comparison", {})
+    controls = {"architecture", "initialization", "training_data", "objective", "exposure", "schedule"}
+    if (set(comparison) != controls or any(not isinstance(value, str) or not value.strip()
+                                           for value in comparison.values())):
+        raise ValueError("Observation requires explicit nonempty comparison control references")
+    site = request["target_site"]
+    site_id = ResolvedSite(**site).site_id
+    kind = ("initialization" if request["step"] == 0 else
+            "shared" if request["learner_kind"] == "shared_encoder_v2" else "specialist")
+    return {
+        **{field: reference(request[field]) for field in
+           ("source", "config", "data", "panel", "task", "protocol", "noise", "scorer",
+            "layout", "precision", "backend")},
+        "parent": None if request["parent"] is None else reference(request["parent"]),
+        "checkpoint": request["checkpoint_sha256"], "site": site_id,
+        "role": "heldout" if request["target_role"] == "heldout_after_freeze" else request["target_role"],
+        "conditions": list(request["conditions"]), "expected_items": request["expected_items"],
+        "learner_kind": kind, "step": request["step"],
+        "site_step": request.get("site_step", request["step"]), "purpose": "task",
+        "objective_kind": None, "comparison": copy.deepcopy(comparison),
+        "details": {"prompt": reference(request["prompt_policy"]),
+                    "native_policy": reference(request["settings"]),
+                    "draws": reference(request["noise"]),
+                    "outputs": "inline-execution-request-v1:" + json.dumps(
+                        request, sort_keys=True, separators=(",", ":"), allow_nan=False)},
+    }
+
+
+def observation_event_payload(receipt):
+    """Return experiment-records-v1 observation payload without a records import.
+
+    Non-numeric adapter metadata and errors remain in the execution receipt;
+    all per-item data is retained here with normalized ID names. Unknown failed
+    item counts remain null with a reason, and unobserved work stays explicit.
+    """
+    import math
+    if receipt["identity"] != codec_observation_identity(receipt["request"]):
+        raise ValueError("Execution receipt observation identity mismatch")
+    conditions = []
+    for row in receipt["conditions"]:
+        metrics = {name: {"value": value, "reason": None}
+                   for name, value in row["metrics"].items()
+                   if type(value) in (int, float) and math.isfinite(value)}
+        if not metrics:
+            metrics["task_score"] = {"value": None, "reason": row.get("error", {}).get(
+                "message", "No finite task score available")}
+        metrics["unobserved_items"] = {"value": row.get(
+            "unobserved", max(0, row["requested"] - row["completed"])), "reason": None}
+        if "elapsed_seconds" in row:
+            metrics["elapsed_seconds"] = {"value": row["elapsed_seconds"], "reason": None}
+        items = []
+        for item in row["items"]:
+            item_id = item.get("sample_id", item.get("image_id"))
+            source_id = item.get("source_id", item.get("image_id"))
+            if item_id is None or source_id is None:
+                raise ValueError("Cannot project item with unavailable item/source identity")
+            normalized = {**item, "item_id": str(item_id), "source_id": str(source_id)}
+            if receipt["request"]["task"] == "hellaswag":
+                required = ("tokens", "raw_correct", "normalized_correct", "normalized_prediction", "normalized_scores")
+                if any(key not in item for key in required):
+                    raise ValueError("HellaSwag item lacks actual token/prediction/correctness evidence")
+                prediction = item["normalized_prediction"]
+                if (type(prediction) is not int or prediction < 0
+                        or prediction >= len(item["normalized_scores"])
+                        or any(type(item[key]) not in (int, float, bool) or item[key] not in (0, 1)
+                               for key in ("raw_correct", "normalized_correct"))):
+                    raise ValueError("Invalid actual HellaSwag prediction/correctness evidence")
+                normalized.update(raw_correct=int(item["raw_correct"]),
+                                  normalized_correct=int(item["normalized_correct"]),
+                                  prediction=str(prediction), score=item["normalized_scores"][prediction])
+            else:
+                required = ("token_ids", "raw_caption", "caption", "cider", "eos", "truncated")
+                if any(key not in item for key in required):
+                    raise ValueError("COCO item lacks actual caption/token/generation evidence")
+                normalized.update(tokens=item["token_ids"], caption_raw=item["raw_caption"],
+                                  caption_clean=item["caption"], cap_hit=item["truncated"])
+            items.append(normalized)
+        task_fields = ({"raw_accuracy": "raw_correct", "normalized_accuracy": "normalized_correct"}
+                       if receipt["request"]["task"] == "hellaswag" else {"cider": "cider"})
+        for metric, field in task_fields.items():
+            metrics[metric] = ({"value": sum(item[field] for item in items) / len(items), "reason": None}
+                               if items else {"value": None, "reason": "No completed per-item task evidence"})
+        conditions.append({"condition": row["condition"], "requested": row["requested"],
+                           "completed": row["completed"], "failed": row["failed"],
+                           "failure_reason": (row.get("failure_scope", "Per-item failure count unavailable")
+                                              if row["failed"] is None else
+                                              row.get("error", {}).get("message")),
+                           "denominator": row["denominator"], "metrics": metrics,
+                           "items": items, "objectives": {}})
+    payload = {"request": observation_record_request(receipt["request"]), "identity": receipt["identity"],
+               "status": receipt["status"], "conditions": conditions, "reuse": receipt.get("reuse")}
+    from .experiment_records import validate_observation
+    validate_observation(payload)
+    return payload
+
+
+
+def _state_payload_equal(left, right):
+    """Compare a caller's mutable state against freshly verified artifact bytes."""
+    import numpy as np
+    if isinstance(left, torch.Tensor):
+        return (isinstance(right, torch.Tensor) and left.dtype == right.dtype
+                and left.shape == right.shape and torch.equal(left.cpu(), right.cpu()))
+    if isinstance(left, np.ndarray):
+        return isinstance(right, np.ndarray) and left.dtype == right.dtype and np.array_equal(left, right)
+    if isinstance(left, dict):
+        return (isinstance(right, dict) and left.keys() == right.keys()
+                and all(_state_payload_equal(value, right[key]) for key, value in left.items()))
+    if isinstance(left, (tuple, list)):
+        return (type(left) is type(right) and len(left) == len(right)
+                and all(_state_payload_equal(a, b) for a, b in zip(left, right)))
+    return type(left) is type(right) and left == right
+
+
+def verify_observation_artifacts(receipt, root):
+    """Verify external receipt bytes and adapter evidence before any result reuse.
+
+    Paths are rooted beneath the receipt directory. The exact per-condition file
+    inventory, digests and parsed item contents must agree, including token joins.
+    This verifies retained evidence, not provenance beyond the execution binding.
+    """
+    root = Path(root).resolve(strict=True)
+    saved = root / "observation.json"
+    if saved.is_symlink() or json.loads(saved.read_text()) != receipt:
+        raise ValueError("Observation receipt differs from saved artifact")
+    if receipt.get("schema") != "codec-observation-v1":
+        raise ValueError("Unsupported observation receipt schema")
+    observation_event_payload(receipt)
+    request = receipt["request"]
+    rows = receipt["conditions"]
+    if [row["condition"] for row in rows] != request["conditions"][:len(rows)]:
+        raise ValueError("Observation conditions are not an ordered execution prefix")
+    for index, row in enumerate(rows):
+        condition = row["condition"]
+        directory = root / str(condition)
+        if directory.is_symlink() or directory.resolve(strict=True).parent != root:
+            raise ValueError("Observation condition escapes artifact root")
+        paths = list(directory.iterdir())
+        if any(path.is_symlink() or not path.is_file() for path in paths):
+            raise ValueError("Observation evidence must be regular local files")
+        actual_hashes = {path.name: file_digest(path) for path in paths}
+        if actual_hashes != row.get("output_hashes"):
+            raise ValueError("Observation output hashes or inventory mismatch")
+        try:
+            items, ids, families = _observation_items(directory, request["task"], condition)
+        except ValueError:
+            if row.get("status") == "complete" or row["items"]:
+                raise
+            items, ids, families = [], [], []
+        if items != row["items"]:
+            raise ValueError("Observation items differ from actual adapter evidence")
+        if row.get("status") == "complete":
+            if ids != request["input_ids"] or families != request["source_family_ids"]:
+                raise ValueError("Observation adapter membership differs from request")
+        elif index != len(rows) - 1:
+            raise ValueError("Observation continued after a failed condition")
+        if row.get("unobserved") != request["expected_items"] - len(items):
+            raise ValueError("Observation unobserved count differs from actual evidence")

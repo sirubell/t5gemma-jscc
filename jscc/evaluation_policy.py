@@ -110,6 +110,10 @@ def evaluation_identity(model, tokenizer, settings, data_settings, metadata, ada
                      for name in ("lm_eval", "torch", "transformers", "datasets")},
         "source_sha256": {name: file_digest(root / name) for name in source_files},
     }
+    if getattr(model, "numerical_policy", "native") != "native":
+        from .models.precision import compute_provenance
+        identity["numerical_runtime"] = compute_provenance(model)
+        identity["source_sha256"]["models/precision.py"] = file_digest(root / "models/precision.py")
     # Tokenizer/config objects occasionally carry AddedToken or dtype objects.
     return json.loads(json.dumps(identity, default=_identity_json_default))
 

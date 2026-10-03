@@ -9,15 +9,26 @@ import yaml
 def validate_codec_architecture(codec):
     """Validate explicit designs without rewriting historical saved configs."""
     architecture = codec.get("architecture", "residual_mlp")
-    if architecture not in ("residual_mlp", "direct_affine"):
-        raise ValueError("codec.architecture must be residual_mlp or direct_affine")
-    if architecture == "direct_affine":
-        required = {"n_res_blocks": 0, "layernorm": "none", "snr_film": False}
+    if architecture not in ("residual_mlp", "direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
+        raise ValueError("unsupported codec.architecture")
+    if architecture in ("direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
+        required = {"n_res_blocks": 0, "snr_film": False}
+        if architecture != "two_linear_gelu":
+            required["layernorm"] = {"direct_affine": "none", "direct_outer_ln": "both",
+                                     "direct_outer_rms": "rms_both"}[architecture]
+        else:
+            required.update({"hidden_dim": 1152, "activation": "gelu"})
+            if codec.get("layernorm") not in ("none", "both", "rms_both"):
+                raise ValueError("two_linear_gelu requires codec.layernorm=none, both, or rms_both")
         for key, value in required.items():
             if codec.get(key) != value:
-                raise ValueError(f"direct_affine requires codec.{key}={value!r}")
+                raise ValueError(f"{architecture} requires codec.{key}={value!r}")
         if codec.get("dropout", 0.0) != 0.0:
-            raise ValueError("direct_affine requires codec.dropout=0")
+            raise ValueError(f"{architecture} requires codec.dropout=0")
+        if codec.get("layernorm") == "rms_both" and codec.get("rms_norm_eps") != 1e-6:
+            raise ValueError("backbone RMSNorm requires explicit codec.rms_norm_eps=1e-6")
+        if type(codec.get("bottleneck_dim")) is not int or codec["bottleneck_dim"] <= 0:
+            raise ValueError("codec.bottleneck_dim must be a positive integer")
 
 
 def resolve_codec_configs(codec):
@@ -60,8 +71,8 @@ def load_config(path):
             raise ValueError("Put model/split/codec/channel settings in model_config, not in the task YAML")
         config.update(design)
     runtime = config.pop("runtime", {})
-    if set(runtime) - {"device", "dtype", "sdpa_backend_policy"}:
-        raise ValueError("runtime overrides are limited to device, dtype and sdpa_backend_policy")
+    if set(runtime) - {"device", "dtype", "sdpa_backend_policy", "numerical_policy"}:
+        raise ValueError("runtime overrides are limited to device, dtype, sdpa_backend_policy and numerical_policy")
     if runtime:
         config["model"].update(runtime)
     for section, key in (("run", "output_dir"),):
@@ -77,6 +88,19 @@ def validate_sdpa_backend_policy(policy):
         raise ValueError("model.sdpa_backend_policy must be auto or flash_math")
 
 
+def validate_numerical_policy(model, split):
+    policy = model.get("numerical_policy", "native")
+    if policy not in ("native", "codec_receiver_fp32"):
+        raise ValueError("model.numerical_policy must be native or codec_receiver_fp32")
+    if policy == "codec_receiver_fp32":
+        if model.get("dtype") != "bfloat16":
+            raise ValueError("codec_receiver_fp32 requires model.dtype=bfloat16")
+        if model.get("sdpa_backend_policy", "auto") != "auto":
+            raise ValueError("codec_receiver_fp32 requires sdpa_backend_policy=auto")
+        if split != {"stack": "enc", "where": "after_final_norm"}:
+            raise ValueError("codec_receiver_fp32 requires encoder after_final_norm without index")
+
+
 def validate_config(config):
     """Checks shared by file loading and study expansion."""
     if config["task"] not in ("coco", "hellaswag"):
@@ -84,6 +108,7 @@ def validate_config(config):
     validate_sdpa_backend_policy(config.get("model", {}).get("sdpa_backend_policy", "auto"))
     if config["task"] != "coco" and config.get("model", {}).get("sdpa_backend_policy", "auto") != "auto":
         raise ValueError("flash_math is currently supported only for task=coco")
+    validate_numerical_policy(config.get("model", {}), config["split"])
     training = config["training"]
     if "loss_weights" in training:
         weights = training["loss_weights"]

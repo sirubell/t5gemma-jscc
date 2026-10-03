@@ -273,3 +273,38 @@ def test_teacher_forcing_uses_native_t5gemma2_decoder_preparation():
     expected = base.prepare_decoder_input_ids_from_labels(labels=labels)
     assert torch.equal(kwargs["decoder_input_ids"], expected)
     assert kwargs["decoder_input_ids"].tolist() == [[2, 11, 12], [2, 21, 0]]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("temperature", [.7, 2.])
+def test_chunked_valid_kl_preserves_loss_gradients_and_full_vocab(dtype, temperature, monkeypatch):
+    from jscc.losses import distillation_loss_stats
+
+    torch.manual_seed(71)
+    # The failed native16 layout has594 valid tokens among16x63 positions.
+    student = torch.randn(16, 63, 97, dtype=dtype, requires_grad=True)
+    teacher = torch.randn_like(student, requires_grad=True)
+    labels = torch.full((16, 63), -100)
+    labels.flatten()[:594] = 1
+    valid = labels != -100
+    expected = F.kl_div(F.log_softmax(student[valid].float() / temperature, dim=-1),
+                        F.softmax(teacher[valid].float() / temperature, dim=-1),
+                        reduction="none").sum(dim=-1).mul(temperature**2).sum()
+    expected_gradients = torch.autograd.grad(expected, (student, teacher))
+    shapes = []
+    original = F.kl_div
+    def observe(input, target, **kwargs):
+        shapes.append(tuple(input.shape))
+        assert input.dtype == target.dtype == torch.float32
+        return original(input, target, **kwargs)
+    monkeypatch.setattr(F, "kl_div", observe)
+    actual, denominator = distillation_loss_stats(student, teacher, labels, temperature,
+                                                 valid_only=True)
+    gradients = torch.autograd.grad(actual, (student, teacher))
+    assert denominator == 594
+    assert sum(shape[0] for shape in shapes) == 594
+    assert all(shape[0] <= 32 and shape[1] == 97 for shape in shapes)
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    for observed, reference in zip(gradients, expected_gradients):
+        torch.testing.assert_close(observed, reference, rtol=1e-6, atol=1e-6)
+        assert not observed[~valid].count_nonzero()

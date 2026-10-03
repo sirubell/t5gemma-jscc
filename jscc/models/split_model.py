@@ -1,10 +1,11 @@
 """Insert codec -> channel -> codec at one frozen encoder/decoder layer."""
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-from ..config import resolve_codec_configs, validate_sdpa_backend_policy
+from ..config import resolve_codec_configs, validate_numerical_policy, validate_sdpa_backend_policy
 from .channel import AWGNChannel, _token_mask, build_channel, normalize_power, valid_payload_count
 from .codec import Codec
 
@@ -18,12 +19,74 @@ def stack_module(base, stack):
     raise ValueError("split.stack must be enc or dec")
 
 
+@dataclass(frozen=True)
+class ResolvedSite:
+    """Explicit encoder output identity; labels alone never authorize routing."""
+    where: str
+    index: int | None
+    model_revision: str
+    layer_count: int
+    hidden_dim: int
+    module_path: str
+    schema: str = "encoder-site-v2"
+
+    @property
+    def site_id(self):
+        if self.where == "after_embed":
+            return "enc_emb"
+        return "enc_fn" if self.where == "after_final_norm" else f"enc_l{self.index}"
+
+    @property
+    def split(self):
+        result: dict[str, str | int] = {"stack": "enc", "where": self.where}
+        if self.index is not None:
+            result["index"] = self.index
+        return result
+
+
+def resolve_encoder_site(base, site_spec, model_revision):
+    """Resolve against actual backbone metadata without inspecting activations."""
+    if not isinstance(model_revision, str) or not model_revision:
+        raise ValueError("a pinned model revision is required")
+    configured_revision = getattr(base.config, "_commit_hash", None)
+    if configured_revision is not None and configured_revision != model_revision:
+        raise ValueError("site model revision differs from backbone")
+    if set(site_spec) - {"stack", "where", "index"} or site_spec.get("stack") != "enc":
+        raise ValueError("encoder routing requires an explicit encoder site")
+    stack = stack_module(base, "enc")
+    count = len(stack.layers)
+    width = int(stack.config.hidden_size)
+    where, index = site_spec.get("where"), site_spec.get("index")
+    if where == "after_layer":
+        if type(index) is not int or not 0 <= index < count:
+            raise ValueError("encoder site index is outside the backbone")
+        path = f"encoder.layers.{index}"
+    elif where == "after_final_norm":
+        if index is not None:
+            raise ValueError("after_final_norm has no layer index")
+        path = "encoder.norm"
+    elif where == "after_embed":
+        if index is not None:
+            raise ValueError("after_embed has no layer index")
+        path = "encoder.layers.0.input"
+    else:
+        raise ValueError("encoder routing supports after_embed, after_layer or after_final_norm")
+    return ResolvedSite(where, index, model_revision, count, width, path)
+
+
 class SplitModel(nn.Module):
-    def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto"):
+    def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto", numerical_policy="native"):
         super().__init__()
         validate_sdpa_backend_policy(sdpa_backend_policy)
+        validate_numerical_policy({"numerical_policy": numerical_policy,
+                                   "dtype": str(next(base.parameters()).dtype).removeprefix("torch."),
+                                   "sdpa_backend_policy": sdpa_backend_policy}, split)
+        self.numerical_policy = numerical_policy
         self.sdpa_backend_policy = sdpa_backend_policy
         self.base = base.requires_grad_(False).eval()
+        if numerical_policy == "codec_receiver_fp32":
+            from .precision import install_fp32_receiver
+            install_fp32_receiver(self.base)
         self.codec = codec
         self.channel = channel
         self.split = split
@@ -48,6 +111,12 @@ class SplitModel(nn.Module):
         self._active_encoder_mask_representation = None
         self._encoder_mask_handle = None
         self._payload_observer = None
+        self._routing_active = False
+        self._forward_active = 0
+        # Generation can call encoder/decoder stacks without base.forward.
+        for guarded in (stack_module(base, "enc"), stack_module(base, "dec")):
+            guarded.register_forward_pre_hook(self._enter_base_forward)
+            guarded.register_forward_hook(self._exit_base_forward, always_call=True)
         stack = stack_module(base, split["stack"])
         # Capture the original encoder attention mask before Transformers
         # expands it into an internal attention mask.  This also covers
@@ -58,15 +127,7 @@ class SplitModel(nn.Module):
             self._capture_encoder_mask, with_kwargs=True
         )
         where = split["where"]
-        if where in ("after_embed", "before_first_layer"):
-            # At encoder input, image features have already replaced image tokens.
-            self.handle = stack.layers[0].register_forward_pre_hook(self._pre_hook, with_kwargs=True)
-        elif where == "after_layer":
-            self.handle = stack.layers[split["index"]].register_forward_hook(self._hook)
-        elif where == "after_final_norm":
-            self.handle = stack.norm.register_forward_hook(self._hook)
-        else:
-            raise ValueError(f"unknown split.where: {where}")
+        self.handle = self._install_insertion(split)
         if split["stack"] == "dec":
             first_receiver = (split["index"] + 1 if where == "after_layer" else
                               len(stack.layers) if where == "after_final_norm" else 0)
@@ -76,6 +137,73 @@ class SplitModel(nn.Module):
                 stack.register_forward_pre_hook(self._begin_decoder, with_kwargs=True)
                 for layer in stack.layers[first_receiver:]:
                     layer.self_attn.register_forward_pre_hook(self._receiver_memory, with_kwargs=True)
+
+    def _install_insertion(self, split):
+        stack = stack_module(self.base, split["stack"])
+        where = split["where"]
+        if where in ("after_embed", "before_first_layer"):
+            return stack.layers[0].register_forward_pre_hook(self._pre_hook, with_kwargs=True)
+        if where == "after_layer":
+            return stack.layers[split["index"]].register_forward_hook(self._hook)
+        if where == "after_final_norm":
+            return stack.norm.register_forward_hook(self._hook)
+        raise ValueError(f"unknown split.where: {where}")
+
+    def _enter_base_forward(self, module, args):
+        self._forward_active += 1
+
+    def _exit_base_forward(self, module, args, output):
+        self._forward_active -= 1
+
+    @contextmanager
+    def at_site(self, site, *, purpose, authorization):
+        """Temporarily move the sole encoder insertion without changing weights.
+
+        authorization declares ``sites`` mapping canonical IDs to trained,
+        heldout, or diagnostic roles. Heldout use requires an externally verified
+        nonempty ``heldout_freeze_receipt`` identity. This seam validates the
+        receipt's presence; the checkpoint/evaluation gate verifies its contents.
+        """
+        if self.numerical_policy == "codec_receiver_fp32" and site.split != self.split:
+            raise ValueError("codec_receiver_fp32 cannot route away from encoder after_final_norm")
+        if self._routing_active or self._forward_active:
+            raise RuntimeError("site routing cannot nest or change during a forward")
+        if self.split["stack"] != "enc" or self.memory_codec is not None:
+            raise ValueError("encoder sharing cannot route decoder-memory models")
+        if not isinstance(site, ResolvedSite):
+            raise TypeError("site must be a ResolvedSite")
+        if resolve_encoder_site(self.base, site.split, site.model_revision) != site:
+            raise ValueError("resolved site does not match backbone metadata")
+        if self.codec.encoder[0].weight.shape[1] != site.hidden_dim:
+            raise ValueError("resolved site hidden dimension differs from codec")
+        if purpose not in ("train", "evaluate", "capture"):
+            raise ValueError("invalid routing purpose")
+        role = authorization.get("sites", {}).get(site.site_id)
+        if role not in ("trained", "heldout", "diagnostic"):
+            raise ValueError("site has no declared study role")
+        if purpose == "train" and role != "trained":
+            raise ValueError("only declared trained sites may contribute gradients")
+        if role == "heldout" and not authorization.get("heldout_freeze_receipt"):
+            raise ValueError("heldout routing requires a verified freeze receipt")
+        previous_split = self.split
+        masks = (self._encoder_valid_mask, self._decoder_valid_mask,
+                 self._active_encoder_valid_mask, self._encoder_mask_representation,
+                 self._decoder_mask_representation, self._active_encoder_mask_representation)
+        self._routing_active = True
+        self.handle.remove()
+        try:
+            self.split = site.split
+            self.handle = self._install_insertion(self.split)
+            with self.attention_context():
+                yield self
+        finally:
+            self.handle.remove()
+            self.split = previous_split
+            self.handle = self._install_insertion(previous_split)
+            (self._encoder_valid_mask, self._decoder_valid_mask,
+             self._active_encoder_valid_mask, self._encoder_mask_representation,
+             self._decoder_mask_representation, self._active_encoder_mask_representation) = masks
+            self._routing_active = False
 
     def train(self, mode=True):
         super().train(mode)
@@ -204,11 +332,14 @@ class SplitModel(nn.Module):
         # so the communication hook must preserve the same BF16-backbone /
         # FP32-codec boundary on its own.
         backbone_parameter = next(self.base.parameters())
-        autocast_enabled = backbone_parameter.dtype in (torch.bfloat16, torch.float16)
+        fp32 = self.numerical_policy == "codec_receiver_fp32"
+        if fp32 and any(p.dtype != torch.float32 for p in codec.parameters()):
+            raise ValueError("codec_receiver_fp32 requires FP32 codec parameters")
+        autocast_enabled = not fp32 and backbone_parameter.dtype in (torch.bfloat16, torch.float16)
         with torch.autocast(device_type=backbone_parameter.device.type,
                             dtype=backbone_parameter.dtype,
                             enabled=autocast_enabled):
-            z = codec.encode(hidden)
+            z = codec.encode(hidden.float() if fp32 else hidden)
             self.channel_uses[stream] += z.numel()
             self.channel_uses_valid[stream] += valid_payload_count(
                 z, valid_mask, mask_representation=mask_representation
@@ -239,7 +370,8 @@ class SplitModel(nn.Module):
             # corrected precision contract.  Return the reconstructed stream
             # in the backbone activation dtype before downstream BF16 linear
             # layers consume it.
-            return codec.decode(received, film_snr).to(dtype=hidden.dtype)
+            reconstruction = codec.decode(received, film_snr)
+            return reconstruction if fp32 else reconstruction.to(dtype=hidden.dtype)
 
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()
@@ -254,7 +386,13 @@ class SplitModel(nn.Module):
             token_wise=self.split["stack"] == "dec",
             mask_representation=mask_representation,
         )
-        return hidden if self.bypass else self.reconstruction
+        received = hidden if self.bypass else self.reconstruction
+        if self.numerical_policy == "codec_receiver_fp32":
+            if hidden.dtype != torch.bfloat16:
+                raise ValueError("codec_receiver_fp32 requires BF16 encoder final features")
+            if self.reconstruction is not None:
+                self.reconstruction = self.reconstruction.to(hidden.dtype)
+        return received
 
     def _begin_decoder(self, module, args, kwargs):
         self.memory_activation = self.memory_reconstruction = None
@@ -339,10 +477,12 @@ class SplitModel(nn.Module):
                     self._active_encoder_valid_mask, self._encoder_mask_representation,
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
+        self._forward_active += 1
         try:
             with self.attention_context():
                 return self.base(**kwargs)
         finally:
+            self._forward_active -= 1
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
              self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
@@ -357,10 +497,12 @@ class SplitModel(nn.Module):
                     self._active_encoder_valid_mask, self._encoder_mask_representation,
                     self._decoder_mask_representation, self._active_encoder_mask_representation)
         self._set_input_masks(kwargs)
+        self._forward_active += 1
         try:
             with self.attention_context():
                 return self.base.generate(**kwargs)
         finally:
+            self._forward_active -= 1
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
              self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
@@ -370,6 +512,7 @@ def build_model(config):
     model_config = config["model"]
     policy = model_config.get("sdpa_backend_policy", "auto")
     validate_sdpa_backend_policy(policy)
+    validate_numerical_policy(model_config, config["split"])
     if policy != "auto" and config["task"] != "coco":
         raise ValueError("flash_math is currently supported only for task=coco")
     # Imports are delayed so --check and tensor-only tests need no Transformers.
@@ -385,7 +528,8 @@ def build_model(config):
     config["codec"]["input_dim"] = input_dim
     codec = Codec(input_dim, config["codec"])
     wrapper = SplitModel(base, codec, build_channel(config["channel"]),
-                         config["split"], config["channel"], sdpa_backend_policy=policy)
+                         config["split"], config["channel"], sdpa_backend_policy=policy,
+                         numerical_policy=model_config.get("numerical_policy", "native"))
     # Keep the frozen backbone at the requested execution dtype, while the
     # trainable communication modules remain FP32.  Calling ``wrapper.to``
     # with ``dtype`` here would silently cast codec parameters (and any
