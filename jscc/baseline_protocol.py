@@ -137,11 +137,12 @@ def _objective_record(totals, kind, settings=None):
         result["resolved_weights"] = dict(settings["loss_weights"])
         result["components"] = {}
         for name in ("kl", "hidden", "memory"):
-            measured = name != "memory" or settings["requires_memory"]
+            measured = (name != "memory" or settings["requires_memory"]) and int(totals[name + "_denominator"]) > 0
+            reason = "not_computed_reconstruction" if name == "kl" else "not_required"
             result["components"][name] = {
-                "raw": measure(float(totals[name])) if measured else measure(reason="not_required"),
-                "weighted": measure(float(totals["weighted_" + name])),
-                "numerator": measure(float(totals[name + "_numerator"])) if measured else measure(reason="not_required"),
+                "raw": measure(float(totals[name])) if measured else measure(reason=reason),
+                "weighted": measure(float(totals["weighted_" + name])) if measured else measure(reason=reason),
+                "numerator": measure(float(totals[name + "_numerator"])) if measured else measure(reason=reason),
                 "denominator": int(totals[name + "_denominator"]) if measured else 0}
     return result
 

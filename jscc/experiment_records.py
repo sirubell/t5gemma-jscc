@@ -204,6 +204,27 @@ def _objective_value(components: dict[str, Any], kind: str) -> float:
     return k["weighted"]["value"] + r["weighted"]["value"]
 
 
+
+def _original13_objective_value(objective, site):
+    """Validate the adopted per-role stream measures without importing models."""
+    decoder = site.startswith('dec_')
+    weights = {'kl': float(objective['kind'] == 'combined'),
+               'hidden': .05 if decoder else .1, 'memory': .05 if decoder else 0.}
+    _require(objective['resolved_weights'] == weights, 'original13 objective weights differ')
+    total = 0.0
+    for name, component in objective['components'].items():
+        required = name == 'hidden' or (name == 'memory' and decoder) or (name == 'kl' and weights['kl'] == 1)
+        raw, weighted = component['raw']['value'], component['weighted']['value']
+        if required:
+            _require(raw is not None and weighted is not None, 'original13 required stream is unavailable')
+            _require(math.isclose(weighted, weights[name] * raw, rel_tol=1e-6, abs_tol=1e-9),
+                     'original13 stream weight differs')
+            total += weighted
+        else:
+            _require(raw is None and weighted is None and component['denominator'] == 0,
+                     'original13 uncomputed stream must remain unavailable')
+    return total
+
 def _update(p: dict[str, Any]) -> None:
     _fields({k: v for k, v in p.items() if k != "audit"}, "site_id attempted_step completed_step final_step phase_start_step site_step sweep exposure objective lr_used lr_next gradient nonfinite skipped update_l2 snr timing memory", "update")
     if "audit" in p:
@@ -238,15 +259,17 @@ def _update(p: dict[str, Any]) -> None:
         _count(allocated, "memory_coordinates_allocated")
         _require(allocated >= memory, "invalid allocated memory coordinates")
     objective = p["objective"]
-    _fields(objective, "kind total components", "objective")
-    _require(objective["kind"] in ("local", "combined"), "invalid objective kind")
+    original13 = 'resolved_weights' in objective
+    _fields(objective, "kind total components resolved_weights" if original13 else "kind total components", "objective")
+    _require(objective["kind"] in (("reconstruction", "combined") if original13 else ("local", "combined")), "invalid objective kind")
     _measure(objective["total"])
     _require(isinstance(objective["components"], dict) and bool(objective["components"]), "objective components required")
-    _require(set(objective["components"]) == {"K", "R"}, "K and R components required")
+    _require(set(objective["components"]) == ({'kl', 'hidden', 'memory'} if original13 else {"K", "R"}), "objective components differ")
     for component in objective["components"].values():
         _component(component)
     if not p["skipped"] and not p["nonfinite"]:
-        expected_total = _objective_value(objective["components"], objective["kind"])
+        expected_total = (_original13_objective_value(objective, p['site_id']) if original13 else
+                          _objective_value(objective["components"], objective["kind"]))
         _require(objective["total"]["value"] is not None and math.isclose(objective["total"]["value"], expected_total, rel_tol=1e-6, abs_tol=1e-9), "objective total mismatch")
         _require(exposure["sequences"] > 0 and exposure["source_tokens"] == exposure["valid_tokens"], "invalid successful exposure")
     for key in ("lr_used", "lr_next"):
