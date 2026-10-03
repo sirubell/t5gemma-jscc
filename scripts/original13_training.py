@@ -54,7 +54,7 @@ def main(argv=None):
             args.width, args.ratio = selected.width, selected.ratio
         manifest, config, plan, batches, initial, metadata, data_ids = load_original13_prepared(
             args.prepared, checksum=args.prepared_sha256, width=args.width, ratio=args.ratio,
-            load_batches=args.mode != 'check')
+            load_batches=args.mode != 'check', allow_pending_assets=args.mode == 'check')
         if args.mode != 'check':
             if not args.output or not args.approved_source:
                 parser.error('execution requires --output and --approved-source')
@@ -86,7 +86,8 @@ def main(argv=None):
             return result
     plans = [Original13Plan.from_resolved(row) for row in manifest['plans']]
     print(json.dumps({'plans': [{'width': p.width, 'ratio': p.ratio, 'horizon': p.horizon,
-                                'plan_identity': p.identity} for p in plans], 'launch_authorized': False}, indent=2))
+                                'plan_identity': p.identity} for p in plans], 'launch_authorized': False,
+                      'model_assets_status': next(iter(manifest['configs'].values()))['model']['asset_binding']['status']}, indent=2))
     return manifest
 
 

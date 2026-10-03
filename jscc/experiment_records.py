@@ -219,7 +219,8 @@ def _original13_objective_value(objective, site):
         required = name == 'hidden' or (name == 'memory' and decoder) or (name == 'kl' and weights['kl'] == 1)
         raw, weighted = component['raw']['value'], component['weighted']['value']
         if required:
-            _require(raw is not None and weighted is not None, 'original13 required stream is unavailable')
+            if raw is None or weighted is None:
+                raise RecordError('original13 required stream is unavailable')
             _require(math.isclose(weighted, weights[name] * raw, rel_tol=1e-6, abs_tol=1e-9),
                      'original13 stream weight differs')
             total += weighted

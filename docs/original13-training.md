@@ -47,7 +47,13 @@ uv run --locked python scripts/original13_training.py check \
 The training CLI supports `bind`, `check`, `train` and `resume`. Binding may
 record an explicit `--model-path` for an existing local snapshot. Execution uses
 that saved path with `local_files_only=True`; it cannot switch model paths.
-The prepared manifest records its full source commit and inventory. Execution
+The prepared manifest records its full source commit and inventory, plus hashes
+and byte sizes for cached model weights, index/configuration and tokenizer assets.
+Production uses the pinned HF snapshot directory and requires its four retained
+input tokenizer/config hashes to match. Unavailable target assets are explicitly
+pending: plan checks may succeed, but execution refuses them until a complete
+target binding is created. Asset identity enters checkpoint metadata and every
+resume/evaluation comparison; all bytes are checked before model construction. Execution
 requires `--approved-source`, a finite `--timeout-seconds`, and, on CUDA, an
 explicit `--device-uuid` matching CUDA_VISIBLE_DEVICES. Production requires CUDA;
 synthetic tiny CPU fixtures remain a separate software-validation path. The existing

@@ -60,10 +60,12 @@ def prepared(tmp_path):
     input_hash = file_digest(tmp_path/'inputs.json')
     plan = Original13Plan(tuple(batch_view(b) for b in data), 'joined-cpu', 90, 8,
                           input_hash, canonical_digest(panel()), True)
+    from jscc.encoder_stages_preparation import bind_model_assets
+    assets = bind_model_assets(cache, 'tiny-cpu')
     config = {'task': 'hellaswag', 'seed': 0, 'protocol': ORIGINAL13_PROTOCOL,
         'run': {'name': 'joined-tiny', 'output_dir': str(tmp_path/'runs')},
         'model': {'name': str(cache), 'revision': 'tiny-cpu', 'device': 'cpu', 'dtype': 'float32',
-                  'attn_implementation': 'sdpa', 'numerical_policy': 'native'},
+                  'attn_implementation': 'sdpa', 'numerical_policy': 'native', 'asset_binding': assets},
         'split': {'stack': 'enc', 'where': 'after_final_norm'}, 'codec': deepcopy(model.codec.config),
         'channel': {'type': 'awgn', 'kwargs': {}, 'normalize_power': True, 'train_noise': True,
                     'train_snr_range': [-6.0, 18.0], 'clean_film_snr': 18.0},
@@ -242,3 +244,32 @@ def test_execution_guard_rejects_unbounded_or_wrong_assignment_and_git_redirects
     monkeypatch.setenv('GIT_DIR', '/nonexistent/redirect.git')
     verify_original13_execution_source(manifest, manifest['source_commit'])
     assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('asset', ['model.safetensors', 'tokenizer.json', 'config.json'])
+def test_changed_cached_assets_rejected_before_transformers_load(prepared, monkeypatch, asset):
+    path, _ = prepared
+    _, config, _, _, initial, _, _ = load_original13_prepared(path, checksum=file_digest(path), width=8, ratio=90)
+    target = Path(config['model']['name'])/asset
+    target.write_bytes(target.read_bytes()+b'changed')
+    def forbidden(*a, **kw):
+        pytest.fail('changed assets reached the actual model loader')
+    monkeypatch.setattr('jscc.models.split_model.build_model', forbidden)
+    with pytest.raises(ValueError, match='asset bytes differ'):
+        initialize_original13(config, initial, synthetic=True)
+
+
+def test_pending_assets_and_input_tokenizer_mismatch_fail_closed(tmp_path):
+    from jscc.encoder_stages_preparation import bind_model_assets, verify_model_assets
+    binding = bind_model_assets(tmp_path/'missing', 'revision')
+    config = {'model': {'name': binding['path'], 'revision': 'revision', 'asset_binding': binding}}
+    assert verify_model_assets(config, require_complete=False)['status'] == 'pending'
+    with pytest.raises(ValueError, match='pending'):
+        verify_model_assets(config)
+    root = tmp_path/'snapshots'/'pinned'
+    root.mkdir(parents=True)
+    (root/'config.json').write_text('{}')
+    (root/'tokenizer.json').write_text('{}')
+    (root/'model.safetensors').write_bytes(b'fixture')
+    with pytest.raises(ValueError, match='retained inputs'):
+        bind_model_assets(root, 'pinned', tokenizer_files={'config.json': {'bytes': 2, 'sha256': 'a'*64}}, production=True)

@@ -383,8 +383,9 @@ class Original13TrainingState:
                     'plan_identity': self.plan.identity, 'input_identity': self.plan.input_identity,
                     'observation_identity': self.plan.observation_identity}
         expected.pop('parent_identity', None)
-        if 'source_commit' in self.metadata:
-            expected['source_commit'] = self.metadata['source_commit']
+        for key in ('source_commit', 'model_assets_identity'):
+            if key in self.metadata:
+                expected[key] = self.metadata[key]
         # open_state requires a supplied parent; inspect it only after hash validation
         # via a compatibility open against the parent's value from trusted bytes.
         data = Path(reference.path).read_bytes()
@@ -572,10 +573,10 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
         raise
 
 
-def load_original13_prepared(path, *, checksum, width, ratio, load_batches=True):
+def load_original13_prepared(path, *, checksum, width, ratio, load_batches=True, allow_pending_assets=False):
     """Load only bound local inputs/configs; never select a newer run or checkpoint."""
     from .encoder_stages_plan import Original13Plan, ORIGINAL13_PROTOCOL
-    from .encoder_stages_preparation import resolve_original13_plans, validate_original13_config
+    from .encoder_stages_preparation import resolve_original13_plans, validate_original13_config, verify_model_assets
     from .config import validate_config
     path = Path(path).resolve()
     if file_digest(path) != checksum:
@@ -603,6 +604,10 @@ def load_original13_prepared(path, *, checksum, width, ratio, load_batches=True)
     config = copy.deepcopy(manifest['configs'][str(width)])
     validate_config(config)
     validate_original13_config(config, width)
+    assets = verify_model_assets(config, require_complete=not allow_pending_assets, verify_bytes=False)
+    if not plan.synthetic and (not assets['production']
+            or assets['tokenizer_files'] != inputs['tokenizer_assets']['files']):
+        raise ValueError('original13 production input/model assets differ')
     if (config['protocol'] != ORIGINAL13_PROTOCOL or config['split'] != SITE_SPECS['enc_fn']
             or config['training']['max_steps'] != plan.horizon
             or config['training']['schedule_steps'] != plan.horizon):
@@ -633,6 +638,7 @@ def load_original13_prepared(path, *, checksum, width, ratio, load_batches=True)
             if rows != expected_rows:
                 raise ValueError('original13 native row stream differs')
     metadata = {'source_identity': manifest['source_identity'], 'source_commit': manifest['source_commit'],
+                'model_assets_identity': canonical_digest(assets),
                 'config_identity': canonical_digest(config), 'data_identity': manifest['data_identity'],
                 'initialization_identity': initial_ref['state_identity'], 'stream_identity': plan.input_identity,
                 'protocol_identity': ORIGINAL13_PROTOCOL, 'prepared_identity': manifest['manifest_identity'],
@@ -646,6 +652,8 @@ def initialize_original13(config, initial, *, evaluation=False, synthetic=False)
     from .runtime import configure_training_determinism, seed_everything, prepare_trainable_parameters
     from .encoder_stages_plan import ORIGINAL13_SITES
     from . import original13_routing
+    from .encoder_stages_preparation import verify_model_assets
+    verify_model_assets(config)
     configure_training_determinism(config['training'])
     seed_everything(config['seed'])
     processor, model = build_model(copy.deepcopy(config), local_files_only=True)
