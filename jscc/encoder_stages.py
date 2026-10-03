@@ -11,15 +11,15 @@ import time
 import torch
 
 from .activation_replay import canonical_digest, file_digest
-from .baseline_protocol import objective_settings, read_prepared_batch, validate_task_receipt, write_manifest
+from .baseline_protocol import objective_settings, read_prepared_batch, write_manifest
 from .config import load_config
 from .encoder_pilot_plan import SITE_SPECS, SITES
 from .encoder_shared_pilot import readiness_view_indices
 from .encoder_stages_plan import ENCODER_STAGES_PROTOCOL, EncoderStagesPlan, build_stages_state
-from .evaluation import evaluate_checkpoint, verify_observation_artifacts
+from .encoder_stages_evaluation import open_stages_terminal, run_stages_evaluation  # noqa: F401
 from .experiment_records import AppendOnlyEventWriter, read_events
 from .experiment_schedule import noise_namespace
-from .experiment_state import CheckpointRef, open_state, restore_state, save_state
+from .experiment_state import open_state, restore_state, save_state
 from .models.channel import AWGNChannel
 from .presentation import PresentationSampler, derived_seed
 from .sharing_preparation import _reference, source_inventory, state_dict_identity
@@ -32,7 +32,8 @@ CONDITIONS = ('no_noise', -6, 0, 6, 18)
 def stages_source_inventory():
     root = Path(__file__).resolve().parents[1]
     return {**source_inventory(root), **{name: file_digest(root / name) for name in
-            ('scripts/encoder_stages.py', 'scripts/render_encoder_stages.py')}}
+            ('scripts/encoder_stages.py', 'scripts/render_encoder_stages.py',
+             'scripts/original13_training.py', 'scripts/original13_evaluation.py')}}
 
 
 class EncoderStagesLearner(SharingLearner):
@@ -259,87 +260,6 @@ def run_stages_training(model, *, plan, batches, metadata, output, guard, config
         raise
 
 
-def open_stages_terminal(training_run, metadata, plan):
-    root = Path(training_run).resolve()
-    campaign = json.loads((root / 'campaign.json').read_text())
-    freeze_path = root / 'freeze.json'
-    if (campaign['status'] != 'training_frozen' or campaign['completed_updates'] != plan.horizon
-            or campaign['prepared_identity'] != metadata['prepared_identity']
-            or campaign['freeze_reference'] != {'path': str(freeze_path), 'sha256': file_digest(freeze_path)}):
-        raise ValueError('own training trajectory is not completely frozen')
-    freeze = json.loads(freeze_path.read_text())
-    if (freeze['status'] != 'complete' or freeze['arm'] != plan.arm or freeze['width'] != plan.width
-            or freeze['final_panels'] != [[site, condition] for condition in CONDITIONS for site in SITES]
-            or file_digest(root / 'metrics.jsonl') != freeze['metrics']['sha256']):
-        raise ValueError('terminal study plan or scalar log differs')
-    expected = {k: v for k, v in metadata.items() if k not in {'phase', 'lineage'}}
-    if plan.arm != 'A':
-        reset = campaign['phase_reset']
-        parent_ref = CheckpointRef(**reset['parent'])
-        if Path(parent_ref.path).resolve() != root / f'step_{plan.horizon // 2:06d}.pt':
-            raise ValueError('phase reset parent path differs from own training run')
-        parent = open_state(parent_ref, expected=metadata)
-        if parent.payload['metadata']['completed_updates'] != plan.horizon // 2:
-            raise ValueError('phase reset parent did not complete stage one')
-        expected['parent_identity'] = parent_ref.sha256
-    state = open_state(CheckpointRef(**freeze['checkpoint']), expected=expected)
-    if (state.payload['metadata']['completed_updates'] != plan.horizon
-            or state.payload['metadata']['sharing']['arm'] != plan.arm
-            or state.payload['metadata']['sharing']['width'] != plan.width):
-        raise ValueError('terminal checkpoint differs from own arm/width')
-    return state, campaign['freeze_reference']
-
-
-def run_stages_evaluation(model, processor, *, state, freeze_reference, template, output, guard):
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=False)
-    details = state.payload['metadata']
-    if template['conditions'] != list(CONDITIONS):
-        raise ValueError('terminal five-condition template required')
-    result = {'schema': 'encoder-stages-evaluation-v1', 'status': 'incomplete',
-              'arm': details['sharing']['arm'], 'width': details['sharing']['width'],
-              'prepared_identity': details['prepared_identity'],
-              'checkpoint': asdict(state.reference), 'freeze_reference': freeze_reference, 'completed_panels': [],
-              'interpretation': 'previously inspected validation, six trained encoder sites, one seed',
-              'vanilla_execution': 'reuse compatible external evidence after identity matching'}
-    begun = time.monotonic()
-    write_manifest(output / 'result.json', result)
-    try:
-        for condition in CONDITIONS:
-            for site in SITES:
-                guard()
-                request = {**template, 'schema': 'codec-observation-v1', 'conditions': [condition],
-                    'checkpoint_sha256': state.reference.sha256, 'target_site': details['evaluation_sites'][site]['site'],
-                    'target_role': 'trained', 'learner_kind': 'shared_encoder_v2', 'step': details['completed_updates'],
-                    'site_step': details['sharing']['completed_per_site'][site], 'parent': details['parent_identity'],
-                    'comparison': details['comparison_controls'], 'panel': f'final:{site}:{condition}',
-                    'source': details['source_identity'], 'config': details['config_identity'],
-                    'data': details['data_identity'], 'protocol': details['protocol_identity']}
-                request.update(study_arm=details['sharing']['arm'], study_width=details['sharing']['width'],
-                               prepared_identity=details['prepared_identity'])
-                request['settings'] = {**request['settings'], 'evidence_mode': 'compact-v1'}
-                path = output / f'{site}_{condition}'
-                receipt = evaluate_checkpoint(state, request, model=model, processor=processor, output=path)
-                validate_task_receipt(receipt, request)
-                verify_observation_artifacts(receipt, path)
-                guard()
-                result['completed_panels'].append({'site': site, 'condition': condition,
-                    'checkpoint': state.reference.sha256, 'completed_items': receipt['conditions'][0]['completed'],
-                    'metrics': receipt['conditions'][0]['metrics'],
-                    'observation': {'path': str(path / 'observation.json'), 'sha256': file_digest(path / 'observation.json')}})
-                result['elapsed_seconds'] = time.monotonic() - begun
-                write_manifest(output / 'result.json', result)
-                print(json.dumps({'phase': 'evaluation', 'completed_codec_panels': len(result['completed_panels']),
-                                  'elapsed_seconds': result['elapsed_seconds']}), flush=True)
-        result.update(status='complete', elapsed_seconds=time.monotonic() - begun)
-        write_manifest(output / 'result.json', result)
-        return result
-    except Exception as error:
-        result.update(error={'type': type(error).__name__, 'message': str(error)}, elapsed_seconds=time.monotonic() - begun)
-        write_manifest(output / 'result.json', result)
-        raise
-
-
 def qualify_stages(model, *, plan, batches, metadata, output, guard):
     """Bounded changed-path diagnostics, exact restoration, and measured throughput."""
     from .sharing_qualification_guard import restore, snapshot, state_exact
@@ -391,4 +311,241 @@ def qualify_stages(model, *, plan, batches, metadata, output, guard):
     except Exception as error:
         result.update(error={'type': type(error).__name__, 'message': str(error)}, elapsed_seconds=time.monotonic() - begun)
         write_manifest(output / 'result.json', result)
+        raise
+
+
+class Original13TrainingState:
+    """Integration-owned optimizer, reset and complete-state lifecycle.
+
+    Routing supplies the actual learner via the M1 API. CPU mechanical fixtures
+    may implement that API, but never count as universal-route acceptance.
+    """
+
+    def __init__(self, learner, *, plan, metadata, routing):
+        from .encoder_stages_plan import ORIGINAL13_PROTOCOL
+        self.learner, self.plan, self.routing = learner, plan, routing
+        self.codec = routing.canonical_codec(learner.model)
+        self.metadata = copy.deepcopy(metadata)
+        if metadata.get('protocol_identity') != ORIGINAL13_PROTOCOL:
+            raise ValueError('original13 protocol identity required')
+        for key in ('source_identity', 'config_identity', 'data_identity', 'initialization_identity',
+                    'stream_identity', 'prepared_identity', 'model_revision'):
+            if not isinstance(metadata.get(key), str) or not metadata[key]:
+                raise ValueError('missing original13 metadata: ' + key)
+        if metadata['stream_identity'] != plan.input_identity:
+            raise ValueError('original13 input identity differs')
+        parameters = list(self.codec.parameters())
+        if (len({id(p) for p in learner.parameters}) != len(learner.parameters)
+                or {id(p) for p in parameters} != {id(p) for p in learner.parameters}):
+            raise ValueError('optimizer requires exactly one canonical codec parameter owner')
+        if state_dict_identity(routing.export_codec(learner.model)) != state_dict_identity(self.codec.state_dict()):
+            raise ValueError('canonical weight export differs from codec body')
+        if state_dict_identity(routing.export_codec(learner.model)) != metadata['initialization_identity']:
+            raise ValueError('fresh original13 initializer identity differs')
+        self.reset_parent = None
+        self.ancestry = []
+        self._new_optimizer()
+
+    def _new_optimizer(self):
+        from .sharing_schedule import sharing_lr_factor
+        learner = self.learner
+        stage = next(s for s in self.plan.stages if s.start == learner.phase_start_step)
+        learner.optimizer = torch.optim.AdamW(learner.parameters, lr=2e-4, weight_decay=NATIVE16_WEIGHT_DECAY)
+        learner.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            learner.optimizer, lambda index: sharing_lr_factor(index, stage.horizon))
+
+    def save(self, path):
+        from .encoder_stages_plan import original13_progress
+        learner = self.learner
+        progress = original13_progress(self.plan, learner.completed, learner.phase_start_step)
+        details = {**self.metadata, 'original13_plan': self.plan.resolved(), 'plan_identity': self.plan.identity,
+                   'input_identity': self.plan.input_identity, 'observation_identity': self.plan.observation_identity,
+                   'completed_updates': learner.completed, 'phase_start_step': learner.phase_start_step,
+                   'phase': progress['phase_id'], 'parent_identity': None if self.reset_parent is None
+                   else self.reset_parent['sha256'], 'lineage': [] if self.reset_parent is None else
+                   [{'parent_sha256': self.reset_parent['sha256'], 'parent_checkpoint': self.reset_parent,
+                     'completed_updates': self.plan.reconstruction_stop, 'transfer': 'weights_only_reset_adam_lr'}],
+                   'segment_ancestry': copy.deepcopy(self.ancestry),
+                   'exposure': copy.deepcopy(learner.exposure.per_site),
+                   'exposure_receipts': list(learner.exposure.receipts),
+                   'valid_tokens': learner.valid_tokens, 'attempted': learner.attempted,
+                   'route_state': copy.deepcopy(self.routing.observation_state(learner.model)),
+                   'model_state_contract': 'original13-canonical-codec-v1'}
+        reference = save_state(path, model=self.codec, optimizer=learner.optimizer, scheduler=learner.scheduler,
+                               scaler=learner.scaler, metadata=details, stream_state=progress,
+                               weight_export=lambda: self.routing.export_codec(learner.model))
+        return open_state(reference, expected=details)
+
+    def restore(self, reference):
+        from .experiment_state import IDENTITIES
+        expected = {**{k: self.metadata[k] for k in (*IDENTITIES, 'data_identity', 'prepared_identity',
+                    'model_revision') if k != 'parent_identity'},
+                    'plan_identity': self.plan.identity, 'input_identity': self.plan.input_identity,
+                    'observation_identity': self.plan.observation_identity}
+        expected.pop('parent_identity', None)
+        # open_state requires a supplied parent; inspect it only after hash validation
+        # via a compatibility open against the parent's value from trusted bytes.
+        data = Path(reference.path).read_bytes()
+        if len(data) != reference.size or file_digest(Path(reference.path)) != reference.sha256:
+            raise ValueError('continuation checkpoint bytes differ')
+        import io
+        payload = torch.load(io.BytesIO(data), map_location='cpu', weights_only=False)
+        expected['parent_identity'] = payload['metadata']['parent_identity']
+        state = open_state(reference, expected=expected)
+        details = state.payload['metadata']
+        learner = self.learner
+        learner.phase_start_step = details['phase_start_step']
+        self._new_optimizer()
+        progress = restore_state(state, model=self.codec, optimizer=learner.optimizer,
+                                 scheduler=learner.scheduler, scaler=learner.scaler,
+                                 weight_load=lambda weights: self.routing.load_codec(learner.model, weights))
+        self.routing.restore_runtime_state(learner.model, copy.deepcopy(details['route_state']))
+        from .sharing_qualification_guard import state_exact
+        from .experiment_state import capture_rng
+        if (not state_exact(self.routing.observation_state(learner.model), details['route_state'])
+                or not state_exact(capture_rng(), state.payload['rng'])):
+            raise ValueError('continuation route/noise/RNG restoration differs')
+        learner.completed = progress['completed_updates']
+        learner.attempted = details['attempted']
+        learner.offset = progress['offset']
+        learner.valid_tokens = details['valid_tokens']
+        learner.exposure.completed = learner.completed
+        learner.exposure.per_site = copy.deepcopy(details['exposure'])
+        learner.exposure.receipts = list(details['exposure_receipts'])
+        self.reset_parent = None if not details['lineage'] else details['lineage'][-1]['parent_checkpoint']
+        self.ancestry = [*details['segment_ancestry'], asdict(reference)]
+        return state
+
+    def reset(self, parent):
+        learner = self.learner
+        if (learner.failed or learner.completed != self.plan.reconstruction_stop
+                or learner.phase_start_step != 0 or self.reset_parent is not None):
+            raise ValueError('original13 permits exactly one boundary reset')
+        verified = open_state(parent.reference, expected=parent.payload['metadata'])
+        details = verified.payload['metadata']
+        if (details['plan_identity'] != self.plan.identity or details['phase_start_step'] != 0
+                or details['completed_updates'] != learner.completed
+                or state_dict_identity(verified.payload['model']) != state_dict_identity(self.routing.export_codec(learner.model))):
+            raise ValueError('reset requires exact own pre-reset state')
+        self.reset_parent = asdict(verified.reference)
+        learner.phase_start_step = self.plan.reconstruction_stop
+        self._new_optimizer()
+
+
+def run_original13_training(model, processor, *, plan, batches, metadata, observation_request,
+                            output, guard, routing=None, observe=None, resume=None):
+    """Fresh segment or explicit continuation; no automatic retry or model loading."""
+    from . import original13_routing
+    from .baseline_protocol import bind_batch_identity
+    from .encoder_stages_evaluation import ObservationScoringError, observe_original13
+    from .encoder_stages_plan import original13_progress
+    from .experiment_state import capture_rng, restore_rng
+    routing = original13_routing if routing is None else routing
+    observe = observe_original13 if observe is None else observe
+    if (len(batches) != plan.q or tuple(batch_view(b) for b in batches) != plan.views
+            or canonical_digest(observation_request['panel']) != plan.observation_identity):
+        raise ValueError('original13 verified inputs/observation panel differ')
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    result = {'schema': 'original13-training-v1', 'status': 'incomplete', 'ratio': plan.ratio, 'width': plan.width,
+              'plan_identity': plan.identity, 'completed_updates': 0, 'checkpoints': [],
+              'observations': [{'step': step, 'state_role': role, 'status': 'pending',
+                                'requires_explicit_completion': False} for step, role in plan.observations],
+              'segment_parent': None if resume is None else asdict(resume)}
+    write_manifest(output / 'campaign.json', result)
+    learner = routing.create_original13_learner(model, plan=plan, metadata=metadata,
+                                               event_sink=AppendOnlyEventWriter(output / 'metrics.jsonl').append)
+    state_machine = Original13TrainingState(learner, plan=plan, metadata=metadata, routing=routing)
+    if resume is not None:
+        restored = state_machine.restore(resume)
+        for observation in result['observations']:
+            if observation['step'] <= learner.completed:
+                observation.update(status='pending_prior_segment', requires_explicit_completion=True)
+        if learner.completed == plan.reconstruction_stop and learner.phase_start_step == 0:
+            state_machine.reset(restored)
+            reset = state_machine.save(output / f'step_{learner.completed:06d}_post_reset.pt')
+            result['checkpoints'].append({'role': 'post_reset', **asdict(reset.reference)})
+    initial_completed = learner.completed
+    bindings = [bind_batch_identity(b, expected_identity=v.view_sha256) for b, v in zip(batches, plan.views)]
+    try:
+        while True:
+            guard()
+            step = learner.completed
+            for save_step, role in plan.checkpoint_states:
+                if save_step != step or (role == 'post_reset') or (resume is not None and step == initial_completed):
+                    continue
+                state = state_machine.save(output / f'step_{step:06d}_{role}.pt')
+                result['checkpoints'].append({'role': role, **asdict(state.reference)})
+                if (step, role) in plan.observations:
+                    from .sharing_qualification_guard import state_exact
+                    saved_rng = capture_rng()
+                    def training_state():
+                        return copy.deepcopy({'weights': routing.export_codec(model),
+                            'optimizer': learner.optimizer.state_dict(), 'scheduler': learner.scheduler.state_dict(),
+                            'scaler': learner.scaler.state_dict() if learner.scaler is not None else None,
+                            'counters': [learner.completed, learner.attempted, learner.offset, learner.valid_tokens,
+                                         learner.phase_start_step, learner.failed],
+                            'exposure': [learner.exposure.completed, learner.exposure.failed,
+                                         learner.exposure.per_site, learner.exposure.receipts],
+                            'grads': [None if p.grad is None else p.grad.detach().clone() for p in learner.parameters],
+                            'route': routing.observation_state(model)})
+                    saved_training = training_state()
+                    request = {**observation_request, 'plan_identity': plan.identity, 'step': step,
+                               'state_role': role, 'checkpoint_sha256': state.reference.sha256}
+                    error = None
+                    try:
+                        receipt = observe(model, processor, state=state, request=request,
+                                          output=output / f'observation_{step:06d}', guard=guard)
+                        if receipt.get('status') != 'complete' or receipt.get('request_identity') != canonical_digest(request):
+                            raise ValueError('observation receipt identity/status differs')
+                    except ObservationScoringError as exc:
+                        error = {'type': type(exc).__name__, 'message': str(exc)}
+                    finally:
+                        restore_rng(saved_rng)
+                    # Consumer restores routes/noise; revalidate checkpoint and full
+                    # training state before continuing even an isolated scoring error.
+                    open_state(state.reference, expected=state.payload['metadata'])
+                    if not state_exact(training_state(), saved_training) or not state_exact(capture_rng(), saved_rng):
+                        raise ValueError('observation training state restoration differs')
+                    row = next(r for r in result['observations'] if r['step'] == step)
+                    row.update(request_identity=canonical_digest(request),
+                        status='failed' if error else 'complete', error=error,
+                        requires_explicit_completion=bool(error))
+                    write_manifest(output / 'campaign.json', result)
+                if role == 'pre_reset':
+                    state_machine.reset(state)
+                    reset = state_machine.save(output / f'step_{step:06d}_post_reset.pt')
+                    result['checkpoints'].append({'role': 'post_reset', **asdict(reset.reference)})
+            if step == plan.horizon:
+                break
+            expected = plan.update_at(step)
+            used = [g['lr'] for g in learner.optimizer.param_groups]
+            event = learner.update([batches[expected.site_local_index]],
+                                   batch_identities=[bindings[expected.site_local_index]])
+            if (learner.completed != step + 1 or learner.exposure.completed != learner.completed
+                    or any(lr != 2e-4 * expected.lr_factor for lr in used)
+                    or event['payload']['lr_used'] != used):
+                raise ValueError('original13 update progress or consumed LR differs')
+        counts = learner.exposure.finalize()
+        events = [e for e in read_events(output / 'metrics.jsonl') if e['event_type'] == 'update']
+        if [e['payload']['completed_step'] for e in events] != list(range(initial_completed + 1, plan.horizon + 1)):
+            raise ValueError('original13 segment scalar log incomplete')
+        terminal = next((c for c in result['checkpoints'] if c['role'] == 'terminal'), None)
+        if terminal is None:
+            raise ValueError('continuing an already-terminal state requires evaluation, not training')
+        freeze = {'schema': 'original13-freeze-v1', 'status': 'training_frozen', 'plan_identity': plan.identity,
+                  'checkpoint': {k: terminal[k] for k in ('path', 'sha256', 'size')}, 'counts': counts,
+                  'progress': original13_progress(plan, learner.completed, learner.phase_start_step),
+                  'segment_ancestry': state_machine.ancestry,
+                  'metrics': {'path': str(output / 'metrics.jsonl'), 'sha256': file_digest(output / 'metrics.jsonl')}}
+        write_manifest(output / 'freeze.json', freeze)
+        result.update(status='training_frozen', completed_updates=learner.completed,
+                      segment_updates=len(events), observations_status='pending' if any(
+                          r['status'] != 'complete' for r in result['observations']) else 'complete',
+                      freeze_reference={'path': str(output / 'freeze.json'), 'sha256': file_digest(output / 'freeze.json')})
+        write_manifest(output / 'campaign.json', result)
+        return result
+    except Exception as exc:
+        result.update(completed_updates=learner.completed, error={'type': type(exc).__name__, 'message': str(exc)})
+        write_manifest(output / 'campaign.json', result)
         raise

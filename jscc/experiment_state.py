@@ -99,7 +99,7 @@ def _validate(payload):
         raise ValueError("incomplete or unknown state payload")
     if (
         payload["schema"] != "experiment-state-v2"
-        or payload["kind"] not in {"single_site_v2", "shared_encoder_v2"}
+        or payload["kind"] not in {"single_site_v2", "shared_encoder_v2", "original13_v1"}
     ):
         raise ValueError("unsupported state schema/kind")
     metadata = payload["metadata"]
@@ -112,9 +112,15 @@ def _validate(payload):
             raise ValueError(f"missing {key}")
     count = metadata["completed_updates"]
     phase_count = count
+    if payload['kind'] == 'original13_v1':
+        from .encoder_stages_plan import validate_original13_state
+        validate_original13_state(payload)
+        phase_count = payload['stream']['phase_local_completed']
     if metadata.get('protocol_identity') == 'encoder-original6-native16-stages-v1':
         phase_count = metadata['sharing']['phase_local_completed']
-    if payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
+    if payload['kind'] == 'original13_v1':
+        pass  # Validated by the original13 trust-boundary validator above.
+    elif payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
         from .sharing_state import validate_sharing_state
         validate_sharing_state(payload)
     else:
@@ -211,15 +217,23 @@ def _validate(payload):
             raise ValueError("parent identity missing from lineage")
 
 
-def save_state(path, *, model, optimizer, scheduler, scaler, metadata, stream_state):
+def save_state(path, *, model, optimizer, scheduler, scaler, metadata, stream_state,
+               weight_export=None):
     """Durably publish once. A failed save never replaces any existing parent."""
+    body = model.state_dict() if weight_export is None else weight_export()
+    if weight_export is not None:
+        current = model.state_dict()
+        if current.keys() != body.keys() or any(
+                current[k].shape != v.shape or current[k].dtype != v.dtype or not torch.equal(current[k], v)
+                for k, v in body.items()):
+            raise ValueError('canonical export must contain exactly the communication body')
     payload = dict(
         schema="experiment-state-v2",
-        kind=("shared_encoder_v2" if metadata.get("sharing", {}).get("learner") == "shared"
-              else "single_site_v2"),
+        kind=('original13_v1' if 'original13_plan' in metadata else
+              "shared_encoder_v2" if metadata.get("sharing", {}).get("learner") == "shared" else "single_site_v2"),
         metadata=copy.deepcopy(metadata),
         parameter_map=parameter_map(model, optimizer),
-        model=model.state_dict(),
+        model=body,
         optimizer=optimizer.state_dict(),
         scheduler=scheduler.state_dict(),
         scaler=scaler.state_dict() if scaler is not None else None,
@@ -273,7 +287,8 @@ def open_state(reference: CheckpointRef, *, expected):
     return ValidatedState(payload, reference)
 
 
-def restore_state(validated: ValidatedState, *, model, optimizer, scheduler, scaler):
+def restore_state(validated: ValidatedState, *, model, optimizer, scheduler, scaler,
+                  weight_load=None):
     # Reopen immutable bytes so a mutable in-memory payload cannot bypass integrity.
     payload = open_state(
         validated.reference, expected=validated.payload["metadata"]
@@ -289,7 +304,10 @@ def restore_state(validated: ValidatedState, *, model, optimizer, scheduler, sca
         raise ValueError("communication architecture mismatch")
     if (scaler is None) != (payload["scaler"] is None):
         raise ValueError("scaler presence mismatch")
-    model.load_state_dict(payload["model"], strict=True)
+    if weight_load is None:
+        model.load_state_dict(payload["model"], strict=True)
+    else:
+        weight_load(payload['model'])
     optimizer.load_state_dict(copy.deepcopy(payload["optimizer"]))
     scheduler.load_state_dict(copy.deepcopy(payload["scheduler"]))
     if scaler is not None:

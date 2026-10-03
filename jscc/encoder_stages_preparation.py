@@ -250,3 +250,108 @@ def prepare_inputs(*, prefix_prepared, prefix_sha256, pool_manifest, pool_sha256
     manifest['manifest_identity'] = canonical_digest(manifest)
     _json(output / 'inputs.json', manifest)
     return output / 'inputs.json'
+
+
+def resolve_original13_plans(views, *, inputs, input_identity, synthetic=False):
+    """Bind all nine plans to actual input/panel metadata, without model loading.
+
+    Source/input-file hashes are checked by the caller at loading. BatchView
+    objects must come from the verified native tensor inputs, never estimates.
+    """
+    from .encoder_stages_plan import ORIGINAL13_RATIOS, Original13Plan
+    from .activation_replay import canonical_digest
+    panel = inputs['data_ids']['development']
+    if (panel.get('expected_items') != 256 or panel.get('input_ids') != list(range(256))
+            or len(panel.get('source_family_ids', [])) != 256
+            or panel.get('split') != 'validation'
+            or panel.get('panel') != 'f3e5b8ffbaeaae3a775106937170d8f12cb8670b6ecb01f31efe3c7c33179bae'
+            or panel.get('noise') != {'namespace': 'encfn-baseline-20260930-development-v2', 'seed': 0}):
+        raise ValueError('original13 requires the exact existing256 development panel')
+    if not synthetic:
+        pool = inputs['data_ids']['train_rows']
+        stream = {'policy': 'epoch-permutations-v1', 'seed': SEED, 'total_presentations': 160000,
+                  'start_presentation': 0, 'pool_identity': canonical_digest(pool)}
+        if len(pool) != 39058 or len(set(pool)) != 39058 or inputs['presentation_stream'] != stream:
+            raise ValueError('original13 full training pool/stream differs')
+    identity = canonical_digest(panel)
+    if not synthetic and identity != 'd83b0856429b508910fab8a42453490b9d4bce3c52e78e17291b64046116980f':
+        raise ValueError('original13 development source-family object differs')
+    return tuple(Original13Plan(tuple(views), 'original13-seed0-fullpool-v1', ratio, width,
+                                input_identity, identity, synthetic)
+                 for width in (2304, 1152, 512) for ratio in ORIGINAL13_RATIOS)
+
+
+def bind_original13_inputs(inputs_path, *, inputs_sha256, output):
+    """Prepare source-bound plan/config identities from retained inputs only."""
+    from .activation_replay import canonical_digest
+    from .encoder_stages import stages_source_inventory
+    from .encoder_stages_plan import ORIGINAL13_PROTOCOL
+    from .sharing_protocol import batch_view
+    path = Path(inputs_path).resolve()
+    if file_digest(path) != inputs_sha256:
+        raise ValueError('original13 exact inputs manifest hash required')
+    inputs = json.loads(path.read_text())
+    if (inputs.get('manifest_identity') != canonical_digest({k: v for k, v in inputs.items() if k != 'manifest_identity'})
+            or inputs.get('synthetic_cpu', False) or inputs.get('q') != 10000):
+        raise ValueError('original13 complete real q10000 inputs required')
+    pool = inputs['data_ids']['train_rows']
+    expected = PresentationSampler(pool, 160000, seed=SEED).actual_ids.tolist()
+    views = []
+    for i, ref in enumerate(inputs['updates']):
+        batch = read_prepared_batch(ref, path.parent)
+        if batch['row_ids'].tolist() != expected[i*16:(i+1)*16]:
+            raise ValueError('original13 actual native input order differs')
+        views.append(batch_view(batch))
+    plans = resolve_original13_plans(tuple(views), inputs=inputs,
+                                     input_identity=inputs_sha256)
+    configurations, initializers = {}, {}
+    for width in WIDTHS:
+        config = load_config(_reference(path.parent, inputs['configs'][str(width)]))
+        train, codec, channel = config['training'], config['codec'], config['channel']
+        if (config['task'] != 'hellaswag' or config['seed'] != 0
+                or codec['architecture'] != 'direct_affine' or codec['bottleneck_dim'] != width
+                or codec['layernorm'] != 'none' or codec['n_res_blocks'] != 0 or codec['snr_film']
+                or codec['dropout'] != 0 or train['batch_size'] != 16 or train['gradient_accumulation'] != 1
+                or train['lr'] != 2e-4 or train['weight_decay'] != 0.002500001398541448
+                or train['temperature'] != 1 or train['grad_clip'] != 1 or not train['valid_only_kl']
+                or train['warmup_ratio'] != .05 or train['min_lr_ratio'] != 0
+                or train.get('patience') is not None or train.get('loss_weights') is not None
+                or train['kl_weight'] != 1 or train['mse_weight'] != .1
+                or config['model']['revision'] != 'dd0a2683227859151b1730ca3a63087df5b5f39b'
+                or config['model']['dtype'] != 'bfloat16' or config['model']['attn_implementation'] != 'sdpa'
+                or channel['type'] != 'awgn' or not channel['normalize_power'] or not channel['train_noise']
+                or channel['train_snr_range'] != [-6.0, 18.0]):
+            raise ValueError('inherited original13 configuration differs')
+        config = copy.deepcopy(config)
+        config['training'].update(max_steps=130000, schedule_steps=130000, eval_every=130000,
+                                  save_steps=[])
+        config['protocol'] = ORIGINAL13_PROTOCOL
+        configurations[str(width)] = config
+        ref = inputs['initializations'][str(width)]
+        initial = torch.load(_reference(path.parent, ref), map_location='cpu', weights_only=True)
+        if ref.get('seed') != 0 or state_dict_identity(initial) != ref['state_identity']:
+            raise ValueError('original13 fresh width initializer differs')
+        initializers[str(width)] = copy.deepcopy(ref)
+    template = final_task(json.loads(_reference(path.parent, inputs['task_request']).read_text()), inputs['data_ids'])
+    template['conditions'] = ['no_noise', -6]
+    template['settings']['snrs'] = ['no_noise', -6]
+    panel = copy.deepcopy(inputs['data_ids']['development'])
+    observation = {**template, 'schema': 'original13-observation-request-v1', 'panel': panel,
+                   'input_ids': panel['input_ids'], 'source_family_ids': panel['source_family_ids'],
+                   'expected_items': 256, 'noise': panel['noise'],
+                   'sites': ['enc_l9', 'enc_fn', 'dec_l0', 'dec_l24'], 'conditions': ['no_noise', -6],
+                   'settings': {**template['settings'], 'num_samples': 256, 'snrs': ['no_noise', -6]}}
+    inventory = stages_source_inventory()
+    manifest = {'schema': 'original13-prepared-v1', 'source_inventory': inventory,
+                'source_identity': canonical_digest(inventory), 'inputs_path': str(path),
+                'inputs_sha256': inputs_sha256, 'data_identity': canonical_digest(inputs['data_ids']),
+                'configs': configurations, 'initializations': initializers,
+                'plans': [plan.resolved() for plan in plans], 'observation_request': observation,
+                'terminal_request': template, 'launch_authorized': False}
+    manifest['manifest_identity'] = canonical_digest(manifest)
+    output = Path(output)
+    if output.exists():
+        raise ValueError('fresh original13 prepared destination required')
+    from .baseline_protocol import write_manifest
+    write_manifest(output, manifest)
+    return manifest
