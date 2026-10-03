@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any, cast
+from types import SimpleNamespace
 
 import torch
 import yaml
@@ -23,6 +24,10 @@ from .runtime import (
     append_metrics, configure_training_determinism, isolated_rng, new_run,
     prepare_trainable_parameters, source_state,
 )
+
+
+class TaskScoringError(RuntimeError):
+    """Task adapter produced no scores; integrity/nonfinite errors use other types."""
 
 
 def clean_caption(text):
@@ -214,7 +219,7 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
         **harness_options,
     )
     if result is None or "results" not in result:
-        raise RuntimeError("lm-eval returned no task results")
+        raise TaskScoringError("lm-eval returned no task results")
     evidence = {}
     if output is not None:
         output = Path(output)
@@ -225,8 +230,15 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
             json.dumps(metadata, indent=2, default=handle_non_serializable) + "\n")
         if compact:
             identity = evaluation_identity(model, tokenizer, settings, data_settings, metadata, adapter)
+            # A universal codec keeps the memory alias installed at encoder
+            # sites too. Payload depends on the active route, not alias presence.
+            payload_model = model
+            if getattr(model, "universal_codec", False):
+                payload_model = SimpleNamespace(codec=model.codec, split=model.split,
+                    memory_codec=model.memory_codec if model.requires_memory_transmission else None,
+                    valid_payload_counts=model.valid_payload_counts)
             evidence = write_compact_evidence(
-                output, result, adapter, identity, condition, model,
+                output, result, adapter, identity, condition, payload_model,
                 {"algorithm": "awgn-independent-streams-shared-epsilon-v1", "seed": settings["noise_seed"],
                  "namespace": settings.get("noise_namespace", "evaluation-v1")}
                 if "noise_seed" in settings else "legacy-global-rng",

@@ -1,4 +1,17 @@
 """Evaluation-owned legacy entry seam and original13 observation contract."""
+from contextlib import contextmanager
+import copy
+import hashlib
+import io
+
+import torch
+
+from .activation_replay import canonical_digest
+from .encoder_stages_plan import ORIGINAL13_SITES, OBSERVATION_SITES, Original13Plan
+from .experiment_state import capture_rng, restore_rng
+from .sharing_qualification_guard import state_exact
+from .sharing_preparation import state_dict_identity
+
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -15,16 +28,6 @@ CONDITIONS = ('no_noise', -6, 0, 6, 18)
 
 class ObservationScoringError(RuntimeError):
     """Recoverable scoring/output error; never integrity or restoration failure."""
-
-
-def observe_original13(model, processor, *, state, request, output, guard):
-    """Consumer replaces this stub; restore RNG/routes and verify state on error.
-
-    Return {status: 'complete', request_identity: str, ...}. Raise only
-    ObservationScoringError for isolated scoring/output failure AFTER verified
-    restoration. Every other exception stops training. No retry is implicit.
-    """
-    raise NotImplementedError('original13 observation consumer not implemented')
 
 
 def open_stages_terminal(training_run, metadata, plan):
@@ -106,3 +109,451 @@ def run_stages_evaluation(model, processor, *, state, freeze_reference, template
         result.update(error={'type': type(error).__name__, 'message': str(error)}, elapsed_seconds=time.monotonic() - begun)
         write_manifest(output / 'result.json', result)
         raise
+
+
+# Original13 uses separate request/receipt schemas. Legacy thirty-panel calls above
+# retain their original checkpoint contract and accounting.
+INITIAL_CONDITIONS = ('no_noise', -6)
+SUPPLEMENTAL_CONDITIONS = (0, 6, 18)
+
+
+def _reopen_original13(state):
+    reopened = open_state(state.reference, expected=state.payload['metadata'])
+    if reopened.payload['kind'] != 'original13_v1' or not state_exact(reopened.payload, state.payload):
+        raise ValueError('original13 validated checkpoint payload differs')
+    return reopened, Original13Plan.from_resolved(reopened.payload['metadata']['original13_plan'])
+
+
+def _open_bound_reference(reference):
+    # Discover identities only from the explicitly selected trusted local bytes.
+    # Central open_state still validates the full envelope and those identities.
+    data = Path(reference.path).read_bytes()
+    if len(data) != reference.size or hashlib.sha256(data).hexdigest() != reference.sha256:
+        raise ValueError('checkpoint bytes incomplete or corrupt')
+    payload = torch.load(io.BytesIO(data), map_location='cpu', weights_only=False)
+    return open_state(reference, expected=payload['metadata'])
+
+
+def open_original13_terminal(training_run):
+    """Open the sole terminal in this frozen segment; never search best/latest."""
+    root = Path(training_run).resolve()
+    campaign = json.loads((root / 'campaign.json').read_text())
+    freeze_path = root / 'freeze.json'
+    reference = {'path': str(freeze_path), 'sha256': file_digest(freeze_path)}
+    if (campaign['schema'] != 'original13-training-v1' or campaign['status'] != 'training_frozen'
+            or campaign['freeze_reference'] != reference):
+        raise ValueError('original13 own frozen training run required')
+    freeze = json.loads(freeze_path.read_text())
+    state = _open_bound_reference(CheckpointRef(**freeze['checkpoint']))
+    state, plan = _reopen_original13(state)
+    terminal = [c for c in campaign['checkpoints'] if c['role'] == 'terminal']
+    if (freeze['schema'] != 'original13-freeze-v1' or freeze['status'] != 'training_frozen'
+            or campaign['plan_identity'] != plan.identity or freeze['plan_identity'] != plan.identity
+            or campaign['completed_updates'] != plan.horizon
+            or state.payload['metadata']['completed_updates'] != plan.horizon
+            or state.payload['metadata']['phase_start_step'] != plan.reconstruction_stop
+            or len(terminal) != 1
+            or {k: terminal[0][k] for k in ('path', 'sha256', 'size')} != asdict(state.reference)
+            or Path(state.reference.path).resolve().parent != root
+            or Path(freeze['metrics']['path']).resolve() != root / 'metrics.jsonl'
+            or file_digest(root / 'metrics.jsonl') != freeze['metrics']['sha256']):
+        raise ValueError('original13 terminal, plan, endpoint or scalar bytes differ')
+    return state, reference
+
+
+def _validate_template(template, count):
+    required = ('task', 'input_ids', 'source_family_ids', 'settings', 'noise',
+                'data_settings', 'scorer', 'precision', 'backend', 'reference_corpus',
+                'prompt_policy', 'layout')
+    if any(key not in template for key in required):
+        raise ValueError('original13 scoring template is incomplete')
+    settings = template['settings']
+    if (template['task'] != 'hellaswag' or template['expected_items'] != count
+            or template['input_ids'] != list(range(count))
+            or len(template['source_family_ids']) != count
+            or any(not isinstance(f, str) or not f for f in template['source_family_ids'])
+            or settings['num_samples'] != count or settings['num_fewshot'] != 5
+            or settings['batch_size'] != 16 or settings['scoring_policy'] != 'fp32-v1'
+            or settings.get('numerical_policy', 'native') != 'native'
+            or settings.get('vanilla') is not False
+            or template['scorer'] != 'lm-eval-hellaswag-fp32-v1-acc-and-acc_norm'
+            or template['reference_corpus']['split'] != 'validation'
+            or type(template['noise']['seed']) is not int or not template['noise']['namespace']):
+        raise ValueError('original13 fixed full/five-shot/candidate16/FP32 recipe differs')
+
+
+def terminal_original13_request(training_run, template, *, scope='initial'):
+    """Bind an explicit scope; supporting supplements does not request them."""
+    if scope not in ('initial', 'supplemental'):
+        raise ValueError('unknown original13 terminal request scope')
+    state, freeze = open_original13_terminal(training_run)
+    _, plan = _reopen_original13(state)
+    _validate_template(template, 10042)
+    details = state.payload['metadata']
+    return {**copy.deepcopy(template), 'schema': 'original13-terminal-request-v1',
+            'scope': scope, 'training_run': str(Path(training_run).resolve()),
+            'freeze_reference': freeze, 'checkpoint': asdict(state.reference),
+            'checkpoint_sha256': state.reference.sha256, 'kind': 'original13_v1',
+            'plan_identity': plan.identity, 'input_identity': plan.input_identity,
+            'source': details['source_identity'], 'config': details['config_identity'],
+            'data': details['data_identity'], 'protocol': details['protocol_identity'],
+            'prepared_identity': details['prepared_identity'], 'step': plan.horizon,
+            'width': plan.width, 'ratio': plan.ratio, 'sites': list(ORIGINAL13_SITES),
+            'conditions': list(INITIAL_CONDITIONS if scope == 'initial' else SUPPLEMENTAL_CONDITIONS)}
+
+
+def _validate_request(state, request, *, observation):
+    state, plan = _reopen_original13(state)
+    details = state.payload['metadata']
+    if (request['plan_identity'] != plan.identity
+            or request['checkpoint_sha256'] != state.reference.sha256
+            or request['step'] != details['completed_updates']):
+        raise ValueError('original13 request checkpoint/plan/step differs')
+    if observation:
+        _validate_template(request, 256)
+        panel = request['panel']
+        if (request['schema'] != 'original13-observation-request-v1'
+                or canonical_digest(panel) != plan.observation_identity
+                or (request['step'], request['state_role']) not in plan.observations
+                or request['sites'] != list(OBSERVATION_SITES)
+                or request['conditions'] != list(INITIAL_CONDITIONS)
+                or request['input_ids'] != panel['input_ids']
+                or request['source_family_ids'] != panel['source_family_ids']
+                or request['noise'] != panel['noise']
+                or (request['state_role'] == 'pre_reset' and details['phase_start_step'] != 0)
+                or (request['state_role'] == 'functional_observation'
+                    and details['phase_start_step'] != plan.reconstruction_stop)):
+            raise ValueError('original13 fixed observation panel/endpoint differs')
+    else:
+        rebound = terminal_original13_request(request['training_run'], request, scope=request['scope'])
+        if request != rebound or request['kind'] != 'original13_v1':
+            raise ValueError('original13 terminal request differs from own frozen run')
+    return state, plan
+
+
+@contextmanager
+def _original13_runtime(model, state):
+    """Restore canonical weights, gradients, global RNG and all idle route state.
+
+    The routing owner provides the model-side idle-state contract. Validation and
+    restoration errors are fatal, including when a scorer/output error also occurs.
+    """
+    from . import original13_routing as routing
+    codec = routing.canonical_codec(model)
+    previous_weights = copy.deepcopy(routing.export_codec(model))
+    previous_route = copy.deepcopy(routing.observation_state(model))
+    parameters = list(codec.parameters())
+    grads = [None if p.grad is None else p.grad.detach().clone() for p in parameters]
+    rng = capture_rng()
+    try:
+        routing.load_codec(model, state.payload['model'])
+        model.eval()
+        yield
+    finally:
+        try:
+            unchanged = state_dict_identity(routing.export_codec(model)) == state_dict_identity(state.payload['model'])
+        finally:
+            # Even integrity inspection itself can fail. Always attempt route and
+            # RNG cleanup; restoration failure remains fatal and may supersede it.
+            try:
+                routing.load_codec(model, previous_weights)
+            finally:
+                try:
+                    for parameter, grad in zip(parameters, grads, strict=True):
+                        parameter.grad = grad
+                    routing.restore_runtime_state(model, previous_route)
+                finally:
+                    restore_rng(rng)
+        if not unchanged:
+            raise ValueError('original13 scorer mutated checkpoint weights')
+        reopened, _ = _reopen_original13(state)
+        if (not state_exact(reopened.payload, state.payload)
+                or not state_exact(routing.export_codec(model), previous_weights)
+                or not state_exact(routing.observation_state(model), previous_route)
+                or not state_exact(capture_rng(), rng)):
+            raise ValueError('original13 observation restoration/checkpoint integrity differs')
+
+
+@contextmanager
+def _original13_scoring_policy(settings):
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(settings.get('deterministic_algorithms', enabled))
+        yield
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def _score_original13_panel(model, processor, *, state, request, site_id, condition, output):
+    """Use the real task adapter, with no codec bypass in the no_noise condition."""
+    from .evaluation import evaluate_hellaswag, _observation_items, TaskScoringError
+    from .models import split_model
+    from .experiment_state import isolated_rng
+    site = getattr(split_model, "resolve_original13_site")(model.base, site_id, state.payload['metadata']['model_revision'])
+    settings = {**request['settings'], 'noise_seed': request['noise']['seed'],
+                'noise_namespace': request['noise']['namespace'], 'evidence_mode': 'compact-v1'}
+    dtype = next(model.base.parameters()).dtype
+    dtype_names = {torch.float32: 'fp32', torch.bfloat16: 'bf16', torch.float16: 'fp16'}
+    backend = getattr(model.base.config.decoder, '_attn_implementation', None)
+    if (request['precision'] not in (str(dtype), dtype_names.get(dtype))
+            or request['backend'] != backend
+            or getattr(model, 'numerical_policy', 'native') != 'native'):
+        raise ValueError('original13 actual model precision/backend differs')
+    snr = None if condition == 'no_noise' else float(condition)
+    with _original13_scoring_policy(settings), isolated_rng(settings['noise_seed']), model.channel.replay(
+            settings['noise_seed'], settings['noise_namespace']), model.at_site(
+            site, purpose='evaluate', authorization={'sites': {site_id: 'trained'}}), model.transmission(snr):
+        try:
+            metrics = evaluate_hellaswag(model, processor, settings, output, condition, request['data_settings'])
+        except TaskScoringError as error:
+            raise ObservationScoringError(str(error)) from error
+        payload = {'allocated': dict(model.channel_uses_allocated), 'valid': dict(model.valid_payload_counts)}
+    items, ids, families = _observation_items(output, 'hellaswag', condition)
+    if ids != request['input_ids'] or families != request['source_family_ids']:
+        raise ValueError('original13 observed question/source-family order differs')
+    if not metrics.get('finite_scores') or metrics['candidate_forward_requests'] != 4 * request['expected_items']:
+        raise ValueError('original13 finite score/candidate denominator differs')
+    return {'completed_items': len(items), 'denominator': len(items), 'metrics': metrics, 'payload': payload}
+
+
+def _run_original13_panels(model, processor, *, state, request, output, guard, observation):
+    state, plan = _validate_request(state, request, observation=observation)
+    output = Path(output).resolve()
+    # Destination and initial receipt failures are fatal: no durable failure record
+    # exists yet. Never overwrite or resume an existing panel destination.
+    output.mkdir(parents=True, exist_ok=False)
+    panels = [{'site': site, 'condition': condition, 'status': 'pending',
+               'requested_items': request['expected_items'], 'completed_items': 0}
+              for condition in request['conditions'] for site in request['sites']]
+    result = {'schema': 'original13-evaluation-receipt-v1', 'request': copy.deepcopy(request),
+              'request_identity': canonical_digest(request), 'status': 'incomplete',
+              'checkpoint': asdict(state.reference), 'plan_identity': plan.identity,
+              'panels': panels, 'elapsed_seconds': 0.0}
+    write_manifest(output / 'result.json', result)
+    begun = time.monotonic()
+    scoring_error = None
+    row = None
+    try:
+        with _original13_runtime(model, state):
+            for row in panels:
+                guard()  # Resource/stop guard is fatal, never a scoring failure.
+                path = output / f"{row['site']}_{row['condition']}"
+                path.mkdir(exist_ok=False)
+                panel_request = {**request, 'schema': 'original13-panel-request-v1',
+                                 'target_site': row['site'], 'conditions': [row['condition']]}
+                write_manifest(path / 'request.json', panel_request)
+                started = time.monotonic()
+                try:
+                    scored = _score_original13_panel(model, processor, state=state, request=request,
+                        site_id=row['site'], condition=row['condition'], output=path)
+                except (ObservationScoringError, OSError) as error:
+                    row.update(status='failed', error={'type': type(error).__name__, 'message': str(error)},
+                               elapsed_seconds=time.monotonic() - started)
+                    scoring_error = error
+                    break
+                if (scored['completed_items'] != request['expected_items']
+                        or scored['denominator'] != request['expected_items']):
+                    raise ValueError('original13 panel denominator differs')
+                row.update(scored, status='complete', elapsed_seconds=time.monotonic() - started,
+                           panel_identity=canonical_digest(panel_request))
+                row['output_hashes'] = {p.name: file_digest(p) for p in sorted(path.iterdir()) if p.is_file()}
+                write_manifest(path / 'receipt.json', row)
+                row['receipt'] = {'path': str(path / 'receipt.json'), 'sha256': file_digest(path / 'receipt.json')}
+                write_manifest(output / 'result.json', result)
+                guard()
+    except Exception as error:
+        if row is not None and row['status'] == 'pending':
+            row.update(status='failed', error={'type': type(error).__name__, 'message': str(error)})
+        result.update(error={'type': type(error).__name__, 'message': str(error)},
+                      elapsed_seconds=time.monotonic() - begun)
+        write_manifest(output / 'result.json', result)
+        raise
+    result.update(status='failed' if scoring_error else 'complete', elapsed_seconds=time.monotonic() - begun,
+                  requested_panels=len(panels), completed_panels=sum(p['status'] == 'complete' for p in panels),
+                  failed_panels=sum(p['status'] == 'failed' for p in panels),
+                  pending_panels=sum(p['status'] == 'pending' for p in panels))
+    write_manifest(output / 'result.json', result)  # Save failure is fatal.
+    if scoring_error is not None:
+        raise ObservationScoringError(str(scoring_error)) from scoring_error
+    return result
+
+
+def observe_original13(model, processor, *, state, request, output, guard):
+    """Eight fixed panels. Only typed isolated scoring/output failures recover.
+
+    Integrity, identity, nonfinite, route/restoration, guards and receipt-save
+    failures propagate fatally. No failed or elapsed observation is retried here.
+    The training runner verifies optimizer/counters/exposure in addition to this
+    consumer's weight/gradient/RNG/runtime restoration.
+    """
+    return _run_original13_panels(model, processor, state=state, request=request,
+                                 output=output, guard=guard, observation=True)
+
+
+def run_original13_evaluation(model, processor, *, request, output, guard):
+    state, _ = open_original13_terminal(request['training_run'])
+    return _run_original13_panels(model, processor, state=state, request=request,
+                                 output=output, guard=guard, observation=False)
+
+
+def original13_training_rows(training_run):
+    """Preserve raw/weighted stream measures and denominators; never smooth/select.
+
+    A continued segment exposes only its own rows and the prior-segment pointers.
+    The verified terminal exposure ledger remains the cumulative authority.
+    """
+    from .experiment_records import read_events
+    root = Path(training_run).resolve()
+    state, _ = open_original13_terminal(root)
+    campaign = json.loads((root / 'campaign.json').read_text())
+    rows = []
+    for event in read_events(root / 'metrics.jsonl'):
+        if event['event_type'] != 'update':
+            continue
+        payload = event['payload']
+        if payload['nonfinite'] or payload['skipped']:
+            raise ValueError('original13 report contains unsuccessful scalar update')
+        rows.append({'global_update': payload['completed_step'], 'phase': event['phase_id'],
+                     'site': payload['site_id'], 'objective': copy.deepcopy(payload['objective']),
+                     'exposure': copy.deepcopy(payload['exposure']), 'lr_used': payload['lr_used'],
+                     'cost': {'timing': copy.deepcopy(payload.get('timing', {})),
+                              'memory': copy.deepcopy(payload.get('memory', {}))}})
+    count = campaign['segment_updates']
+    if [r['global_update'] for r in rows] != list(range(campaign['completed_updates']-count+1,
+                                                       campaign['completed_updates']+1)):
+        raise ValueError('original13 segment scalar cadence differs')
+    return {'rows': rows, 'segment_updates': count,
+            'segment_ancestry': state.payload['metadata']['segment_ancestry'],
+            'cumulative_exposure': state.payload['metadata']['exposure'],
+            'metrics_sha256': file_digest(root / 'metrics.jsonl')}
+
+
+def original13_report(training_run, *, initial=None, supplemental=None, observations=(),
+                      initial_request=None, supplemental_request=None):
+    """Offline descriptive accounting from requests and durable receipts only."""
+    state, _ = open_original13_terminal(training_run)
+    _, plan = _reopen_original13(state)
+    campaign = json.loads((Path(training_run) / 'campaign.json').read_text())
+    report = {'schema': 'original13-report-v1', 'width': plan.width, 'ratio': plan.ratio,
+              'checkpoint': asdict(state.reference), 'training': campaign['status'],
+              'observations': copy.deepcopy(campaign['observations']), 'terminal': {},
+              'collection': 'complete', 'results': [],
+              'training_scalars': original13_training_rows(training_run),
+              'limits': 'Descriptive single-seed development evidence; common seeds do not prove equal realized AWGN. '
+                        'Old six-encoder runs are contextual. No superiority/convergence claim.'}
+    for scope, root, requested in (('initial', initial, initial_request),
+                                   ('supplemental', supplemental, supplemental_request)):
+        if requested is not None:
+            _validate_request(state, requested, observation=False)
+            if requested['scope'] != scope:
+                raise ValueError('original13 report explicit request scope differs')
+        if root is None and requested is not None:
+            count = len(requested['sites']) * len(requested['conditions'])
+            report['terminal'][scope] = {'status': 'pending', 'requested': count, 'completed': 0,
+                                        'failed': 0, 'pending': count}
+            continue
+        if root is None:
+            report['terminal'][scope] = {'status': 'not_requested', 'requested': 0, 'completed': 0,
+                                        'failed': 0, 'pending': 0}
+            continue
+        receipt = json.loads((Path(root) / 'result.json').read_text())
+        _verify_original13_result(receipt, state, observation=False)
+        if (receipt['request']['scope'] != scope
+                or (requested is not None and requested != receipt['request'])):
+            raise ValueError('original13 report request scope differs')
+        report['terminal'][scope] = _panel_counts(receipt)
+        report['results'].extend(copy.deepcopy(receipt['panels']))
+    endpoints = set()
+    for root in observations:
+        receipt = json.loads((Path(root) / 'result.json').read_text())
+        observed_state = _open_bound_reference(CheckpointRef(**receipt['checkpoint']))
+        _verify_original13_result(receipt, observed_state, observation=True)
+        endpoint = (receipt['request']['step'], receipt['request']['state_role'])
+        if endpoint in endpoints:
+            raise ValueError('original13 report duplicate observation endpoint')
+        endpoints.add(endpoint)
+        if (receipt['plan_identity'] != plan.identity
+                or not _own_observation_checkpoint(state, campaign, receipt['checkpoint'], receipt['request'])):
+            raise ValueError('original13 report observation trajectory differs')
+        report.setdefault('observation_receipts', []).append(_panel_counts(receipt))
+    report['observations_status'] = campaign['observations_status']
+    return report
+
+
+def _own_observation_checkpoint(terminal, campaign, reference, request):
+    """Endpoint must be saved by this segment or an explicitly carried ancestor.
+
+    Continuation keeps an earlier failed/pending observation pending; a supplied
+    receipt is descriptive evidence, not an automatic training-status rewrite.
+    """
+    details = terminal.payload['metadata']
+    campaigns = [(campaign, details['completed_updates'])]
+    for parent_reference in details['segment_ancestry']:
+        parent = _open_bound_reference(CheckpointRef(**parent_reference))
+        fields = ('source_identity', 'config_identity', 'prepared_identity', 'plan_identity',
+                  'input_identity', 'initialization_identity', 'stream_identity')
+        if any(parent.payload['metadata'][key] != details[key] for key in fields):
+            raise ValueError('original13 report ancestor identity differs')
+        parent_campaign = json.loads((Path(parent_reference['path']).parent / 'campaign.json').read_text())
+        if not any({k: saved[k] for k in ('path', 'sha256', 'size')} == parent_reference
+                   for saved in parent_campaign['checkpoints']):
+            raise ValueError('original13 ancestor campaign does not own carried checkpoint')
+        campaigns.append((parent_campaign, parent.payload['metadata']['completed_updates']))
+    for owner, inherited_through in campaigns:
+        if request['step'] > inherited_through:
+            continue
+        matches = [saved for saved in owner['checkpoints'] if saved['role'] == request['state_role']
+                   and {k: saved[k] for k in ('path', 'sha256', 'size')} == reference]
+        observation = next((row for row in owner['observations']
+                            if (row['step'], row['state_role']) == (request['step'], request['state_role'])), None)
+        if matches and observation and observation.get('request_identity') == canonical_digest(request):
+            return True
+    return False
+
+
+def _panel_counts(receipt):
+    return {'status': receipt['status'], 'requested': len(receipt['panels']),
+            'completed': sum(p['status'] == 'complete' for p in receipt['panels']),
+            'failed': sum(p['status'] == 'failed' for p in receipt['panels']),
+            'pending': sum(p['status'] == 'pending' for p in receipt['panels']),
+            'requested_items': sum(p['requested_items'] for p in receipt['panels']),
+            'observed_items': sum(p['completed_items'] for p in receipt['panels']),
+            'elapsed_seconds': receipt['elapsed_seconds']}
+
+
+def _verify_original13_result(receipt, state, *, observation):
+    _validate_request(state, receipt['request'], observation=observation)
+    if (receipt['schema'] != 'original13-evaluation-receipt-v1'
+            or receipt['request_identity'] != canonical_digest(receipt['request'])
+            or receipt['checkpoint'] != asdict(state.reference)):
+        raise ValueError('original13 result identity differs')
+    expected = [(site, condition) for condition in receipt['request']['conditions']
+                for site in receipt['request']['sites']]
+    if [(p['site'], p['condition']) for p in receipt['panels']] != expected:
+        raise ValueError('original13 result panels missing/duplicated/reordered')
+    for panel in receipt['panels']:
+        if panel['status'] not in ('complete', 'pending', 'failed'):
+            raise ValueError('original13 unsupported panel status')
+        if panel['requested_items'] != receipt['request']['expected_items']:
+            raise ValueError('original13 panel requested denominator differs')
+        if panel['status'] == 'complete':
+            panel_request = {**receipt['request'], 'schema': 'original13-panel-request-v1',
+                             'target_site': panel['site'], 'conditions': [panel['condition']]}
+            if (panel['panel_identity'] != canonical_digest(panel_request)
+                    or panel['completed_items'] != panel['requested_items']
+                    or panel['denominator'] != panel['requested_items']):
+                raise ValueError('original13 panel identity/completed denominator differs')
+            path = Path(panel['receipt']['path'])
+            if file_digest(path) != panel['receipt']['sha256']:
+                raise ValueError('original13 panel receipt bytes differ')
+            if json.loads((path.parent / 'request.json').read_text()) != panel_request:
+                raise ValueError('original13 panel request differs')
+            saved = json.loads(path.read_text())
+            if saved != {k: v for k, v in panel.items() if k != 'receipt'}:
+                raise ValueError('original13 panel summary differs from receipt')
+            for name, checksum in saved['output_hashes'].items():
+                if Path(name).name != name or file_digest(path.parent / name) != checksum:
+                    raise ValueError('original13 panel artifact bytes differ')
+    if (receipt['status'] == 'complete') != all(p['status'] == 'complete' for p in receipt['panels']):
+        raise ValueError('original13 completion differs from actual panel receipts')
