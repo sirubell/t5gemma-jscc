@@ -39,7 +39,7 @@ def capture_online_encoder_activation(model, batch: dict, site: ResolvedSite) ->
         raise ValueError("online reconstruction supports the original six encoder sites")
     if resolve_encoder_site(model.base, site.split, site.model_revision) != site:
         raise ValueError("online reconstruction site differs from the backbone")
-    if model.split != site.split or model.memory_codec is not None:
+    if model.split != site.split or model.requires_memory_transmission:
         raise ValueError("route the model to the selected encoder site before capture")
     if model.base.training or any(p.requires_grad for p in model.base.parameters()):
         raise ValueError("online feature acquisition requires a frozen eval backbone")
@@ -116,5 +116,88 @@ def online_reconstruction_batch_values(model, batch: dict, snr_db, settings: dic
         return cast(BatchValues, {**components, "kl": zero, "nmse": hidden,
                     "kl_numerator": zero, "kl_denominator": denominator.new_zeros(()),
                     "hidden_numerator": numerator, "hidden_denominator": denominator})
+    finally:
+        _clear_activations(model)
+
+
+@torch.no_grad()
+def capture_online_original13_targets(model, batch, site):
+    """Clean decoder prefix and encoder memory; unwind before the receiver."""
+    from .models.split_model import ResolvedDecoderSite, resolve_original13_site
+    from .runtime import model_inputs
+    if isinstance(site, ResolvedSite):
+        # The canonical memory alias exists even when this route has one role.
+        return capture_online_encoder_activation(model, batch, site), None
+    if not isinstance(site, ResolvedDecoderSite):
+        raise TypeError("original13 capture requires a resolved site")
+    if (resolve_original13_site(model.base, site.site_id, site.model_revision) != site
+            or model.split != site.split or not model.universal_codec):
+        raise ValueError("capture requires the selected universal decoder route")
+    if model.base.training or any(p.requires_grad for p in model.base.parameters()):
+        raise ValueError("online feature acquisition requires a frozen eval backbone")
+    if "pixel_values" in batch:
+        raise ValueError("original13 capture requires HellaSwag text inputs")
+    kwargs, labels = model_inputs(batch, model)
+    mask = kwargs["attention_mask"]
+    if (mask.ndim != 2 or mask.shape != kwargs["input_ids"].shape
+            or not bool(((mask == 0) | (mask == 1)).all())):
+        raise ValueError("online reconstruction requires a complete binary source mask")
+    observed = []
+
+    def stop(_module, _args, output):
+        observed.append((output[0] if isinstance(output, tuple) else output).detach().clone())
+        raise _EncoderBoundaryReached
+
+    stack = stack_module(model.base, "dec")
+    handle = stack.layers[site.index].register_forward_hook(stop, prepend=True)
+    try:
+        with autocast_for(model), model.attention_context(), model.transmission(
+            bypass=True, encoder_mask=mask, decoder_mask=labels != -100
+        ):
+            memory = model.base.get_encoder()(input_ids=kwargs["input_ids"],
+                attention_mask=mask, return_dict=True).last_hidden_state.detach()
+            try:
+                stack(input_ids=kwargs["decoder_input_ids"], encoder_hidden_states=memory,
+                      encoder_attention_mask=mask, use_cache=False, return_dict=True)
+            except _EncoderBoundaryReached:
+                pass
+        if len(observed) != 1:
+            raise RuntimeError("online decoder boundary was not reached exactly once")
+        hidden = observed.pop()
+        if hidden.shape != (*labels.shape, site.hidden_dim) or memory.shape != (*mask.shape, site.hidden_dim):
+            raise RuntimeError("online targets differ from complete native source/target views")
+        return hidden, memory
+    finally:
+        handle.remove()
+        observed.clear()
+        _clear_activations(model)
+
+
+def original13_reconstruction_batch_values(model, batch, snr_db, settings, *, site):
+    """Local hidden/memory roundtrips with separate valid-sample reductions."""
+    hidden, memory = capture_online_original13_targets(model, batch, site)
+    source_mask = batch["attention_mask"].to(hidden.device)
+    target_mask = (batch["labels"] != -100).to(hidden.device)
+    try:
+        with autocast_for(model), model.transmission(
+            snr_db, encoder_mask=source_mask, decoder_mask=target_mask
+        ):
+            reconstructed = model._roundtrip(hidden)
+            hidden_mask = target_mask if model.split["stack"] == "dec" else source_mask
+            hn, hd = reconstruction_loss_stats(reconstructed, hidden, hidden_mask)
+            mn = md = None
+            if memory is not None:
+                model.memory_activation = memory
+                model.memory_reconstruction = model._transmit(memory, model.memory_codec, "memory",
+                    source_mask, mask_representation="binary")
+                mn, md = reconstruction_loss_stats(model.memory_reconstruction, memory, source_mask)
+        h = hn / hd.clamp_min(1)
+        m = mn / md.clamp_min(1) if mn is not None and md is not None else None
+        zero = hn.detach().new_zeros(())
+        components = objective_components(zero, h, m, settings)
+        return cast(BatchValues, {**components, "kl": zero, "nmse": h if m is None else (h + m) / 2,
+            "kl_numerator": zero, "kl_denominator": hd.new_zeros(()),
+            "hidden_numerator": hn, "hidden_denominator": hd,
+            "memory_numerator": mn, "memory_denominator": md})
     finally:
         _clear_activations(model)

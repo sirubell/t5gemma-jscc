@@ -1,6 +1,7 @@
 """Insert codec -> channel -> codec at one frozen encoder/decoder layer."""
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -74,6 +75,43 @@ def resolve_encoder_site(base, site_spec, model_revision):
     return ResolvedSite(where, index, model_revision, count, width, path)
 
 
+@dataclass(frozen=True)
+class ResolvedDecoderSite:
+    """A decoder hidden boundary with a nonempty receiver suffix."""
+    index: int
+    model_revision: str
+    layer_count: int
+    hidden_dim: int
+    schema: str = "original13-decoder-site-v1"
+
+    @property
+    def site_id(self):
+        return f"dec_l{self.index}"
+
+    @property
+    def split(self):
+        return {"stack": "dec", "where": "after_layer", "index": self.index}
+
+
+def resolve_original13_site(base, site_id, model_revision):
+    from ..encoder_stages_plan import ORIGINAL13_SITES
+    if site_id not in ORIGINAL13_SITES:
+        raise ValueError("site is outside the approved original13 cohort")
+    if site_id.startswith("enc_"):
+        from ..encoder_pilot_plan import SITE_SPECS
+        return resolve_encoder_site(base, SITE_SPECS[site_id], model_revision)
+    if not isinstance(model_revision, str) or not model_revision:
+        raise ValueError("a pinned model revision is required")
+    configured_revision = getattr(base.config, "_commit_hash", None)
+    if configured_revision is not None and configured_revision != model_revision:
+        raise ValueError("site model revision differs from backbone")
+    stack = stack_module(base, "dec")
+    index = int(site_id[5:])
+    if not 0 <= index < len(stack.layers) - 1:
+        raise ValueError("decoder boundary requires a receiver suffix")
+    return ResolvedDecoderSite(index, model_revision, len(stack.layers), int(stack.config.hidden_size))
+
+
 class SplitModel(nn.Module):
     def __init__(self, base, codec, channel, split, channel_config, sdpa_backend_policy="auto", numerical_policy="native"):
         super().__init__()
@@ -98,6 +136,8 @@ class SplitModel(nn.Module):
         self.memory_activation = None
         self.memory_reconstruction = None
         self.memory_codec: Codec | None = None
+        self.universal_codec = False
+        self._memory_handles = []
         self.channel_uses = {"hidden": 0, "memory": 0}
         # ``channel_uses`` is retained as the allocated execution-tensor
         # count.  The separate map excludes padded token positions and is
@@ -134,9 +174,40 @@ class SplitModel(nn.Module):
             if first_receiver < len(stack.layers):
                 _, memory_config = resolve_codec_configs(codec.config)
                 self.memory_codec = Codec(codec.encoder[0].weight.shape[1], memory_config)
-                stack.register_forward_pre_hook(self._begin_decoder, with_kwargs=True)
-                for layer in stack.layers[first_receiver:]:
-                    layer.self_attn.register_forward_pre_hook(self._receiver_memory, with_kwargs=True)
+                self._install_memory_hooks()
+
+    @property
+    def requires_memory_transmission(self):
+        if self.split["stack"] != "dec":
+            return False
+        stack = stack_module(self.base, "dec")
+        first = (cast(int, self.split["index"]) + 1 if self.split["where"] == "after_layer" else
+                 len(stack.layers) if self.split["where"] == "after_final_norm" else 0)
+        return first < len(stack.layers)
+
+    def enable_universal_codec(self):
+        """Explicit original13 setup; preserve independent legacy codec routes."""
+        if self._routing_active or self._forward_active:
+            raise RuntimeError("cannot change parameter ownership during a route")
+        if self.numerical_policy != "native":
+            raise ValueError("original13 requires native numerical policy")
+        self.memory_codec = self.codec
+        self.universal_codec = True
+        self._install_memory_hooks()
+        return self
+
+    def _install_memory_hooks(self):
+        for handle in self._memory_handles:
+            handle.remove()
+        self._memory_handles = []
+        if not self.requires_memory_transmission:
+            return
+        stack = stack_module(self.base, "dec")
+        first = cast(int, self.split["index"]) + 1 if self.split["where"] == "after_layer" else 0
+        self._memory_handles.append(stack.register_forward_pre_hook(self._begin_decoder, with_kwargs=True))
+        for layer in stack.layers[first:]:
+            self._memory_handles.append(layer.self_attn.register_forward_pre_hook(
+                self._receiver_memory, with_kwargs=True))
 
     def _install_insertion(self, split):
         stack = stack_module(self.base, split["stack"])
@@ -168,12 +239,20 @@ class SplitModel(nn.Module):
             raise ValueError("codec_receiver_fp32 cannot route away from encoder after_final_norm")
         if self._routing_active or self._forward_active:
             raise RuntimeError("site routing cannot nest or change during a forward")
-        if self.split["stack"] != "enc" or self.memory_codec is not None:
-            raise ValueError("encoder sharing cannot route decoder-memory models")
-        if not isinstance(site, ResolvedSite):
-            raise TypeError("site must be a ResolvedSite")
-        if resolve_encoder_site(self.base, site.split, site.model_revision) != site:
-            raise ValueError("resolved site does not match backbone metadata")
+        if self.universal_codec:
+            if self.memory_codec is not self.codec:
+                raise ValueError("universal role aliases differ")
+            if not isinstance(site, (ResolvedSite, ResolvedDecoderSite)):
+                raise TypeError("site must be a resolved original13 site")
+            if resolve_original13_site(self.base, site.site_id, site.model_revision) != site:
+                raise ValueError("resolved site does not match backbone metadata")
+        else:
+            if self.split["stack"] != "enc" or self.memory_codec is not None:
+                raise ValueError("encoder sharing cannot route decoder-memory models")
+            if not isinstance(site, ResolvedSite):
+                raise TypeError("site must be a ResolvedSite")
+            if resolve_encoder_site(self.base, site.split, site.model_revision) != site:
+                raise ValueError("resolved site does not match backbone metadata")
         if self.codec.encoder[0].weight.shape[1] != site.hidden_dim:
             raise ValueError("resolved site hidden dimension differs from codec")
         if purpose not in ("train", "evaluate", "capture"):
@@ -194,12 +273,18 @@ class SplitModel(nn.Module):
         try:
             self.split = site.split
             self.handle = self._install_insertion(self.split)
+            if self.universal_codec:
+                self._install_memory_hooks()
             with self.attention_context():
                 yield self
         finally:
             self.handle.remove()
             self.split = previous_split
             self.handle = self._install_insertion(previous_split)
+            if self.universal_codec:
+                self._install_memory_hooks()
+                self.activation = self.reconstruction = None
+                self.memory_activation = self.memory_reconstruction = None
             (self._encoder_valid_mask, self._decoder_valid_mask,
              self._active_encoder_valid_mask, self._encoder_mask_representation,
              self._decoder_mask_representation, self._active_encoder_mask_representation) = masks
@@ -415,6 +500,8 @@ class SplitModel(nn.Module):
         return args, {**kwargs, "encoder_hidden_states": self.memory_reconstruction}
 
     def load_communication_state(self, state):
+        if self.universal_codec:
+            raise ValueError("original13 requires the flat canonical load_codec body, not legacy role bodies")
         self.codec.load_state_dict(state["codec"])
         self.channel.load_state_dict(state["channel"])
         memory = state.get("memory_codec")

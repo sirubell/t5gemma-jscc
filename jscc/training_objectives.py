@@ -14,6 +14,11 @@ class BatchValues(TypedDict):
     loss: torch.Tensor
     kl: torch.Tensor
     nmse: torch.Tensor
+    hidden: NotRequired[torch.Tensor]
+    memory: NotRequired[torch.Tensor]
+    weighted_kl: NotRequired[torch.Tensor]
+    weighted_hidden: NotRequired[torch.Tensor]
+    weighted_memory: NotRequired[torch.Tensor]
     kl_numerator: NotRequired[torch.Tensor]
     kl_denominator: NotRequired[torch.Tensor]
     hidden_numerator: NotRequired[torch.Tensor]
@@ -23,6 +28,11 @@ class BatchValues(TypedDict):
 
 def objective_components(kl, hidden, memory, settings, *, stream_count=None):
     """Explicit weights override legacy kl/mse; no second stream averaging."""
+    required_memory = settings.get("requires_memory")
+    if required_memory is True and memory is None:
+        raise RuntimeError("active decoder route is missing required memory reconstruction")
+    if required_memory is False and memory is not None:
+        raise RuntimeError("encoder route unexpectedly produced memory reconstruction")
     count = stream_count if stream_count is not None else (2 if memory is not None else 1)
     explicit = settings.get("loss_weights")
     weights = explicit or {"kl": settings["kl_weight"],
@@ -57,7 +67,8 @@ def effective_batch_denominators(model, batches: list[dict], device) -> dict[str
     kl = torch.zeros((), device=device, dtype=torch.float32)
     hidden = torch.zeros((), device=device, dtype=torch.float32)
     memory = torch.zeros((), device=device, dtype=torch.float32)
-    has_memory = getattr(model, "memory_codec", None) is not None
+    has_memory = getattr(model, "requires_memory_transmission",
+                         getattr(model, "memory_codec", None) is not None)
     stack = model.split.get("stack") if hasattr(model, "split") else "enc"
     for batch in batches:
         labels = batch["labels"].to(device=device)
@@ -127,6 +138,8 @@ def aggregate_batch_losses(values: list[BatchValues], training) -> dict[str, tor
             if memory_denominator is None:
                 raise RuntimeError("memory denominator is missing for a memory reconstruction")
             memory.append((memory_numerator, memory_denominator))
+    if memory and len(memory) != len(values):
+        raise RuntimeError("inconsistent memory streams across effective batch")
     if memory:
         streams.append((sum((item[0] for item in memory[1:]), memory[0][0]),
                         sum((item[1] for item in memory[1:]), memory[0][1])))

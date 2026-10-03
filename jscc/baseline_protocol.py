@@ -121,7 +121,7 @@ def _check_batches(batches, kind, expected_sequences=None):
     return count
 
 
-def _objective_record(totals, kind):
+def _objective_record(totals, kind, settings=None):
     def component(name, measured=True):
         if not measured:
             return {"raw": measure(reason="unmeasured"), "weighted": measure(reason="unmeasured"),
@@ -131,8 +131,19 @@ def _objective_record(totals, kind):
                 "weighted": measure(float(totals["weighted_" + stat])),
                 "numerator": measure(float(totals[stat + "_numerator"])),
                 "denominator": int(totals[stat + "_denominator"])}
-    return {"kind": kind, "total": measure(float(totals["loss"])),
-            "components": {"K": component("K", kind == "combined"), "R": component("R")}}
+    result = {"kind": kind, "total": measure(float(totals["loss"])),
+              "components": {"K": component("K", kind == "combined"), "R": component("R")}}
+    if settings and "requires_memory" in settings:
+        result["resolved_weights"] = dict(settings["loss_weights"])
+        result["components"] = {}
+        for name in ("kl", "hidden", "memory"):
+            measured = name != "memory" or settings["requires_memory"]
+            result["components"][name] = {
+                "raw": measure(float(totals[name])) if measured else measure(reason="not_required"),
+                "weighted": measure(float(totals["weighted_" + name])),
+                "numerator": measure(float(totals[name + "_numerator"])) if measured else measure(reason="not_required"),
+                "denominator": int(totals[name + "_denominator"]) if measured else 0}
+    return result
 
 
 class BaselineLearner:
@@ -227,10 +238,13 @@ class BaselineLearner:
         draws = list(channel.draw_summaries) if isinstance(channel, AWGNChannel) else []
         return values, snr, {"key": key, "draws": draws}
 
+    def _objective_settings(self, kind):
+        return objective_settings(kind)
+
     def update(self, batches, *, kind="combined", data_cache_seconds=0.0, batch_identities=None):
         if self.failed or self.completed >= self.final_step:
             raise RuntimeError("learner is terminal; no automatic retries or extra updates")
-        settings = objective_settings(kind)
+        settings = self._objective_settings(kind)
         _check_batches(batches, kind, self.effective_batch)
         if batch_identities is not None:
             if len(batch_identities) != len(batches):
@@ -253,12 +267,17 @@ class BaselineLearner:
         self.offset += self.effective_batch  # attempted exposure is charged even on failure
         self.valid_tokens += source
         results, snrs, draws = [], [], []
+        coordinates = {"hidden": 0, "memory": 0}
+        coordinates_allocated = {"hidden": 0, "memory": 0}
         optimizer_called = False
         try:
             denominator = effective_batch_denominators(self.model, batches, next(self.model.base.parameters()).device)
             for micro, batch in enumerate(batches):
                 values, snr, draw = self._values(batch, kind, step, micro, "train",
                     capture=capture, bound_identity=None if batch_identities is None else batch_identities[micro])
+                for role in coordinates:
+                    coordinates[role] += self.model.channel_uses_valid[role]
+                    coordinates_allocated[role] += self.model.channel_uses[role]
                 loss = scaled_batch_loss(values, settings, denominator)
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError("nonfinite loss")
@@ -313,10 +332,10 @@ class BaselineLearner:
                        "exposure": {"source_tokens": source, "target_tokens": target, "sequences": self.effective_batch,
                                     "padded_tokens": allocated, "valid_tokens": source,
                                     "cumulative_valid_tokens": self.valid_tokens, "latent_width": width,
-                                    "hidden_coordinates": source * width, "hidden_coordinates_allocated": allocated * width,
-                                    "memory_coordinates": measure(reason="not_applicable"),
-                                    "memory_coordinates_allocated": measure(reason="not_applicable")},
-                       "objective": _objective_record(totals, kind), "lr_used": lr_used,
+                                    "hidden_coordinates": coordinates["hidden"], "hidden_coordinates_allocated": coordinates_allocated["hidden"],
+                                    "memory_coordinates": coordinates["memory"] if self.model.requires_memory_transmission else measure(reason="not_applicable"),
+                                    "memory_coordinates_allocated": coordinates_allocated["memory"] if self.model.requires_memory_transmission else measure(reason="not_applicable")},
+                       "objective": _objective_record(totals, kind, settings), "lr_used": lr_used,
                        "lr_next": [group["lr"] for group in self.optimizer.param_groups],
                        "gradient": {"pre_clip": measure(float(pre_clip)), "post_clip": measure(float(post_clip)),
                                     "clip_threshold": measure(self.grad_clip), "clipped": float(pre_clip) > self.grad_clip},
