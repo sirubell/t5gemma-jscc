@@ -1,7 +1,7 @@
 """Insert codec -> channel -> codec at one frozen encoder/decoder layer."""
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -598,7 +598,7 @@ class SplitModel(nn.Module):
              self._decoder_mask_representation, self._active_encoder_mask_representation) = previous
 
 
-def build_model(config):
+def build_model(config, *, local_files_only=False):
     model_config = config["model"]
     policy = model_config.get("sdpa_backend_policy", "auto")
     validate_sdpa_backend_policy(policy)
@@ -607,7 +607,11 @@ def build_model(config):
         raise ValueError("flash_math is currently supported only for task=coco")
     # Imports are delayed so --check and tensor-only tests need no Transformers.
     from transformers import AutoModelForSeq2SeqLM, AutoProcessor, AutoTokenizer
-    kwargs = {"revision": model_config["revision"]}
+    kwargs: dict[str, Any] = {"revision": model_config["revision"]}
+    if local_files_only:
+        kwargs['local_files_only'] = True
+    if 'attn_implementation' in model_config:
+        kwargs['attn_implementation'] = model_config['attn_implementation']
     processor_cls = AutoProcessor if config["task"] == "coco" else AutoTokenizer
     processor = processor_cls.from_pretrained(model_config["name"], **kwargs)
     dtype = getattr(torch, model_config["dtype"])

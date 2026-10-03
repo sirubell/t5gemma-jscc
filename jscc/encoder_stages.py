@@ -383,6 +383,8 @@ class Original13TrainingState:
                     'plan_identity': self.plan.identity, 'input_identity': self.plan.input_identity,
                     'observation_identity': self.plan.observation_identity}
         expected.pop('parent_identity', None)
+        if 'source_commit' in self.metadata:
+            expected['source_commit'] = self.metadata['source_commit']
         # open_state requires a supplied parent; inspect it only after hash validation
         # via a compatibility open against the parent's value from trusted bytes.
         data = Path(reference.path).read_bytes()
@@ -433,7 +435,7 @@ class Original13TrainingState:
 
 
 def run_original13_training(model, processor, *, plan, batches, metadata, observation_request,
-                            output, guard, routing=None, observe=None, resume=None):
+                            output, guard, routing=None, observe=None, resume=None, config=None, data_ids=None):
     """Fresh segment or explicit continuation; no automatic retry or model loading."""
     from . import original13_routing
     from .baseline_protocol import bind_batch_identity
@@ -442,6 +444,12 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
     from .experiment_state import capture_rng, restore_rng
     routing = original13_routing if routing is None else routing
     observe = observe_original13 if observe is None else observe
+    if not plan.synthetic and (config is None or data_ids is None):
+        raise ValueError('production original13 requires resolved configuration and data IDs')
+    if config is not None and canonical_digest(config) != metadata['config_identity']:
+        raise ValueError('original13 run configuration identity differs')
+    if data_ids is not None and canonical_digest(data_ids) != metadata['data_identity']:
+        raise ValueError('original13 run data membership differs')
     if (len(batches) != plan.q or tuple(batch_view(b) for b in batches) != plan.views
             or canonical_digest(observation_request['panel']) != plan.observation_identity):
         raise ValueError('original13 verified inputs/observation panel differ')
@@ -455,6 +463,11 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
     write_manifest(output / 'campaign.json', result)
     learner = None
     try:
+        if config is not None:
+            from .config import save_config
+            save_config(config, output / 'config.yaml')
+        if data_ids is not None:
+            write_manifest(output / 'data_ids.json', data_ids)
         learner = routing.create_original13_learner(model, plan=plan, metadata=metadata,
                                                    event_sink=AppendOnlyEventWriter(output / 'metrics.jsonl').append)
         state_machine = Original13TrainingState(learner, plan=plan, metadata=metadata, routing=routing)
@@ -512,6 +525,9 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
                     row.update(request_identity=canonical_digest(request),
                         status='failed' if error else 'complete', error=error,
                         requires_explicit_completion=bool(error))
+                    receipt_path = output / f'observation_{step:06d}' / 'result.json'
+                    if receipt_path.is_file():
+                        row['receipt'] = {'path': str(receipt_path), 'sha256': file_digest(receipt_path)}
                     write_manifest(output / 'campaign.json', result)
                 if role == 'pre_reset':
                     state_machine.reset(state)
@@ -527,6 +543,9 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
                     or any(lr != 2e-4 * expected.lr_factor for lr in used)
                     or event['payload']['lr_used'] != used):
                 raise ValueError('original13 update progress or consumed LR differs')
+            if learner.completed % (len(plan.trained_sites) * 100) == 0:
+                result['completed_updates'] = learner.completed
+                write_manifest(output / 'campaign.json', result)
         counts = learner.exposure.finalize()
         events = [e for e in read_events(output / 'metrics.jsonl') if e['event_type'] == 'update']
         if [e['payload']['completed_step'] for e in events] != list(range(initial_completed + 1, plan.horizon + 1)):
@@ -551,3 +570,134 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
                       error={'type': type(exc).__name__, 'message': str(exc)})
         write_manifest(output / 'campaign.json', result)
         raise
+
+
+def load_original13_prepared(path, *, checksum, width, ratio, load_batches=True):
+    """Load only bound local inputs/configs; never select a newer run or checkpoint."""
+    from .encoder_stages_plan import Original13Plan, ORIGINAL13_PROTOCOL
+    from .encoder_stages_preparation import resolve_original13_plans, validate_original13_config
+    from .config import validate_config
+    path = Path(path).resolve()
+    if file_digest(path) != checksum:
+        raise ValueError('exact original13 prepared SHA required')
+    manifest = json.loads(path.read_text())
+    inventory = stages_source_inventory()
+    if (manifest.get('schema') != 'original13-prepared-v1'
+            or manifest.get('manifest_identity') != canonical_digest(
+                {k: v for k, v in manifest.items() if k != 'manifest_identity'})
+            or manifest['source_inventory'] != inventory
+            or manifest['source_identity'] != canonical_digest(inventory)):
+        raise ValueError('original13 prepared source/manifest differs')
+    plans = tuple(Original13Plan.from_resolved(row) for row in manifest['plans'])
+    selected = [p for p in plans if p.width == width and p.ratio == ratio]
+    if len(selected) != 1:
+        raise ValueError('exact declared original13 width/ratio required')
+    plan = selected[0]
+    inputs_path = Path(manifest['inputs_path'])
+    if file_digest(inputs_path) != manifest['inputs_sha256'] or plan.input_identity != manifest['inputs_sha256']:
+        raise ValueError('original13 input manifest differs')
+    inputs = json.loads(inputs_path.read_text())
+    if (manifest['data_identity'] != canonical_digest(inputs['data_ids'])
+            or canonical_digest(manifest['observation_request']['panel']) != plan.observation_identity):
+        raise ValueError('original13 prepared membership differs')
+    config = copy.deepcopy(manifest['configs'][str(width)])
+    validate_config(config)
+    validate_original13_config(config, width)
+    if (config['protocol'] != ORIGINAL13_PROTOCOL or config['split'] != SITE_SPECS['enc_fn']
+            or config['training']['max_steps'] != plan.horizon
+            or config['training']['schedule_steps'] != plan.horizon):
+        raise ValueError('original13 resolved config/horizon differs')
+    if not plan.synthetic:
+        if (config['model']['revision'] != 'dd0a2683227859151b1730ca3a63087df5b5f39b'
+                or config['model']['dtype'] != 'bfloat16' or config['model']['attn_implementation'] != 'sdpa'
+                or len(plans) != 9 or set((p.width, p.ratio) for p in plans) != {
+                    (w, r) for w in (512, 1152, 2304) for r in (50, 75, 90)}):
+            raise ValueError('original13 production model/matrix differs')
+        expected = resolve_original13_plans(plan.views, inputs=inputs, input_identity=plan.input_identity)
+        if [p.identity for p in expected] != [p.identity for p in plans]:
+            raise ValueError('original13 production plan bindings differ')
+    initial_ref = manifest['initializations'][str(width)]
+    if initial_ref != inputs['initializations'][str(width)] or initial_ref.get('seed') != 0:
+        raise ValueError('original13 width initializer origin differs')
+    initial = torch.load(_reference(inputs_path.parent, initial_ref), map_location='cpu', weights_only=True)
+    if state_dict_identity(initial) != initial_ref['state_identity']:
+        raise ValueError('original13 initializer bytes differ')
+    batches = None
+    if load_batches:
+        batches = [read_prepared_batch(ref, inputs_path.parent) for ref in inputs['updates']]
+        if tuple(batch_view(b) for b in batches) != plan.views:
+            raise ValueError('original13 ordered actual input views differ')
+        if not plan.synthetic:
+            rows = [int(i) for b in batches for i in b['row_ids']]
+            expected_rows = PresentationSampler(inputs['data_ids']['train_rows'], 160000, seed=20260920).actual_ids.tolist()
+            if rows != expected_rows:
+                raise ValueError('original13 native row stream differs')
+    metadata = {'source_identity': manifest['source_identity'], 'source_commit': manifest['source_commit'],
+                'config_identity': canonical_digest(config), 'data_identity': manifest['data_identity'],
+                'initialization_identity': initial_ref['state_identity'], 'stream_identity': plan.input_identity,
+                'protocol_identity': ORIGINAL13_PROTOCOL, 'prepared_identity': manifest['manifest_identity'],
+                'model_revision': config['model']['revision']}
+    return manifest, config, plan, batches, initial, metadata, inputs['data_ids']
+
+
+def initialize_original13(config, initial, *, evaluation=False, synthetic=False):
+    """Reuse the canonical loader with local cached assets and exact codec bytes."""
+    from .models.split_model import build_model, resolve_original13_site
+    from .runtime import configure_training_determinism, seed_everything, prepare_trainable_parameters
+    from .encoder_stages_plan import ORIGINAL13_SITES
+    from . import original13_routing
+    configure_training_determinism(config['training'])
+    seed_everything(config['seed'])
+    processor, model = build_model(copy.deepcopy(config), local_files_only=True)
+    prepare_trainable_parameters(model)
+    model.codec.load_state_dict(initial, strict=True)
+    if state_dict_identity(model.codec.state_dict()) != state_dict_identity(initial):
+        raise ValueError('original13 exact FP32 initializer load differs')
+    for site_id in ORIGINAL13_SITES:
+        site = resolve_original13_site(model.base, site_id, config['model']['revision'])
+        if not synthetic and site.hidden_dim != 1152:
+            raise ValueError('original13 production hidden dimension differs')
+    if next(model.base.parameters()).dtype != getattr(torch, config['model']['dtype']):
+        raise ValueError('original13 actual backbone dtype differs')
+    if model.base.config.decoder._attn_implementation != config['model']['attn_implementation']:
+        raise ValueError('original13 actual attention backend differs')
+    if evaluation:
+        model.enable_universal_codec()
+        original13_routing.load_codec(model, initial)
+    return processor, model
+
+
+def original13_execution_guard(config, *, synthetic, timeout_seconds, device_uuid=None):
+    """Bound one direct invocation; GPU assignment is checked before model load."""
+    import os
+    import math
+    if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0):
+        raise ValueError('original13 finite positive execution timeout required')
+    device = config['model']['device']
+    if device == 'cpu':
+        if not synthetic:
+            raise ValueError('production original13 requires an assigned CUDA target')
+    elif device == 'cuda':
+        if not device_uuid or os.environ.get('CUDA_VISIBLE_DEVICES') != device_uuid:
+            raise ValueError('original13 exact assigned GPU UUID required')
+    else:
+        raise ValueError('original13 requires explicit cpu or cuda device')
+    started = time.monotonic()
+    def guard():
+        if time.monotonic() - started >= timeout_seconds:
+            raise TimeoutError('original13 finite invocation deadline reached')
+    return guard
+
+
+def verify_original13_execution_source(manifest, approved_source):
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+    if current != approved_source or manifest['source_commit'] != current:
+        raise ValueError('original13 exact approved source commit required')
+    names = sorted(manifest['source_inventory'])
+    subprocess.run(['git', 'ls-files', '--error-unmatch', '--', *names], cwd=root,
+                   stdout=subprocess.DEVNULL, check=True)
+    subprocess.run(['git', 'diff', '--exit-code', current, '--', *names], cwd=root,
+                   stdout=subprocess.DEVNULL, check=True)

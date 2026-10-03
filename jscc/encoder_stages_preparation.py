@@ -281,7 +281,7 @@ def resolve_original13_plans(views, *, inputs, input_identity, synthetic=False):
                  for width in (2304, 1152, 512) for ratio in ORIGINAL13_RATIOS)
 
 
-def bind_original13_inputs(inputs_path, *, inputs_sha256, output):
+def bind_original13_inputs(inputs_path, *, inputs_sha256, output, model_path=None):
     """Prepare source-bound plan/config identities from retained inputs only."""
     from .activation_replay import canonical_digest
     from .encoder_stages import stages_source_inventory
@@ -307,22 +307,13 @@ def bind_original13_inputs(inputs_path, *, inputs_sha256, output):
     configurations, initializers = {}, {}
     for width in WIDTHS:
         config = load_config(_reference(path.parent, inputs['configs'][str(width)]))
-        train, codec, channel = config['training'], config['codec'], config['channel']
-        if (config['task'] != 'hellaswag' or config['seed'] != 0
-                or codec['architecture'] != 'direct_affine' or codec['bottleneck_dim'] != width
-                or codec['layernorm'] != 'none' or codec['n_res_blocks'] != 0 or codec['snr_film']
-                or codec['dropout'] != 0 or train['batch_size'] != 16 or train['gradient_accumulation'] != 1
-                or train['lr'] != 2e-4 or train['weight_decay'] != 0.002500001398541448
-                or train['temperature'] != 1 or train['grad_clip'] != 1 or not train['valid_only_kl']
-                or train['warmup_ratio'] != .05 or train['min_lr_ratio'] != 0
-                or train.get('patience') is not None or train.get('loss_weights') is not None
-                or train['kl_weight'] != 1 or train['mse_weight'] != .1
-                or config['model']['revision'] != 'dd0a2683227859151b1730ca3a63087df5b5f39b'
-                or config['model']['dtype'] != 'bfloat16' or config['model']['attn_implementation'] != 'sdpa'
-                or channel['type'] != 'awgn' or not channel['normalize_power'] or not channel['train_noise']
-                or channel['train_snr_range'] != [-6.0, 18.0]):
-            raise ValueError('inherited original13 configuration differs')
+        validate_original13_config(config, width)
+        if (config['model']['revision'] != 'dd0a2683227859151b1730ca3a63087df5b5f39b'
+                or config['model']['dtype'] != 'bfloat16' or config['model']['attn_implementation'] != 'sdpa'):
+            raise ValueError('original13 pinned production model recipe differs')
         config = copy.deepcopy(config)
+        if model_path is not None:
+            config['model']['name'] = str(model_path)
         config['training'].update(max_steps=130000, schedule_steps=130000, eval_every=130000,
                                   save_steps=[])
         config['protocol'] = ORIGINAL13_PROTOCOL
@@ -342,7 +333,9 @@ def bind_original13_inputs(inputs_path, *, inputs_sha256, output):
                    'sites': ['enc_l9', 'enc_fn', 'dec_l0', 'dec_l24'], 'conditions': ['no_noise', -6],
                    'settings': {**template['settings'], 'num_samples': 256, 'snrs': ['no_noise', -6]}}
     inventory = stages_source_inventory()
-    manifest = {'schema': 'original13-prepared-v1', 'source_inventory': inventory,
+    from .runtime import source_state
+    manifest = {'schema': 'original13-prepared-v1', 'source_commit': source_state()['revision'],
+                'source_inventory': inventory,
                 'source_identity': canonical_digest(inventory), 'inputs_path': str(path),
                 'inputs_sha256': inputs_sha256, 'data_identity': canonical_digest(inputs['data_ids']),
                 'configs': configurations, 'initializations': initializers,
@@ -355,3 +348,22 @@ def bind_original13_inputs(inputs_path, *, inputs_sha256, output):
     from .baseline_protocol import write_manifest
     write_manifest(output, manifest)
     return manifest
+
+
+def validate_original13_config(config, width):
+    """Check the adopted cohort recipe at preparation and runtime load."""
+    train, codec, channel = config['training'], config['codec'], config['channel']
+    if (config['task'] != 'hellaswag' or config['seed'] != 0
+            or codec['architecture'] != 'direct_affine' or codec['bottleneck_dim'] != width
+            or codec['layernorm'] != 'none' or codec['n_res_blocks'] != 0 or codec['snr_film']
+            or codec['dropout'] != 0 or train['batch_size'] != 16 or train['gradient_accumulation'] != 1
+            or train['lr'] != 2e-4 or train['weight_decay'] != 0.002500001398541448
+            or train['temperature'] != 1 or train['grad_clip'] != 1 or not train['valid_only_kl']
+            or train['warmup_ratio'] != .05 or train['min_lr_ratio'] != 0
+            or train.get('patience') is not None or train.get('loss_weights') is not None
+            or train['kl_weight'] != 1 or train['mse_weight'] != .1
+            or config['model'].get('numerical_policy', 'native') != 'native'
+            or codec.get('memory') is not None
+            or channel['type'] != 'awgn' or not channel['normalize_power'] or not channel['train_noise']
+            or channel['train_snr_range'] != [-6.0, 18.0]):
+        raise ValueError('inherited original13 configuration differs')

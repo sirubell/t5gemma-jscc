@@ -243,9 +243,9 @@ def test_save_failure_and_mutated_observation_state_stop(tmp_path, monkeypatch):
     assert not list((tmp_path/'failure').glob('*.pt'))
 
 
-def test_stub_does_not_claim_real_routing_acceptance():
+def test_real_factory_rejects_unsupported_plan_before_model_access():
     from jscc.original13_routing import create_original13_learner
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(TypeError, match='released plan'):
         create_original13_learner(None, plan=None, metadata=None, event_sink=None)
 
 

@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -25,7 +26,7 @@ def cpu_threads():
     assert not torch.cuda.is_initialized()
 
 
-def parent64(index=0):
+def parent64(index=0) -> dict[str, Any]:
     """Unequal denominators across halves/quarters; padded metadata stays native."""
     source = torch.zeros(64, 5, dtype=torch.long)
     mask = torch.zeros_like(source)
@@ -78,9 +79,9 @@ def assert_nested_equal(left, right):
         assert left == right
 
 
-def assert_partition(parent, micro):
+def assert_partition(parent: dict[str, Any], micro):
     before = batch_identity(parent)
-    parts = partition_native64(parent, microbatch_size=micro)
+    parts: list[dict[str, Any]] = partition_native64(parent, microbatch_size=micro)
     assert len(parts) == 64 // micro
     for index, part in enumerate(parts):
         start, stop = index * micro, (index + 1) * micro
@@ -190,7 +191,9 @@ def manual_noisy_update(item, parent):
             with item.model.channel.replay(0, namespace, capture=True):
                 values = batch_losses(item.model, batch, objective_settings('combined'), snr,
                                       return_stats=True, valid_only_kl=True)
-            loss = values['kl_numerator'] / denominator + .1 * values['hidden_numerator'] / 64
+            kl_numerator, hidden_numerator = values.get('kl_numerator'), values.get('hidden_numerator')
+            assert kl_numerator is not None and hidden_numerator is not None
+            loss = kl_numerator / denominator + .1 * hidden_numerator / 64
             loss.backward()
             losses.append(float(loss.detach()))
             draws.append({'key': asdict(key), 'draws': list(item.model.channel.draw_summaries)})

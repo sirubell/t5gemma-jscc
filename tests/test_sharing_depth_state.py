@@ -4,6 +4,7 @@ Observation and update records are explicit schema fixtures, not model quality e
 """
 from copy import deepcopy
 import json
+from typing import Any
 
 import pytest
 import torch
@@ -54,7 +55,7 @@ def test_real_production400_1200_states_and_inventory_freeze(tmp_path):
                                  scheduler=scheduler, scaler=None) == stream
             artifacts.append(records.artifact_ref(target, root, 'tensor'))
             checkpoint_hashes[step] = reference.sha256
-        local = dict.fromkeys(SITES, 0)
+        local: dict[str, int] = dict.fromkeys(SITES, 0)
         for i in range(horizon):
             site = SITES[((i//3)%3+i%3)%3] if learner == 'shared' else learner.removeprefix('specialist_')
             local[site] += 1
@@ -94,7 +95,7 @@ def test_real_production400_1200_states_and_inventory_freeze(tmp_path):
         (root/'inventory.json').write_text(json.dumps(inventory))
         runs[learner] = {'root':str(root), **{key:{'path':str(root/name),'sha256':file_digest(root/name)}
             for key,name in [('events','events.jsonl'),('manifest','manifest.json'),('inventory','inventory.json')]}}
-    kwargs = dict(protocol_identity=DEPTH_PROTOCOL, recipe_identity='K+0.1R-native-effective64-q400',
+    kwargs: dict[str, Any] = dict(protocol_identity=DEPTH_PROTOCOL, recipe_identity='K+0.1R-native-effective64-q400',
                   architecture_decision='D-N/B512-depth', site_policy=policy(), trained_runs=runs,
                   obligation_plan={'task':['heldout-task'],'objective':['heldout-objective'],'geometry':['atlas']},
                   synthetic=False)
