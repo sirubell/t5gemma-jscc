@@ -190,3 +190,25 @@ model quality, target memory fit, GPU/backend equivalence or the ten-minute live
 preparation/submission target. Queue wait and training are outside that target.
 COCO remains on its existing loader and commands. No live deployment, scheduler
 or scientific execution is authorized by preparation or offline acceptance.
+
+Measured offline acceptance at runtime source `5bbd1db7e466a4d8eb8402f960450e861bd54af1`
+uses a saved 26-layer tiny CPU backbone, a 40-row synthetic Arrow fixture and a
+fast tokenizer. These single warm local measurements compare different workloads,
+not a before/after training speedup:
+
+| Operation | Workload | Observed wall time |
+|---|---|---|
+| Initial model acquisition | One tiny weight file, hashed once | 1.58–2.16 ms |
+| Fresh prepared receipt | Reused model binding; no weight hashes | 78.4–87.1 ms |
+| Cached rows and views | 12/20 selected rows, Q8 native16 views | 22.6–25.0 ms |
+| Retained training | 520 real updates, 11 states; two fixed256 scorer fixtures | 15.77 s |
+| Changed training | 24 real updates plus native fixed2 observations | 2.28–2.54 s |
+| Continuation | Pre/post reset or functional checkpoint | 0.65–1.87 s |
+| Native terminal evaluation | 3 questions × 3 sites × NN | 1.26–1.29 s |
+| Mock submission | One resource-bound array group | 10.8 ms |
+
+The dedicated rebind case acquires once, prepares twice and records zero subsequent
+weight-file hashes. Real large-model acquisition/loading, full-pool tokenization,
+server filesystem costs and live submission remain unmeasured. The retained256
+fixture proves lifecycle/count parity; native tiny scoring and the retained
+legacy real-scorer regression provide separate mechanical evidence.
