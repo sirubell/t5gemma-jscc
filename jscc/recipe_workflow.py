@@ -110,7 +110,9 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
         for template, key in ((observation, 'development'), (terminal, 'final_validation')):
             panel = fixed.get(key)
             if (not isinstance(panel, dict) or template['input_ids'] != panel['input_ids']
-                    or template['source_family_ids'] != panel['source_family_ids']):
+                    or template['source_family_ids'] != panel['source_family_ids']
+                    or any(template['data_settings'].get(k) != config['data'][k] for k in ('name', 'revision'))
+                    or ('noise' in panel and template['noise'] != panel['noise'])):
                 raise ValueError('recipe fixed template/cache membership differs')
     return bound
 
@@ -166,11 +168,14 @@ def load_recipe_workflow(path, *, checksum, width, ratio, resolved=None, load_da
     stream = load_recipe_cached_data(description, cache_manifest=manifest['cache']['path'], checksum=manifest['cache']['sha256'])
     plan = RecipePlan(description, stream.views, manifest['study_pairing_id'])
     observation = json.loads(_read_reference(manifest['observation_template']).read_text())
+    terminal = json.loads(_read_reference(manifest['terminal_template']).read_text())
     metadata = {'source_identity': manifest['source_identity'], 'source_commit': manifest['source_commit'],
         'model_assets_identity': canonical_digest(manifest['model_assets']),
         'config_identity': canonical_digest(description['config']), 'data_identity': canonical_digest(stream.data_ids),
         'prepared_identity': manifest['manifest_identity'], 'initialization_identity': ref['state_identity'],
         'observation_identity': recipe_observation_identity(description, observation),
+        'terminal_template_identity': canonical_digest(scoring_template(
+            terminal, description['evaluation'], description['evaluation'])),
         'model_revision': description['config']['model']['revision']}
     return manifest, description['config'], plan, stream, initial, metadata, stream.data_ids
 

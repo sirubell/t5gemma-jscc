@@ -3,6 +3,8 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
+from typing import Any, cast
+from time import perf_counter
 
 from datasets import Dataset, DatasetDict
 from datasets.arrow_writer import ArrowWriter
@@ -32,14 +34,13 @@ def joined_assets(tmp_path, monkeypatch):
     torch.manual_seed(19)
     raw, tokenizer, _, config, _, fixed = fixture_cache(tmp_path)
     # Keep native prompt/demo/mask/row semantics but bound CPU attention cost.
-    raw = Dataset.from_list([{**row, 'ctx_a': 'Person enters room', 'ctx_b': 'Room',
+    raw = Dataset.from_list([{**cast(dict[str, Any], row), 'ctx_a': 'Person enters room', 'ctx_b': 'Room',
                               'endings': ['wrong', 'right ending']} for row in raw])
     arrow = tmp_path/'short.arrow'
     with ArrowWriter(path=str(arrow)) as writer:
         writer.write_table(raw.data.table)
     assets = tmp_path/'assets'
     base = tiny_backbone(26)
-    base.resize_token_embeddings(64)
     base.save_pretrained(assets)
     config['model'].update(name=str(assets), revision='tiny-workflow', device='cpu', dtype='float32',
                           numerical_policy='native', attn_implementation='sdpa')
@@ -108,18 +109,23 @@ def workflow(assets, name, *, retained=False, reverse=False, subset=12, seed=23,
     if not retained:
         observation.update(prompt_policy='zero-shot')
         observation['settings'].update(num_fewshot=0, batch_size=2)
+    observation['data_settings'] = {'name': 'fixture/hellaswag', 'revision': 'fixed-data'}
+    observation['noise'] = deepcopy(assets['fixed']['development']['noise'])
     terminal = template(3)
+    terminal['data_settings'] = {'name': 'fixture/hellaswag', 'revision': 'fixed-data'}
     terminal.update(prompt_policy='zero-shot')
     terminal['settings'].update(num_fewshot=0, batch_size=2)
     for path, value in ((root/'observation.json', observation), (root/'terminal.json', terminal)):
         path.write_text(json.dumps(value))
     prepared = root/'prepared.json'
+    started = perf_counter()
     manifest = bind_recipe_workflow(recipe_path, model_config_path=assets['model']/'config.json',
         model_path=assets['model'], cache_manifest=cache, cache_sha256=file_digest(cache),
         initializations=assets['initializer'],
         observation_template={'path': str(root/'observation.json'), 'sha256': file_digest(root/'observation.json')},
         terminal_template={'path': str(root/'terminal.json'), 'sha256': file_digest(root/'terminal.json')},
         study_pairing_id='joined-tiny', output=prepared, synthetic=True)
+    (root/'costs.json').write_text(json.dumps({'bind_resolve_assets_seconds': perf_counter()-started}))
     return root, recipe, recipe_path, prepared, manifest
 
 
@@ -140,7 +146,11 @@ def terminal_payload(result):
 
 def train(prepared, manifest, output, **kwargs):
     from scripts.original13_training import main
-    return main(cli_args(prepared, manifest, output, **kwargs))
+    started = perf_counter()
+    result = main(cli_args(prepared, manifest, output, **kwargs))
+    (output/'wall-cost.json').write_text(json.dumps({'operation': kwargs.get('mode', 'train'),
+                                                  'seconds': perf_counter()-started}))
+    return result
 
 
 def test_retained_yaml_real_updates_eleven_states_two_fixed256_templates(joined_assets, monkeypatch):
@@ -152,6 +162,7 @@ def test_retained_yaml_real_updates_eleven_states_two_fixed256_templates(joined_
     result = train(prepared, manifest, root/'train')
     _, config, plan, stream, _, _, _ = load_recipe_workflow(
         prepared, checksum=file_digest(prepared), width=8, ratio=50)
+    assert plan is not None and stream is not None
     assert plan.horizon == 520 and len(stream) == 40
     assert len(result['checkpoints']) == 11
     assert [r['state'] for r in result['observations']] == ['pre_reset', 'functional_observation']
@@ -171,8 +182,13 @@ def test_changed_yaml_native_training_resume_terminal_and_reporting(joined_asset
     from jscc.recipe_workflow import load_recipe_workflow
     root, recipe, _, prepared, manifest = workflow(joined_assets, 'changed', reverse=reverse,
                                                   subset=subset, seed=seed, optimizer=optimizer)
+    started = perf_counter()
     _, config, plan, stream, initial, metadata, ids = load_recipe_workflow(
         prepared, checksum=file_digest(prepared), width=8, ratio=50)
+    costs = json.loads((root/'costs.json').read_text())
+    costs['cached_data_views_load_seconds'] = perf_counter()-started
+    (root/'costs.json').write_text(json.dumps(costs))
+    assert plan is not None and stream is not None and ids is not None
     assert plan.trained_sites == tuple(recipe['locations'])
     assert len(ids['train_rows']) == subset and len(stream) == 8 and plan.horizon == 24
     assert ids['development'] == joined_assets['fixed']['development']
@@ -219,10 +235,14 @@ def test_changed_yaml_native_training_resume_terminal_and_reporting(joined_asset
     request = json.loads(request_path.read_text())
     assert request == evaluation.terminal_recipe_request(root/'train', json.loads((root/'terminal.json').read_text()))
     evaluate_cli(['check', '--request', str(request_path), '--request-sha256', file_digest(request_path)])
+    started = perf_counter()
     scored = evaluate_cli(['run', '--request', str(request_path), '--request-sha256', file_digest(request_path),
                           '--prepared', str(prepared), '--prepared-sha256', file_digest(prepared),
                           '--approved-source', manifest['source_commit'], '--timeout-seconds', '120',
                           '--output', str(root/'terminal-score')])
+    (root/'terminal-score/wall-cost.json').write_text(json.dumps({'operation': 'evaluate',
+                                                                'seconds': perf_counter()-started}))
+    scored = cast(dict[str, Any], scored)
     assert scored['status'] == 'complete'
     assert all(row['completed_items'] == 3 for row in scored['panels'])
     assert all(row['metrics']['candidate_forward_requests'] == 12 for row in scored['panels'])
@@ -234,6 +254,27 @@ def test_changed_yaml_native_training_resume_terminal_and_reporting(joined_asset
     assert report['terminal']['initial']['observed_items'] == 9
     assert [row['observed_items'] for row in report['observation_receipts']] == [4, 4]
     assert len(report['training_scalars']['rows']) == 24
+    for field in ('families', 'dataset', 'noise'):
+        bad_template = json.loads((root/'terminal.json').read_text())
+        bad_request = deepcopy(request)
+        for value in (bad_template, bad_request):
+            if field == 'families':
+                value['source_family_ids'][0] = 'wrong-family'
+            elif field == 'dataset':
+                value['data_settings']['revision'] = 'wrong-revision'
+            else:
+                value['noise']['namespace'] = 'wrong-noise'
+        bad_template_path, bad_request_path = root/f'bad-template-{field}.json', root/f'bad-request-{field}.json'
+        bad_template_path.write_text(json.dumps(bad_template))
+        bad_request_path.write_text(json.dumps(bad_request))
+        with pytest.raises(ValueError, match='terminal template'):
+            evaluate_cli(['request', '--training-run', str(root/'train'), '--template', str(bad_template_path),
+                          '--template-sha256', file_digest(bad_template_path), '--output', str(root/f'bad-bound-{field}.json')])
+        with pytest.raises(ValueError, match='terminal template'):
+            evaluate_cli(['check', '--request', str(bad_request_path), '--request-sha256', file_digest(bad_request_path)])
+        with pytest.raises(ValueError, match='terminal template'):
+            evaluate_cli(['report', '--training-run', str(root/'train'), '--initial-request', str(bad_request_path),
+                          '--output', str(root/f'bad-report-{field}.json')])
 
 
 def test_submission_persisted_resolution_and_changed_resume_rejection(joined_assets):
@@ -256,7 +297,10 @@ def test_submission_persisted_resolution_and_changed_resume_rejection(joined_ass
     def scheduler(command):
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, '731;fixture\n', '')
+    started = perf_counter()
     receipt = submit_job(bundle, bundle['output'], scheduler=scheduler)
+    (root/'campaign/wall-cost.json').write_text(json.dumps({'operation': 'mock_submit',
+                                                          'seconds': perf_counter()-started}))
     assert receipt['mocked'] is True and receipt['jobs'][0]['job_id'] == '731'
     assert len(commands) == 1 and commands[0][0] == 'sbatch'
     assert 'scripts/submit_recipe.py run' in render_payload(bundle, root/'campaign/bundle.json')
@@ -291,7 +335,30 @@ def test_submission_persisted_resolution_and_changed_resume_rejection(joined_ass
     _, _, changed_plan, changed_stream, _, _, changed_ids = load_recipe_workflow(
         prepared, checksum=file_digest(prepared), width=8, ratio=50,
         resolved=resolve_recipe(recipe_path, model_config_path=joined_assets['model']/'config.json'))
+    assert changed_plan is not None and changed_stream is not None and changed_ids is not None
+    assert baseline_plan is not None and baseline_ids is not None
     assert changed_plan.trained_sites == ('enc_emb', 'dec_l3') and len(changed_stream) == 16
     assert changed_ids['train_rows'] != baseline_ids['train_rows']
     assert len(changed_ids['train_rows']) == 20 and len(baseline_ids['train_rows']) == 12
     assert changed_plan.identity != baseline_plan.identity
+
+
+@pytest.mark.parametrize('mutation', ['dataset', 'noise'])
+def test_acquired_observation_binding_rejects_self_checksummed_wrong_template(joined_assets, mutation):
+    from jscc.recipe_workflow import bind_recipe_workflow
+    root, _, recipe_path, _, manifest = workflow(joined_assets, 'bad-bind')
+    path = root/'observation.json'
+    value = json.loads(path.read_text())
+    if mutation == 'dataset':
+        value['data_settings']['revision'] = 'wrong-revision'
+    else:
+        value['noise']['namespace'] = 'wrong-noise'
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='fixed template/cache membership'):
+        bind_recipe_workflow(recipe_path, model_config_path=joined_assets['model']/'config.json',
+            model_path=joined_assets['model'], cache_manifest=manifest['cache']['path'],
+            cache_sha256=manifest['cache']['sha256'], initializations=manifest['initializations'],
+            observation_template={'path': str(path), 'sha256': file_digest(path)},
+            terminal_template=manifest['terminal_template'], study_pairing_id='joined-tiny',
+            output=root/'bad-prepared.json', synthetic=True)
+    assert not (root/'bad-prepared.json').exists()

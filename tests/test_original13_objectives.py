@@ -195,7 +195,7 @@ def test_nonfinite_and_changed_bound_batch_fail_stop(monkeypatch):
     learner, _, batches = real_setup()
     binding = bind_batch_identity(batches[0])
     batches[0]['input_ids'][0, 0] = 3
-    with pytest.raises(ValueError, match='differs'):
+    with pytest.raises(ValueError, match='changed after identity binding'):
         learner.update([batches[0]], batch_identities=[binding])
     assert learner.completed == 0
     learner, _, batches = real_setup()

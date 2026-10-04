@@ -537,6 +537,9 @@ def terminal_recipe_request(training_run, template, *, scope='initial'):
         raise ValueError('empty terminal request is not requested')
     value = scoring_template(template, policy, policy)
     details = state.payload['metadata']
+    if ('terminal_template_identity' in details
+            and canonical_digest(value) != details['terminal_template_identity']):
+        raise ValueError('recipe acquired terminal template differs')
     return {**value, 'schema': 'recipe-terminal-request-v1', 'scope': scope,
         'training_run': str(Path(training_run).resolve()), 'freeze_reference': freeze,
         'checkpoint': asdict(state.reference), 'checkpoint_sha256': state.reference.sha256,
