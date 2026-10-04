@@ -123,3 +123,88 @@ writes require inspecting both durable records; default to retaining the hold.
 Offline Git fixtures and mock scheduler results establish these software
 contracts only. Real scheduler acceptance, target runtime/GPU fit, acquisition,
 full-weight performance and scientific outcomes need their own authorized checks.
+
+## Reviewed public recipe case arrays
+
+Use `recipe-case-submission-v1` for the released public recipe run commands. One
+`action` prepares source-bound small records from acquired registrations, freezes
+selected cases and renders their exact commands/resources before optional mock
+submission. With no scheduler option it previews only. A later live submission
+requires recorded approval for the exact bundle identity, source and output;
+preparation or a mock result supplies no live authority.
+
+```yaml
+schema: recipe-case-submission-v1
+recipe: /host/source/configs/recipes/changed.yaml
+registrations: /host/assets/registrations
+run_output: /host/runs/new-comparison
+root: /host
+source:
+  path: /host/source
+  commit: FULL_REVIEWED_40_CHARACTER_SHA
+python: /host/source/.venv/bin/python
+cache: /host/hf-cache
+output: /host/submissions/new-comparison
+resources:
+  partition: h200q
+  account: research
+  qos: h200q_1g
+  node: hgx-cn01
+  gpus: 1
+  cpus: 16
+  memory_gb: 170
+  walltime_minutes: 120
+cases: [width-32-ratio-50]
+evaluation_cases: [width-32-ratio-50]
+concurrency: 1
+combined: false
+attempt: reviewed-01
+```
+
+These paths and resource names are examples; use the existing approved limits
+YAML for the applicable host/account. Limits retain `root`, `resources`,
+`max_concurrency` and `max_array_tasks`. Finite per-task limits and per-array
+concurrency remain distinct from the saved historical H200 four-allocated-GPU
+account policy and scientific budgets. This implementation queries no live policy
+and adds no aggregate controller. `cases: null` explicitly requests every declared
+case. A subset or singleton retains its original recipe indices; it never expands
+into all cases. `evaluation_cases: []` adds no evaluation. Every evaluation case
+must be a selected training case.
+
+```bash
+uv run --locked python scripts/submit_recipe.py action \
+  --job reviewed-cases.yaml --limits approved-limits.yaml \
+  --output /host/reviews/new-comparison.json
+# The same action can use fake scheduler responses, after scope is reviewed:
+uv run --locked python scripts/submit_recipe.py action \
+  --job reviewed-cases.yaml --limits approved-limits.yaml \
+  --output /host/reviews/new-comparison-mock.json \
+  --mock-results fake-responses.json
+```
+
+Preparation binds one fresh logical recipe root; later preview/check/render and
+submission consume the saved bundle. Public training reads bound effective
+settings through `--output`, with explicit `--case` and retained attempt identity.
+Public evaluation uses `--run`, its own case and the exact recorded frozen terminal
+policy. The command runner checks checkpoint role/step/hash/size and own successful
+training before evaluator/model construction. Initial terminal evaluation differs
+from explicit development or frozen-YAML supplements; this routine graph adds
+only authorized initial terminal requests.
+
+Separate train/evaluation arrays use matching stable indices and Slurm
+`aftercorr:<training-array-id>` so each evaluation waits for its own successful
+training task. With `combined: true`, compatible approved stages share one
+allocation and run as separate commands with separate outcomes. Group/task counts,
+selected declared optimizer work and presentations are displayed independently.
+The preview payload is byte-identical to the saved submission payload. Scheduler
+IDs appear only after an actual adapter response; template IDs are placeholders.
+
+Fresh submission/output and case reservations persist exact bundle/payload hashes
+and command intent before the adapter is called. `SUBMISSION.json` retains each
+group's arguments, stdout/stderr/exit, classification and actual accepted job ID.
+Rejected, ambiguous, interrupted and partially accepted attempts retain their
+reservations. Unknown acceptance blocks retry. Per-task durable command/launch
+receipts retain public-command outcomes; none automatically releases the shared
+source consumer. Reconciliation must establish durable terminal evidence for
+**every** task before explicit registry terminal state/release. Queue age, an
+output directory or one failed case does not establish this predicate.

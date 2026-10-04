@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Prepare/check/render/submit a YAML recipe job; real submission is explicit.
 
+One reviewed case graph: action --job job.yaml --limits approved-limits.yaml
+    --output fresh/bundle.json [--mock-results scheduler-results.json]
 Prepare: --job job.yaml --limits approved-limits.yaml --output fresh/bundle.json
 Check/render: --bundle fresh/bundle.json [--output fresh/job.sbatch]
 Mock submit: --bundle bundle.json --mock-results scheduler-results.json
@@ -21,28 +23,53 @@ from jscc.recipe_submission import (prepare_job, preview_job, render_payload, ru
                                     validate_bundle, write_json)
 
 
+def _submit(bundle, args):
+    if args.mock_results:
+        if args.authorization:
+            raise ValueError('mock submission cannot take live authorization')
+        responses = iter(json.loads(Path(args.mock_results).read_text()))
+
+        def scheduler(command):
+            row = next(responses)
+            return subprocess.CompletedProcess(command, row['returncode'], row['stdout'], row['stderr'])
+
+        return submit_job(bundle, bundle['output'], scheduler=scheduler)
+    if args.live and args.authorization:
+        approval = json.loads(Path(args.authorization).read_text())
+        return submit_job(bundle, bundle['output'], authorization=approval)
+    raise ValueError('submission requires --mock-results or --live --authorization')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('prepare', 'preview', 'check', 'render', 'submit', 'run'))
+    parser.add_argument('mode', choices=('action', 'prepare', 'preview', 'check', 'render', 'submit', 'run'))
     parser.add_argument('--job')
     parser.add_argument('--limits')
     parser.add_argument('--bundle')
     parser.add_argument('--output')
     parser.add_argument('--identity')
+    parser.add_argument('--group', type=int, help='exact reviewed case-array group at launch')
     submission = parser.add_mutually_exclusive_group()
     submission.add_argument('--mock-results')
     submission.add_argument('--live', action='store_true')
     parser.add_argument('--authorization')
     args = parser.parse_args(argv)
-    if args.mode != 'submit' and (args.live or args.mock_results or args.authorization):
-        parser.error('scheduler options require submit mode')
-    if args.mode == 'prepare':
+    if args.mode not in ('action', 'submit') and (args.live or args.mock_results or args.authorization):
+        parser.error('scheduler options require action or submit mode')
+    if args.mode in ('prepare', 'action'):
         if not args.job or not args.limits or not args.output:
-            parser.error('prepare requires --job --limits --output')
+            parser.error('preparation requires --job --limits --output')
         result = prepare_job(args.job, args.limits)
         with Path(args.output).open('x') as stream:
             json.dump(result, stream, indent=2)
             stream.write('\n')
+        if args.mode == 'action':
+            preview = preview_job(result, args.output)
+            print(json.dumps(preview, indent=2), flush=True)
+            if args.mock_results or args.live or args.authorization:
+                result = _submit(result, args)
+            else:
+                result = preview
     else:
         if not args.bundle:
             parser.error('mode requires --bundle')
@@ -57,7 +84,8 @@ def main(argv=None):
             if args.mode in ('run', 'submit'):
                 task = os.environ.get('SLURM_ARRAY_TASK_ID', 'unknown')
                 task = task if task.isdigit() else 'unknown'
-                name = f'trajectory-{task}.bundle-failure.json' if args.mode == 'run' else 'submission.bundle-failure.json'
+                group = str(args.group) if args.group is not None and args.group >= 0 else 'unknown'
+                name = f'group-{group}-task-{task}.bundle-failure.json' if args.mode == 'run' else 'submission.bundle-failure.json'
                 marker = Path(args.bundle).parent/name
                 with marker.open('x'):
                     pass
@@ -76,28 +104,19 @@ def main(argv=None):
                 stream.write(render_payload(bundle, args.bundle))
             result = {'payload': args.output, 'bundle_identity': bundle['identity'], 'launch_authorized': False}
         elif args.mode == 'check':
-            result = {'bundle_identity': bundle['identity'], 'trajectories': len(bundle['resolved']['trajectories']),
+            result = {'bundle_identity': bundle['identity'], 'selected_cases': len(bundle['cases']) if bundle['schema'] == 'recipe-case-submission-v1' else len(bundle['resolved']['trajectories']),
                       'launch_authorized': False, 'runtime_acceptance': 'requires authorized runtime check'}
         elif args.mode == 'submit':
-            if args.mock_results:
-                if args.authorization:
-                    parser.error('mock submission cannot take live authorization')
-                responses = iter(json.loads(Path(args.mock_results).read_text()))
-
-                def scheduler(command):
-                    row = next(responses)
-                    return subprocess.CompletedProcess(command, row['returncode'], row['stdout'], row['stderr'])
-
-                result = submit_job(bundle, bundle['output'], scheduler=scheduler)
-            elif args.live and args.authorization:
-                approval = json.loads(Path(args.authorization).read_text())
-                result = submit_job(bundle, bundle['output'], authorization=approval)
-            else:
-                parser.error('submit requires --mock-results or --live --authorization')
+            result = _submit(bundle, args)
         else:
             if not args.identity:
                 parser.error('run requires explicit --identity')
-            result = run_job(bundle, args.identity)
+            if bundle['schema'] == 'recipe-case-submission-v1':
+                if args.group is None:
+                    parser.error('case-array run requires explicit --group')
+                result = run_job(bundle, args.identity, args.group)
+            else:
+                result = run_job(bundle, args.identity)
     print(json.dumps(result, indent=2))
     return result
 
