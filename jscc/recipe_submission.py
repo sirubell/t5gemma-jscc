@@ -16,6 +16,7 @@ import yaml
 
 from .activation_replay import canonical_digest, file_digest
 from .experiment_recipe import resolve_recipe
+from .source_lifetime import SourceConsumers, capture_source_binding, check_source_binding
 
 SCHEMA = 'shared-codec-submission-v1'
 
@@ -157,6 +158,8 @@ def prepare_job(job_path, limits_path):
     # Existing prepared assets are accepted only if their recorded configs/plans
     # match. Tensor/model integrity stays at the runtime loader boundary.
     validate_prepared(bundle)
+    bundle['source_binding'] = capture_source_binding(
+        local_path(source['path'], root), source['commit'], bundle['python'])
     bundle['identity'] = canonical_digest(bundle)
     return bundle
 
@@ -194,7 +197,7 @@ def validate_prepared(bundle):
 
 
 def validate_bundle(bundle):
-    require(bundle.get('schema') == SCHEMA, 'unsupported bundle schema')
+    require(isinstance(bundle, dict) and bundle.get('schema') == SCHEMA, 'unsupported bundle schema')
     raw = deepcopy(bundle)
     identity = raw.pop('identity', None)
     require(identity == canonical_digest(raw), 'bundle identity differs')
@@ -220,6 +223,51 @@ def write_json(path, value):
     finally:
         if Path(temporary).exists():
             Path(temporary).unlink()
+
+
+def submission_preflight(bundle):
+    """Check the bound effective config, prepared inputs and fixed source/runtime."""
+    validate_bundle(bundle)
+    binding = bundle['source_binding']
+    require(normalize_path(binding['path'], bundle['root']) == bundle['source']['path']
+            and binding['commit'] == bundle['source']['commit']
+            and normalize_path(binding['runtime']['python'], bundle['root']) == bundle['python'],
+            'source/runtime binding differs from bundle')
+    check_source_binding(binding)
+    validate_prepared(bundle)
+    return binding
+
+
+def source_consumers(bundle):
+    """Shared host registry, outside all source and scientific output checkouts."""
+    return SourceConsumers(Path(bundle['root'])/'.source-consumers')
+
+
+def preview_job(bundle, bundle_path):
+    """Concrete existing recipe graph and same live payload, no scheduler call."""
+    binding = submission_preflight(bundle)
+    cases = []
+    for index, item in enumerate(bundle['resolved']['trajectories']):
+        cases.append({'index': index, 'case': f'B{item["width"]}-R{item["ratio"]}',
+                      'effective_config_sha256': canonical_digest(item['config']),
+                      'effective_config': item['config'], 'locations': item['locations'],
+                      'selected_rows_request': item['config']['data'],
+                      'updates_per_location': item['updates_per_location'], 'counts': item['counts']})
+    groups = [{'group': i, 'indices': g['indices'], 'task_count': len(g['indices']),
+               'concurrency_cap': g['concurrency'], 'afterok_group': g['afterok'],
+               'command_template': scheduler_command(bundle, bundle['output']+'/job.sbatch', i,
+                                                      None if g['afterok'] is None else '1')}
+              for i, g in enumerate(bundle['groups'])]
+    return {'bundle_identity': bundle['identity'], 'source_binding': binding,
+            'paths': {k: bundle[k] for k in ('model', 'prepared', 'python', 'cache', 'output')},
+            'resources_per_task': bundle['resources'], 'groups': groups, 'cases': cases,
+            'task_count': sum(g['task_count'] for g in groups),
+            'scientific_totals': bundle['resolved']['matrix_counts'],
+            'dependency_template_note': 'ID 1 is a placeholder for the recorded earlier group job ID',
+            'resource_policy_note': 'Per-array caps are separate from account policy and scientific budgets',
+            'source_consumer_registry': str(source_consumers(bundle).directory),
+            'payload': render_payload(bundle, bundle_path), 'launch_authorized': False,
+            'scheduler_invoked': False}
 
 
 def render_payload(bundle, bundle_path):
@@ -265,7 +313,6 @@ def submit_job(bundle, receipt_dir, *, scheduler=None, authorization=None):
     recorded human authority for the exact bundle, target and operation.
     """
     validate_bundle(bundle)
-    validate_prepared(bundle)
     directory = Path(receipt_dir)
     require(normalize_path(str(directory), bundle['root']) == bundle['output'], 'receipt/output differs')
     require(normalize_path(str(directory.parent.resolve(strict=True))) == str(PurePosixPath(bundle['output']).parent),
@@ -292,6 +339,11 @@ def submit_job(bundle, receipt_dir, *, scheduler=None, authorization=None):
         receipt['payload_sha256'] = file_digest(directory/'job.sbatch')
         receipt['bundle_sha256'] = file_digest(directory/'bundle.json')
         write_json(receipt_path, receipt)
+        submission_preflight(bundle)
+        source_consumers(bundle).reserve(bundle['source_binding'], bundle['identity'],
+                                         owner=bundle['output'], reference=str(receipt_path))
+        receipt['source_consumer_reserved'] = True
+        write_json(receipt_path, receipt)
         for index, group in enumerate(bundle['groups']):
             dependency = None if group['afterok'] is None else receipt['jobs'][group['afterok']]['job_id']
             command = scheduler_command(bundle, directory/'job.sbatch', index, dependency)
@@ -309,9 +361,16 @@ def submit_job(bundle, receipt_dir, *, scheduler=None, authorization=None):
             write_json(receipt_path, receipt)
         receipt['status'] = 'submitted'
         write_json(receipt_path, receipt)
-    except BaseException:
+        source_consumers(bundle).record_state(bundle['source']['path'], bundle['identity'], 'queued',
+                                              owner=bundle['output'], evidence=str(receipt_path))
+    except BaseException as error:
         receipt['status'] = 'stopped-no-retry'
+        receipt['failure'] = {'type': type(error).__name__, 'message': str(error),
+                              'stage': 'submission' if receipt['jobs'] else 'preflight'}
         write_json(receipt_path, receipt)
+        if receipt.get('source_consumer_reserved'):
+            source_consumers(bundle).record_state(bundle['source']['path'], bundle['identity'],
+                                                  'unresolved', owner=bundle['output'], evidence=str(receipt_path))
         raise
     return receipt
 
@@ -323,15 +382,28 @@ def run_job(bundle, identity):
     require(os.environ.get('SLURM_JOB_ID'), 'Slurm allocation required')
     index = int(os.environ['SLURM_ARRAY_TASK_ID'])
     require(index in [i for g in bundle['groups'] for i in g['indices']], 'array index differs')
-    source = local_path(bundle['source']['path'], bundle['root'])
-    require(Path(__file__).resolve().parents[1] == source.resolve(), 'loaded submission source differs')
-    require(not subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no'],
-                                        text=True).strip(), 'source checkout has tracked changes')
-    require(subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
-            == bundle['source']['commit'], 'source checkout differs')
-    model_config = local_path(bundle['model']['path']+'/config.json', bundle['root'])
-    require(file_digest(model_config) == bundle['model']['config_sha256'], 'model config digest differs')
-    validate_prepared(bundle)
+    # Keep one exclusive attempt marker before any source/model check. Failed
+    # launch evidence cannot be overwritten by a duplicate execution.
+    item = bundle['resolved']['trajectories'][index]
+    marker = Path(bundle['output'])/f'trajectory-{index}.preflight.json'
+    with marker.open('x') as stream:
+        json.dump({'status': 'checking', 'job_id': os.environ['SLURM_JOB_ID'],
+                   'trajectory': index, 'identity': identity}, stream)
+    try:
+        submission_preflight(bundle)
+        source = local_path(bundle['source']['path'], bundle['root'])
+        require(Path(__file__).resolve().parents[1] == source.resolve(), 'loaded submission source differs')
+        source_consumers(bundle).record_state(source, identity, 'running',
+                                              owner=bundle['output'], evidence=str(marker))
+        write_json(marker, {'status': 'passed', 'job_id': os.environ['SLURM_JOB_ID'],
+                            'trajectory': index, 'identity': identity})
+    except BaseException as error:
+        write_json(marker, {'status': 'failed', 'job_id': os.environ['SLURM_JOB_ID'],
+                            'trajectory': index, 'identity': identity,
+                            'failure': {'type': type(error).__name__, 'message': str(error)}})
+        # Other tasks may still be queued/running: a failed row cannot release
+        # the shared submission consumer. Downstream reconciles every task.
+        raise
     import torch
     require(torch.cuda.device_count() == 1 and torch.cuda.is_bf16_supported(), 'one assigned BF16 GPU required')
     uuid = 'GPU-'+str(torch.cuda.get_device_properties(0).uuid).removeprefix('GPU-')

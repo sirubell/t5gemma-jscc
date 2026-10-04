@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, cast
 from time import perf_counter
 
@@ -299,6 +300,12 @@ def test_submission_persisted_resolution_and_changed_resume_rejection(joined_ass
     from jscc.recipe_workflow import load_recipe_workflow
     from scripts.original13_training import main
     root, recipe, recipe_path, prepared, manifest = workflow(joined_assets, 'submission', optimizer=True)
+    # The submission seam now requires an actual fixed source/runtime, even
+    # for an offline scheduler. Keep the existing learner fixture unchanged.
+    subprocess.run(['git', 'clone', '--shared', '--quiet', str(ROOT), str(root/'release')], check=True)
+    subprocess.run(['git', '-C', str(root/'release'), 'checkout', '--detach', '--quiet',
+                    manifest['source_commit']], check=True)
+    (root/'python').symlink_to(sys.executable)
     resources = dict(partition='h200q', account='research', qos='h200q_1g', node='hgx-cn01',
                      gpus=1, cpus=16, memory_gb=170, walltime_minutes=120)
     job = dict(schema=SCHEMA, recipe=str(recipe_path), root=str(joined_assets['root']),

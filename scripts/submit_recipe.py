@@ -9,19 +9,21 @@ Both submission paths use the same bundle, payload, and training entry point.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jscc.recipe_submission import (prepare_job, render_payload, run_job, submit_job,
-                                    validate_bundle, validate_prepared)
+from jscc.recipe_submission import (prepare_job, preview_job, render_payload, run_job, submit_job,
+                                    submission_preflight,
+                                    validate_bundle, write_json)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('prepare', 'check', 'render', 'submit', 'run'))
+    parser.add_argument('mode', choices=('prepare', 'preview', 'check', 'render', 'submit', 'run'))
     parser.add_argument('--job')
     parser.add_argument('--limits')
     parser.add_argument('--bundle')
@@ -44,10 +46,30 @@ def main(argv=None):
     else:
         if not args.bundle:
             parser.error('mode requires --bundle')
-        bundle = validate_bundle(json.loads(Path(args.bundle).read_text()))
-        if args.mode in ('check', 'render', 'submit'):
-            validate_prepared(bundle)
-        if args.mode == 'render':
+        # A launch may fail to parse/validate its bound bundle. Its path is
+        # supplied by the reviewed payload, so record failure beside that path
+        # without trusting an output path inside a mutated bundle.
+        try:
+            bundle = validate_bundle(json.loads(Path(args.bundle).read_text()))
+            if args.mode == 'run' and args.identity and bundle['identity'] != args.identity:
+                raise ValueError('explicit bundle identity differs')
+        except (ValueError, KeyError, OSError) as error:
+            if args.mode in ('run', 'submit'):
+                task = os.environ.get('SLURM_ARRAY_TASK_ID', 'unknown')
+                task = task if task.isdigit() else 'unknown'
+                name = f'trajectory-{task}.bundle-failure.json' if args.mode == 'run' else 'submission.bundle-failure.json'
+                marker = Path(args.bundle).parent/name
+                with marker.open('x'):
+                    pass
+                write_json(marker, {'status': 'failed', 'stage': 'bundle-preflight',
+                                    'identity': args.identity, 'bundle_path': str(Path(args.bundle).resolve()),
+                                    'failure': {'type': type(error).__name__, 'message': str(error)}})
+            raise
+        if args.mode in ('check', 'render'):
+            submission_preflight(bundle)
+        if args.mode == 'preview':
+            result = preview_job(bundle, args.bundle)
+        elif args.mode == 'render':
             if not args.output:
                 parser.error('render requires fresh --output')
             with Path(args.output).open('x') as stream:

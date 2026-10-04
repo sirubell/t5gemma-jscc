@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -20,6 +21,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def job_files(tmp_path):
+    source = tmp_path/'release'
+    source.mkdir()
+    (source/'uv.lock').write_text('fixture lock v1')
+    (source/'worker.py').write_text('print("fixture")')
+    subprocess.run(['git', 'init', '-q', str(source)], check=True)
+    subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+    subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c',
+                    'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'], check=True)
+    commit = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+    (tmp_path/'python').symlink_to(sys.executable)
     model = tmp_path/'model'
     model.mkdir()
     metadata = model/'config.json'
@@ -39,7 +50,7 @@ def job_files(tmp_path):
     views = formal_views()
     plans = [Original13Plan(views, 'submission-fixture', i['ratio'], i['width'], 'a'*64, 'b'*64).resolved()
              for i in resolved['trajectories']]
-    manifest = {'schema': 'original13-prepared-v1', 'source_commit': '1'*40, 'configs': {str(i['width']): i['config'] for i in resolved['trajectories']},
+    manifest = {'schema': 'original13-prepared-v1', 'source_commit': commit, 'configs': {str(i['width']): i['config'] for i in resolved['trajectories']},
                 'plans': plans, 'observation_request': {'panel': {'expected_items': 256},
                     'sites': recipe['observation']['sites'], 'conditions': recipe['observation']['conditions']}}
     prepared = tmp_path/'prepared.json'
@@ -49,7 +60,7 @@ def job_files(tmp_path):
     resources = dict(partition='h200q', account='research', qos='h200q_1g', node='hgx-cn01',
                      gpus=1, cpus=16, memory_gb=170, walltime_minutes=120)
     job = dict(schema=SCHEMA, recipe=str(recipe_file), root=str(tmp_path),
-               source={'commit': '1'*40, 'path': str(tmp_path/'release')},
+               source={'commit': commit, 'path': str(source)},
                model={'path': str(model), 'config_sha256': file_digest(metadata)},
                prepared={'sha256': file_digest(prepared),
                          'candidates': [str(tmp_path/'missing.json'), str(wrong), str(prepared)]},
@@ -194,7 +205,7 @@ def test_partial_ambiguous_outcomes(job_files, failure):
 
 def test_no_scheduler_without_approval(job_files, monkeypatch):
     b = bundle(job_files)
-    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('unexpected scheduler'))
+    monkeypatch.setattr('jscc.recipe_submission._slurm_submit', lambda *a, **k: pytest.fail('unexpected scheduler'))
     with pytest.raises(ValueError, match='explicit exact live'):
         submit_job(b, b['output'])
     assert not Path(b['output']).exists()
@@ -202,11 +213,15 @@ def test_no_scheduler_without_approval(job_files, monkeypatch):
 
 def test_cli_offline_operations(job_files, tmp_path, monkeypatch):
     path, limits, _ = job_files
-    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('unexpected subprocess'))
+    monkeypatch.setattr('jscc.recipe_submission._slurm_submit', lambda *a, **k: pytest.fail('unexpected scheduler'))
     command = cli('submit_recipe.py')
     output = tmp_path/'bundle.json'
     b = command(['prepare', '--job', str(path), '--limits', str(limits), '--output', str(output)])
     assert command(['check', '--bundle', str(output)])['launch_authorized'] is False
+    preview = command(['preview', '--bundle', str(output)])
+    assert preview['scheduler_invoked'] is False and preview['task_count'] == 9
+    assert preview['scientific_totals']['optimizer_updates'] == 1170000
+    assert preview['payload'] == render_payload(b, output)
     command(['render', '--bundle', str(output), '--output', str(tmp_path/'render.sbatch')])
     responses = tmp_path/'mock.json'
     responses.write_text(json.dumps([{'returncode': 0, 'stdout': '123\n', 'stderr': ''},
@@ -232,7 +247,9 @@ def test_recheck_model_and_prepared_at_submission(job_files):
     calls = []
     with pytest.raises(ValueError, match='model config digest differs'):
         submit_job(b, b['output'], scheduler=calls.append)
-    assert not calls and not Path(b['output']).exists()
+    assert not calls
+    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
+    assert receipt['failure']['stage'] == 'preflight'
 
 
 def test_output_parent_symlink_escape(job_files, tmp_path):
@@ -251,13 +268,10 @@ def test_run_payload_uses_bound_training_cli(job_files, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from jscc import recipe_submission as submission
     b = bundle(job_files)
-    Path(b['source']['path']).mkdir()
-    Path(b['output']).mkdir()
+    submission.submit_job(b, b['output'], scheduler=lambda command: subprocess.CompletedProcess(command, 0, '123\n', ''))
     monkeypatch.setattr(submission, '__file__', b['source']['path']+'/jscc/recipe_submission.py')
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '4')
-    monkeypatch.setattr(subprocess, 'check_output',
-                        lambda args, **kw: '' if 'status' in args else b['source']['commit']+'\n')
     monkeypatch.setattr('torch.cuda.device_count', lambda: 1)
     monkeypatch.setattr('torch.cuda.is_bf16_supported', lambda: True)
     monkeypatch.setattr('torch.cuda.get_device_properties', lambda index: SimpleNamespace(uuid='fixture-gpu'))
@@ -294,7 +308,9 @@ def test_prepared_source_rejected_before_reservation(job_files, field, value, ma
     calls = []
     with pytest.raises(ValueError, match=match):
         submit_job(b, b['output'], scheduler=calls.append)
-    assert not calls and not Path(b['output']).exists()
+    assert not calls
+    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
+    assert receipt['failure']['stage'] == 'preflight'
 
 
 def test_real_retained_loader_checks_persisted_resolution(prepared, tmp_path):
@@ -325,3 +341,118 @@ def test_real_retained_loader_checks_persisted_resolution(prepared, tmp_path):
     args[args.index('--resolved-identity')+1] = b['identity']
     with pytest.raises(ValueError, match='complete config differs'):
         check(args)
+
+
+@pytest.mark.parametrize('mutation', ['dirty', 'untracked', 'wrong-sha', 'runtime'])
+def test_source_failure_retained_before_scheduler(job_files, mutation):
+    b = bundle(job_files)
+    source = Path(b['source']['path'])
+    if mutation == 'dirty':
+        (source/'worker.py').write_text('changed')
+    elif mutation == 'untracked':
+        (source/'new-worker.py').write_text('changed')
+    elif mutation == 'runtime':
+        Path(b['python']).unlink()
+        Path(b['python']).write_text('not an interpreter')
+    else:
+        (source/'worker.py').write_text('changed')
+        subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c',
+                        'user.email=fixture@example.invalid', 'commit', '-qm', 'new'], check=True)
+    calls = []
+    with pytest.raises((ValueError, OSError)):
+        submit_job(b, b['output'], scheduler=calls.append)
+    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
+    assert receipt['failure']['stage'] == 'preflight'
+    assert receipt['jobs'] == [] and not calls
+    assert receipt['status'] == 'stopped-no-retry'
+
+
+@pytest.mark.parametrize('mutation', ['dirty', 'wrong-sha', 'config'])
+def test_launch_source_failure_before_model_with_evidence(job_files, monkeypatch, mutation):
+    from jscc import recipe_submission as submission
+    b = bundle(job_files)
+    submit_job(b, b['output'], scheduler=lambda command: subprocess.CompletedProcess(command, 0, '123\n', ''))
+    source = Path(b['source']['path'])
+    if mutation == 'config':
+        Path(b['prepared']['path']).write_text('{}')
+    else:
+        (source/'worker.py').write_text('changed')
+        if mutation == 'wrong-sha':
+            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c',
+                            'user.email=fixture@example.invalid', 'commit', '-qm', 'new'], check=True)
+    monkeypatch.setattr(submission, '__file__', str(source/'jscc/recipe_submission.py'))
+    monkeypatch.setenv('SLURM_JOB_ID', '123')
+    monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '0')
+    monkeypatch.setattr('torch.cuda.device_count', lambda: pytest.fail('model/GPU reached'))
+    monkeypatch.setattr('os.execv', lambda *a: pytest.fail('execution reached'))
+    with pytest.raises(ValueError):
+        submission.run_job(b, b['identity'])
+    marker = json.loads((Path(b['output'])/'trajectory-0.preflight.json').read_text())
+    assert marker['status'] == 'failed' and marker['failure']['message']
+    with pytest.raises(FileExistsError):
+        submission.run_job(b, b['identity'])
+    with pytest.raises(ValueError, match='held'):
+        submission.source_consumers(b).require_released(source)
+
+
+def test_preview_bound_yaml_and_no_large_asset_reads(job_files, monkeypatch):
+    from jscc import recipe_submission as submission, source_lifetime
+    b = bundle(job_files)
+    recipe = Path(job_files[2]['recipe'])
+    recipe.write_text('invalid YAML after binding')
+    (Path(b['model']['path'])/'weights.safetensors').write_text('immutable fixture weight')
+    read_files = []
+
+    def counted(path):
+        read_files.append(Path(path).name)
+        return file_digest(path)
+
+    monkeypatch.setattr(submission, 'file_digest', counted)
+    monkeypatch.setattr(source_lifetime, 'file_digest', counted)
+    monkeypatch.setattr(submission, '_slurm_submit', lambda *a: pytest.fail('scheduler reached'))
+    preview = submission.preview_job(b, b['output']+'/bundle.json')
+    assert preview['cases'][0]['effective_config'] == b['resolved']['trajectories'][0]['config']
+    assert set(read_files) <= {'uv.lock', 'config.json', 'prepared.json'}
+    assert read_files and preview['scheduler_invoked'] is False
+
+
+@pytest.mark.parametrize('content', ['invalid json', '{"schema": "wrong"}', '[]', 'null'])
+@pytest.mark.parametrize('mode', ['run', 'submit'])
+def test_cli_invalid_launch_bundle_records_failure(tmp_path, monkeypatch, content, mode):
+    path = tmp_path/'bundle.json'
+    path.write_text(content)
+    monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '4')
+    command = cli('submit_recipe.py')
+    with pytest.raises(ValueError):
+        command([mode, '--bundle', str(path), '--identity', 'expected'])
+    marker = tmp_path/('trajectory-4.bundle-failure.json' if mode == 'run' else 'submission.bundle-failure.json')
+    failure = json.loads(marker.read_text())
+    assert failure['stage'] == 'bundle-preflight'
+    assert failure['identity'] == 'expected'
+    original = marker.read_bytes()
+    with pytest.raises(FileExistsError):
+        command([mode, '--bundle', str(path), '--identity', 'expected'])
+    assert marker.read_bytes() == original
+
+
+
+def test_cli_changed_valid_bundle_preserves_approved_identity_failure(job_files, tmp_path, monkeypatch):
+    from jscc.activation_replay import canonical_digest
+    b = bundle(job_files)
+    approved = b['identity']
+    b['resolved']['trajectories'][0]['config']['training']['lr'] = .001
+    b['identity'] = canonical_digest({key: value for key, value in b.items() if key != 'identity'})
+    path = tmp_path/'bound.json'
+    path.write_text(json.dumps(b))
+    monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '7')
+    command = cli('submit_recipe.py')
+    with pytest.raises(ValueError, match='explicit bundle identity differs'):
+        command(['run', '--bundle', str(path), '--identity', approved])
+    marker = tmp_path/'trajectory-7.bundle-failure.json'
+    failure = json.loads(marker.read_text())
+    assert failure['identity'] == approved and failure['stage'] == 'bundle-preflight'
+    assert failure['failure']['message'] == 'explicit bundle identity differs'
+    with pytest.raises(FileExistsError):
+        command(['run', '--bundle', str(path), '--identity', approved])
