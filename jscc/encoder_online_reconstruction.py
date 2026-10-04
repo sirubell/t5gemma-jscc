@@ -35,8 +35,6 @@ def capture_online_encoder_activation(model, batch: dict, site: ResolvedSite) ->
     """
     if not isinstance(site, ResolvedSite):
         raise TypeError("online reconstruction requires a resolved encoder site")
-    if site.site_id not in SITES:
-        raise ValueError("online reconstruction supports the original six encoder sites")
     if resolve_encoder_site(model.base, site.split, site.model_revision) != site:
         raise ValueError("online reconstruction site differs from the backbone")
     if model.split != site.split or model.requires_memory_transmission:
@@ -98,6 +96,8 @@ def online_reconstruction_batch_values(model, batch: dict, snr_db, settings: dic
     channel autograd. Hidden denominators count source-valid samples, never
     target tokens. Model activation references are cleared even on failure.
     """
+    if site.site_id not in SITES:
+        raise ValueError("online reconstruction supports the original six encoder sites")
     settings = settings or {"kl_weight": 0.0, "mse_weight": 0.1}
     explicit = settings.get("loss_weights")
     weights = explicit or {"kl": settings["kl_weight"], "hidden": settings["mse_weight"], "memory": 0.0}
@@ -123,14 +123,14 @@ def online_reconstruction_batch_values(model, batch: dict, snr_db, settings: dic
 @torch.no_grad()
 def capture_online_original13_targets(model, batch, site):
     """Clean decoder prefix and encoder memory; unwind before the receiver."""
-    from .models.split_model import ResolvedDecoderSite, resolve_original13_site
+    from .models.split_model import ResolvedDecoderSite, resolve_training_site
     from .runtime import model_inputs
     if isinstance(site, ResolvedSite):
         # The canonical memory alias exists even when this route has one role.
         return capture_online_encoder_activation(model, batch, site), None
     if not isinstance(site, ResolvedDecoderSite):
         raise TypeError("original13 capture requires a resolved site")
-    if (resolve_original13_site(model.base, site.site_id, site.model_revision) != site
+    if (resolve_training_site(model.base, site.site_id, site.model_revision) != site
             or model.split != site.split or not model.universal_codec):
         raise ValueError("capture requires the selected universal decoder route")
     if model.base.training or any(p.requires_grad for p in model.base.parameters()):

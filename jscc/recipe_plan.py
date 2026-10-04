@@ -16,6 +16,20 @@ def phase_lr_factor(index, horizon, warmup_ratio, min_lr_ratio):
     return min_lr_ratio + (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress)) / 2
 
 
+@dataclass(frozen=True)
+class RecipeStage:
+    """Phase boundaries only; objectives and LR come from the recipe plan."""
+    phase_id: str
+    objective_kind: str
+    start: int
+    stop: int
+    reset_optimizer: bool
+
+    @property
+    def horizon(self):
+        return self.stop - self.start
+
+
 @dataclass(frozen=True, init=False)
 class RecipePlan:
     """Bind a resolved trajectory to exactly Q indexed native16 views.
@@ -74,6 +88,16 @@ class RecipePlan:
     def accumulation(self):
         return 1
 
+    @property
+    def stages(self):
+        return tuple(RecipeStage(p['phase_id'], p['objective_kind'], p['start'], p['stop'],
+                                  p['reset_optimizer']) for p in self._description['phases'])
+
+    def stage_at(self, index):
+        if type(index) is not int or not 0 <= index < self.horizon:
+            raise ValueError('update outside recipe horizon')
+        return next(stage for stage in self.stages if stage.start <= index < stage.stop)
+
     def objective_at(self, index):
         update = self.update_at(index)
         weights = self._description['objectives']
@@ -105,4 +129,6 @@ class RecipePlan:
                 'next_site': self.trained_sites[completed % n] if completed < self.horizon else None,
                 'completed_per_site': {site: completed // n + int(i < completed % n)
                                        for i, site in enumerate(self.trained_sites)},
-                'phase_start_step': phase_start, 'phase_local_completed': completed - phase_start}
+                'phase_start_step': phase_start, 'phase_local_completed': completed - phase_start,
+                'base_stream_presentations': ((completed + n - 1) // n) * self.batch_size,
+                'site_presentations': completed * self.batch_size}

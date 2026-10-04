@@ -97,16 +97,28 @@ def resolve_original13_site(base, site_id, model_revision):
     from ..encoder_stages_plan import ORIGINAL13_SITES
     if site_id not in ORIGINAL13_SITES:
         raise ValueError("site is outside the approved original13 cohort")
-    if site_id.startswith("enc_"):
-        from ..encoder_pilot_plan import SITE_SPECS
-        return resolve_encoder_site(base, SITE_SPECS[site_id], model_revision)
+    return resolve_training_site(base, site_id, model_revision)
+
+
+def resolve_training_site(base, site_id, model_revision):
+    """Resolve canonical recipe locations against the loaded backbone."""
+    import re
+    if site_id in ("enc_emb", "enc_fn"):
+        return resolve_encoder_site(base, {"stack": "enc", "where":
+            "after_embed" if site_id == "enc_emb" else "after_final_norm"}, model_revision)
+    match = re.fullmatch(r"(enc|dec)_l(0|[1-9][0-9]*)", site_id) if isinstance(site_id, str) else None
+    if match is None:
+        raise ValueError("invalid model location")
+    stack_name, index = match[1], int(match[2])
+    if stack_name == "enc":
+        return resolve_encoder_site(base, {"stack": "enc", "where": "after_layer", "index": index},
+                                    model_revision)
     if not isinstance(model_revision, str) or not model_revision:
         raise ValueError("a pinned model revision is required")
     configured_revision = getattr(base.config, "_commit_hash", None)
     if configured_revision is not None and configured_revision != model_revision:
         raise ValueError("site model revision differs from backbone")
     stack = stack_module(base, "dec")
-    index = int(site_id[5:])
     if not 0 <= index < len(stack.layers) - 1:
         raise ValueError("decoder boundary requires a receiver suffix")
     return ResolvedDecoderSite(index, model_revision, len(stack.layers), int(stack.config.hidden_size))
@@ -245,7 +257,7 @@ class SplitModel(nn.Module):
                 raise ValueError("universal role aliases differ")
             if not isinstance(site, (ResolvedSite, ResolvedDecoderSite)):
                 raise TypeError("site must be a resolved original13 site")
-            if resolve_original13_site(self.base, site.site_id, site.model_revision) != site:
+            if resolve_training_site(self.base, site.site_id, site.model_revision) != site:
                 raise ValueError("resolved site does not match backbone metadata")
         else:
             if self.split["stack"] != "enc" or self.memory_codec is not None:

@@ -41,10 +41,14 @@ def unequal_batches():
 
 @pytest.mark.parametrize('site_id', ('enc_l9', 'dec_l0', 'dec_l24'))
 @pytest.mark.parametrize('functional', (False, True))
-def test_weighted_forward_aggregate_streamed_gradients_unequal_masks(site_id, functional):
+@pytest.mark.parametrize('coefficients', (None, {"hidden": .3, "memory": .4, "kl": .7}))
+def test_weighted_forward_aggregate_streamed_gradients_unequal_masks(site_id, functional, coefficients):
     model = make_model()
     site = resolve_original13_site(model.base, site_id, 'tiny-original13')
     objective = settings(site_id, functional)
+    if coefficients is not None:
+        objective["loss_weights"] = {**coefficients, "kl": coefficients["kl"] if functional else 0.,
+                                     "memory": coefficients["memory"] if site_id.startswith("dec_") else 0.}
     batches = unequal_batches()
     with model.at_site(site, purpose='train', authorization={'sites': {site_id: 'trained'}}):
         def values(data):
@@ -61,9 +65,9 @@ def test_weighted_forward_aggregate_streamed_gradients_unequal_masks(site_id, fu
         expected = summed_stat(records, 'hidden_numerator') / summed_stat(records, 'hidden_denominator')
         expected = objective['loss_weights']['hidden'] * expected
         if objective['requires_memory']:
-            expected = expected + .05 * summed_stat(records, 'memory_numerator') / summed_stat(records, 'memory_denominator')
+            expected = expected + objective["loss_weights"]["memory"] * summed_stat(records, 'memory_numerator') / summed_stat(records, 'memory_denominator')
         if functional:
-            expected = expected + summed_stat(records, 'kl_numerator') / summed_stat(records, 'kl_denominator')
+            expected = expected + objective["loss_weights"]["kl"] * summed_stat(records, 'kl_numerator') / summed_stat(records, 'kl_denominator')
         torch.testing.assert_close(totals['loss'], expected)
         totals['loss'].backward()
         aggregate_grads = [cast(torch.Tensor, p.grad).clone() for p in model.codec.parameters()]

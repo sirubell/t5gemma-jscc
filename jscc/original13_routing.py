@@ -230,3 +230,117 @@ def restore_runtime_state(model, state):
     model.channel.draw_summaries = deepcopy(state["draw_summaries"])
     model.activation = model.reconstruction = None
     model.memory_activation = model.memory_reconstruction = None
+
+
+def build_recipe_scheduler(optimizer, plan, phase_start):
+    """Build a phase-local scheduler; state owner installs it after its reset."""
+    stage = next((s for s in plan.stages if s.start == phase_start), None)
+    if stage is None:
+        raise ValueError("scheduler requires a declared recipe phase start")
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda local:
+        plan.update_at(stage.start + local).lr_factor if local < stage.horizon else 0.0)
+
+
+class RecipeLearner(Original13Learner):
+    """Train a resolved YAML trajectory through the retained complete-view updater.
+
+    Input loading, optimizer reset, checkpoint/resume and observations remain
+    owned by their consumers. This adapter does not accept legacy state envelopes.
+    """
+    def __init__(self, model, *, plan, metadata, event_sink=None, synthetic=False):
+        from .recipe_plan import RecipePlan
+        from .models.channel import IdentityChannel
+        from .models.split_model import resolve_training_site
+        if not isinstance(plan, RecipePlan) or type(synthetic) is not bool:
+            raise TypeError("recipe learner requires a resolved RecipePlan and explicit synthetic marker")
+        description = plan.description
+        config = model.codec.config
+        if (config["architecture"] != "direct_affine" or config["layernorm"] != "none"
+                or config["snr_film"] or config["n_res_blocks"] != 0 or config["dropout"] != 0
+                or config["bottleneck_dim"] != plan.width or model.numerical_policy != "native"):
+            raise ValueError("recipe requires a shared direct-affine native codec matching its width")
+        if metadata['model_revision'] != description['config']['model']['revision']:
+            raise ValueError('runtime model revision differs from resolved recipe')
+        self.recipe_channel = description['config']['channel']
+        self.recipe_seed = description['config']['seed']
+        expected_channel = AWGNChannel if self.recipe_channel['type'] == 'awgn' else IdentityChannel
+        if (type(model.channel) is not expected_channel
+                or model.channel_config['normalize_power'] != self.recipe_channel['normalize_power']):
+            raise ValueError("runtime channel differs from resolved recipe")
+        sites = {name: resolve_training_site(model.base, name, metadata['model_revision'])
+                 for name in plan.trained_sites}
+        if any(site.hidden_dim != model.codec.encoder[0].weight.shape[1] for site in sites.values()):
+            raise ValueError("recipe roles must match the canonical codec hidden dimension")
+        training = description['config']['training']
+        self.recipe_training = training
+        self.recipe_counts = description['counts']
+        BaselineLearner.__init__(self, model, run_id=f"b{plan.width}_r{plan.ratio}", task="hellaswag",
+            identity={"source": metadata['source_identity'], "config": metadata['config_identity'],
+                      "data": metadata['data_identity'], "parent": None}, pairing_id=plan.study_pairing_id,
+            final_step=plan.horizon, effective_batch=16, lr=training['lr'],
+            weight_decay=training['weight_decay'], grad_clip=training['grad_clip'],
+            synthetic=True, event_sink=event_sink, audit_policy='sparse_first_final')
+        # Configure the existing optimizer before any state/update exists.
+        for group in [self.optimizer.defaults, *self.optimizer.param_groups]:
+            group.update(betas=tuple(training['betas']), eps=training['eps'])
+        model.enable_universal_codec()
+        canonical_codec(model)
+        self.synthetic = synthetic
+        self.schedule, self.sites = plan, sites
+        self.trained_sites = plan.trained_sites
+        self.exposure = SharingExposureLedger(cast(LearnerSchedule, plan), sites=plan.trained_sites)
+        self.microbatch_size = None
+        self.active_site = self.active_local = self.pending_update = None
+        self.noise_identity = canonical_digest({'pairing_id': plan.study_pairing_id,
+            'schema': 'original13-role-awgn-v1', 'streams': ['hidden', 'memory'],
+            'torch': str(torch.__version__), 'device': str(next(model.base.parameters()).device),
+            'dtype': str(next(model.base.parameters()).dtype), 'channel': self.recipe_channel,
+            'seed': self.recipe_seed})
+        self.scheduler = build_recipe_scheduler(self.optimizer, plan, 0)
+
+    def _objective_settings(self, kind):
+        return {'temperature': self.recipe_training['temperature'],
+                'loss_weights': self.schedule.objective_at(self.completed),
+                'requires_memory': self.model.requires_memory_transmission}
+
+    def _values(self, batch, kind, step, micro, purpose, condition='uniform', *,
+                capture=True, bound_identity=None):
+        from contextlib import nullcontext
+        if purpose != 'train' or micro != 0 or self.pending_update is None or self.active_site is None:
+            raise ValueError('recipe requires one scheduled complete native training view')
+        key = self.pending_update.noise_key
+        namespace = noise_namespace(key)
+        device = next(self.model.base.parameters()).device
+        channel = self.model.channel
+        noisy = self.recipe_channel['train_noise'] and isinstance(channel, AWGNChannel)
+        if noisy:
+            low, high = self.recipe_channel['train_snr_range']
+            generator = torch.Generator(device=device).manual_seed(derived_seed(self.recipe_seed, namespace + ':snr'))
+            snr = torch.empty((len(batch['labels']), 1, 1), device=device).uniform_(low, high, generator=generator)
+        else:
+            snr = torch.full((len(batch['labels']), 1, 1), self.recipe_channel['clean_film_snr'], device=device)
+        replay = channel.replay(self.recipe_seed, namespace, capture=capture) if isinstance(channel, AWGNChannel) else nullcontext()
+        settings = self._objective_settings(kind)
+        with replay:
+            if self.schedule.stage_at(self.completed).objective_kind == 'reconstruction':
+                values = original13_reconstruction_batch_values(self.model, batch, snr if noisy else None,
+                                                                settings, site=self.sites[self.active_site])
+            else:
+                values = batch_losses(self.model, batch, settings, snr if noisy else None,
+                                      return_stats=True, valid_only_kl=True)
+        draws = list(channel.draw_summaries) if isinstance(channel, AWGNChannel) else []
+        return values, snr, {'key': asdict(key), 'draws': draws}
+
+    def _event(self, event_type, phase, payload):
+        if event_type == 'update':
+            payload['recipe_identity'] = self.schedule.identity
+            payload['configured_counts'] = deepcopy(self.recipe_counts)
+            payload['recipe_progress'] = self.schedule.progress(self.completed, self.phase_start_step)
+            payload['channel'] = deepcopy(self.recipe_channel)
+            payload['snr']['condition'] = ('uniform' if self.recipe_channel['train_noise']
+                and isinstance(self.model.channel, AWGNChannel) else 'no_noise')
+        return super()._event(event_type, phase, payload)
+
+
+def create_recipe_learner(model, *, plan, metadata, event_sink=None, synthetic=False):
+    return RecipeLearner(model, plan=plan, metadata=metadata, event_sink=event_sink, synthetic=synthetic)
