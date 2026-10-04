@@ -121,8 +121,54 @@ freeze records. `training.json` records both attempt and engine paths.
 `checkpoints.json` lists durable checkpoint path/hash/size/step/role, including
 pre/post reset separately. `checkpoint.json` is published only after completed
 training and identifies the exact `recipe-terminal` policy target and engine.
-Evaluation consumers use that engine and the prepared fixed terminal template;
-recipe evaluation through `evaluate.py` is a separate integration release.
+Evaluation consumers use that engine and the prepared fixed terminal template.
+
+## Public recorded evaluation
+
+The public command evaluates recorded recipe targets, using frozen effective
+settings rather than the author's current YAML:
+
+```bash
+uv run --locked python evaluate.py --run runs/comparison
+uv run --locked python evaluate.py --run runs/comparison --case width-512-ratio-75 --attempt selected-01
+uv run --locked python evaluate.py --run runs/comparison/cases/width-512-ratio-75 --scope supplemental --attempt supplement-01
+```
+
+Default evaluation requires each case's unique published terminal checkpoint and
+completed training attempt. The checkpoint role, step, SHA256, size, engine path,
+source/runtime and prepared model/data/initializer/template identities must match.
+There is no newest search or partial fallback. Missing or failed cases retain their
+declared case/panel/item denominators while eligible cases run sequentially. An
+incomplete public command exits 1 after saving its evidence and printing its exact
+output path and counts. Ordinary COCO and HellaSwag runs keep their recorded
+best/fixed-step policy and evaluation-only override behavior.
+
+Explicit development evaluation supports checkpoints at YAML-declared observation
+endpoints only, using the acquired development template. Select one case, the
+exact recorded checkpoint path and step, including the distinct pre-reset role:
+
+```bash
+uv run --locked python evaluate.py --run runs/changed --case width-32-ratio-50 --scope development --checkpoint runs/changed/cases/width-32-ratio-50/attempts/training-0001/engine/step_000120_pre_reset.pt --expected-step 120 --attempt development-01
+```
+
+Unsupported intermediate roles fail eligibility. Development results never become
+terminal results or complete old observation obligations. Supplemental scope uses
+the frozen YAML `supplemental_conditions`; no supplement runs implicitly. Recipe
+`--config` accepts only an exact copy of the frozen evaluation mapping. Arbitrary
+scoring/panel changes require new bound recipe evidence; unsupported changes fail
+before evaluation outputs. Duplicate numerical conditions such as 6 and 6.0
+are rejected before output creation.
+
+Every fresh `--attempt` reserves `evaluations/evaluation-<name>` at the logical
+root and participating cases. Root `results.json`, `eligibility.json` and
+`gate.json` link exact independent case results. Each case retains request,
+eligibility and result records, plus the existing scientific `panels/result.json`
+and artifact receipts. Gate `final_eligible` means all selected initial terminal
+evaluations completed; observations remain separately recorded, including
+`pending_prior_segment`. It does not establish scientific quality or campaign
+closure. Failures, completed panels and pending panels survive; reruns need a
+fresh explicit name and never overwrite earlier evidence. `--output-path-file`
+writes the saved aggregate directory, including incomplete evidence.
 
 Counts distinguish actual selected rows, `Q × 16` base presentations and
 `N × Q × 16` processed/site presentations, with `N × Q` optimizer updates.

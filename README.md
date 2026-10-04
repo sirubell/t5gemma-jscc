@@ -63,7 +63,12 @@ per-location update budgets, cached-row subsets, optimizer phases, saves and fix
 observation/terminal requests. The public `train.py --config <recipe.yaml> --output <root> --registrations <directory>`
 automatically prepares pinned acquired inputs. Stable named cases support sequential
 local execution or independent case jobs, with exact checkpoint continuation.
-See [public recipe commands and records](docs/experiment-recipes.md#public-training-command-and-independent-cases). Start with
+See [public recipe commands and records](docs/experiment-recipes.md#public-training-command-and-independent-cases)
+and [recorded recipe evaluation](docs/experiment-recipes.md#public-recorded-evaluation).
+`evaluate.py --run runs/comparison` evaluates declared recipe cases through their
+exact recorded terminals; `--case`, `--scope supplemental` and explicit development
+checkpoints retain separate results. Missing/failed cases remain visible in saved
+case and panel counts. Start with
 [the retained original13 example](configs/recipes/original13.yaml) or
 [the changed recipe example](configs/recipes/changed.yaml); acquired model/data
 assets and explicit execution authority are required. COCO keeps the task workflow
