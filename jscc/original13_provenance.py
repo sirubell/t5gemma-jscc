@@ -81,8 +81,13 @@ def bind_model_assets(path, revision, *, tokenizer_files=None, production=False)
     return {**reference, 'status': 'complete', 'files': files}
 
 
-def verify_model_assets(config, *, require_complete=True, verify_bytes=True):
-    """Fail closed before model construction; no checks in the training hot path."""
+def verify_model_assets(config, *, require_complete=True, verify_bytes=False):
+    """Check acquisition-bound immutable assets before model construction.
+
+    Startup checks paths, presence and sizes. Acquisition/transfer must hash
+    bytes with bind_model_assets; use verify_bytes=True for an explicit audit.
+    Same-size external edits require rebind, as with recipe data caches.
+    """
     binding = config['model'].get('asset_binding')
     if (not isinstance(binding, dict) or binding.get('schema') != 'original13-model-assets-v1'
             or binding.get('revision') != config['model']['revision']
@@ -105,7 +110,18 @@ def verify_model_assets(config, *, require_complete=True, verify_bytes=True):
         if (name not in binding['files'] or binding['files'][name]['sha256'] != expected['sha256']
                 or binding['files'][name]['bytes'] != expected['bytes']):
             raise ValueError('original13 tokenizer/input asset identity differs')
-    if verify_bytes and model_asset_inventory(root) != binding['files']:
+    files = binding['files']
+    if ('config.json' not in files or not any(n.endswith(('.safetensors', '.bin')) for n in files)
+            or not any(n.startswith('tokenizer') or n.startswith('vocab') for n in files)):
+        raise ValueError('original13 complete local model/config/tokenizer assets required')
+    for name, record in files.items():
+        relative = Path(name)
+        if relative.is_absolute() or '..' in relative.parts or not name:
+            raise ValueError('original13 model asset path differs')
+        asset = root / relative
+        if not asset.is_file() or asset.stat().st_size != record['bytes']:
+            raise ValueError('original13 model/tokenizer asset bytes differ (presence or size): ' + name)
+    if verify_bytes and model_asset_inventory(root) != files:
         raise ValueError('original13 model/tokenizer asset bytes differ')
     return binding
 

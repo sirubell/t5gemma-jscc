@@ -72,6 +72,7 @@ class BoundBatchIdentity:
     complete_sha256: str
     _tensor_bindings: tuple
     _metadata_sha256: str
+    mask_sha256: str | None = None
 
     def validate(self, batch):
         tensors = tuple((key, _tensor_binding(value)) for key, value in sorted(batch.items())
@@ -94,7 +95,8 @@ def bind_batch_identity(batch, *, expected_identity=None):
     return BoundBatchIdentity(view, canonical_digest(contents),
         tuple((key, _tensor_binding(value)) for key, value in sorted(batch.items())
               if torch.is_tensor(value)),
-        canonical_digest({key: value for key, value in batch.items() if not torch.is_tensor(value)}))
+        canonical_digest({key: value for key, value in batch.items() if not torch.is_tensor(value)}),
+        contents.get("attention_mask", ""))
 
 
 def _check_batches(batches, kind, expected_sequences=None):
@@ -214,14 +216,14 @@ class BaselineLearner:
 
     def _values(self, batch, kind, step, micro, purpose, condition: str | int = "uniform", *,
                 capture=True, bound_identity=None):
-        view = None if bound_identity is None else bound_identity.view_sha256
+        view = batch_identity(batch) if bound_identity is None else bound_identity.view_sha256
         key = {"schema": "baseline-draw-v2", "pairing_id": self.pairing_id,
                "purpose": purpose, "site": "enc_fn", "site_local_batch": step if purpose == "train" else 0,
-               "view": batch_identity(batch) if view is None else view, "microbatch": micro,
+               "view": view, "microbatch": micro,
                "layout": list(batch["attention_mask"].shape), "condition": condition}
         namespace = noise_namespace(NoiseKey(self.pairing_id,
             "training" if purpose == "train" else "validation", "enc_fn",
-            step if purpose == "train" else 0, batch_identity(batch) if view is None else view,
+            step if purpose == "train" else 0, view,
             canonical_digest({"shape": key["layout"], "micro": micro}), condition=str(condition),
             draw_schema="runtime-awgn-replay-v2"))
         device = next(self.model.base.parameters()).device

@@ -19,11 +19,18 @@ from .sharing_accumulation import micro_noise_key, partition_native64, partition
 from .training import batch_losses
 
 
-def batch_view(batch):
+def batch_view(batch, *, binding=None):
     """Bind the actual complete CPU/native batch; no geometry token repacking."""
     mask = batch['attention_mask']
+    if binding is None:
+        view, mask_sha = batch_identity(batch), tensor_digest(mask)
+    else:
+        if not isinstance(binding, BoundBatchIdentity):
+            raise TypeError('batch view requires a bound identity token')
+        view = binding.validate(batch)
+        mask_sha = binding.mask_sha256 or tensor_digest(mask)
     return BatchView(
-        view_sha256=batch_identity(batch), mask_sha256=tensor_digest(mask),
+        view_sha256=view, mask_sha256=mask_sha,
         layout_sha256=canonical_digest({'shape': list(mask.shape), 'micro': 0}),
         sequences=len(mask), source_tokens=int(mask.sum()),
         target_tokens=int((batch['labels'] != -100).sum()), padded_tokens=mask.numel())
@@ -133,7 +140,11 @@ class SharingLearner(BaselineLearner):
         if len(batches) != 1 or kind != 'combined':
             raise ValueError('sharing supports the frozen native batch and combined recipe only')
         expected = self.schedule.update_at(self.completed)
-        actual = replace(expected, view=batch_view(batches[0]))
+        if batch_identities is None:
+            batch_identities = [bind_batch_identity(batches[0])]
+        if len(batch_identities) != 1:
+            raise ValueError('sharing requires one complete batch identity')
+        actual = replace(expected, view=batch_view(batches[0], binding=batch_identities[0]))
         if actual != expected:
             raise ValueError('actual complete sequence view/layout differs from ordered sharing plan')
         if self.microbatch_size is not None:
