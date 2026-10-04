@@ -12,7 +12,7 @@ from jscc.experiment_recipe import resolve_recipe
 from jscc.encoder_stages_plan import Original13Plan
 from jscc.recipe_submission import (SCHEMA, normalize_path, prepare_job, render_payload,
                                     scheduler_command, submit_job, validate_bundle)
-from test_original13_joined import cli
+from test_original13_joined import cli, prepared as prepared
 from test_original13_plan_state import formal_views
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +39,7 @@ def job_files(tmp_path):
     views = formal_views()
     plans = [Original13Plan(views, 'submission-fixture', i['ratio'], i['width'], 'a'*64, 'b'*64).resolved()
              for i in resolved['trajectories']]
-    manifest = {'configs': {str(i['width']): i['config'] for i in resolved['trajectories']},
+    manifest = {'schema': 'original13-prepared-v1', 'source_commit': '1'*40, 'configs': {str(i['width']): i['config'] for i in resolved['trajectories']},
                 'plans': plans, 'observation_request': {'panel': {'expected_items': 256},
                     'sites': recipe['observation']['sites'], 'conditions': recipe['observation']['conditions']}}
     prepared = tmp_path/'prepared.json'
@@ -276,3 +276,52 @@ def test_run_payload_uses_bound_training_cli(job_files, tmp_path, monkeypatch):
     with pytest.raises(FileExistsError):
         submission.run_job(b, b['identity'])
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('field,value,match', [
+    ('source_commit', '2'*40, 'prepared source commit'),
+    ('schema', 'other-v1', 'prepared schema'),
+])
+def test_prepared_source_rejected_before_reservation(job_files, field, value, match):
+    b = bundle(job_files)
+    path = Path(b['prepared']['path'])
+    manifest = json.loads(path.read_text())
+    manifest[field] = value
+    path.write_text(json.dumps(manifest))
+    b['prepared']['sha256'] = file_digest(path)
+    from jscc.activation_replay import canonical_digest
+    b['identity'] = canonical_digest({k: v for k, v in b.items() if k != 'identity'})
+    calls = []
+    with pytest.raises(ValueError, match=match):
+        submit_job(b, b['output'], scheduler=calls.append)
+    assert not calls and not Path(b['output']).exists()
+
+
+def test_real_retained_loader_checks_persisted_resolution(prepared, tmp_path):
+    path, manifest = prepared
+    task_path = tmp_path/'task.yaml'
+    task_path.write_text(yaml.safe_dump(manifest['configs']['8']))
+    recipe = yaml.safe_load((ROOT/'configs/recipes/original13.yaml').read_text())
+    recipe.update(task_config=str(task_path), updates_per_location=400,
+                  widths=[8], reconstruction_percentages=[90])
+    recipe_path = tmp_path/'recipe.yaml'
+    recipe_path.write_text(yaml.safe_dump(recipe))
+    resolved = resolve_recipe(recipe_path, model_config_path=tmp_path/'model/config.json')
+    from jscc.activation_replay import canonical_digest
+    b = {'schema': SCHEMA, 'resolved': resolved,
+         'prepared': {'sha256': file_digest(path)},
+         'source': {'commit': manifest['source_commit']}, 'model': {'path': str(tmp_path/'model')}}
+    b['identity'] = canonical_digest(b)
+    bundle_path = tmp_path/'bundle.json'
+    bundle_path.write_text(json.dumps(b))
+    args = ['check', '--prepared', str(path), '--prepared-sha256', file_digest(path),
+            '--width', '8', '--ratio', '90', '--resolved', str(bundle_path),
+            '--resolved-identity', b['identity'], '--trajectory', '0']
+    check = cli('original13_training.py')
+    assert check(args)['schema'] == 'original13-prepared-v1'
+    b['resolved']['trajectories'][0]['config']['training']['lr'] = .001
+    b['identity'] = canonical_digest({k: v for k, v in b.items() if k != 'identity'})
+    bundle_path.write_text(json.dumps(b))
+    args[args.index('--resolved-identity')+1] = b['identity']
+    with pytest.raises(ValueError, match='complete config differs'):
+        check(args)

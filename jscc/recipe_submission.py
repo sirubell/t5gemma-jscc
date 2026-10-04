@@ -166,6 +166,8 @@ def validate_prepared(bundle):
     asset = local_path(bundle['prepared']['path'], bundle['root'])
     require(file_digest(asset) == bundle['prepared']['sha256'], 'prepared digest differs')
     manifest = json.loads(asset.read_text())
+    require(manifest.get('schema') == 'original13-prepared-v1', 'prepared schema differs')
+    require(manifest.get('source_commit') == bundle['source']['commit'], 'prepared source commit differs')
     for item in bundle['resolved']['trajectories']:
         matches = [p for p in manifest['plans'] if p['width'] == item['width'] and p['ratio'] == item['ratio']]
         require(len(matches) == 1, 'prepared asset lacks exact trajectory')
