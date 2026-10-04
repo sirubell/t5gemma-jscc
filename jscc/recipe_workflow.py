@@ -28,9 +28,19 @@ def recipe_source_inventory():
         ('scripts/experiment_recipe.py', 'scripts/submit_recipe.py')}}
 
 
-def _read_reference(reference):
+def _asset_path(path):
+    from .asset_paths import normalize_asset_path
+    return normalize_asset_path(path)
+
+
+def _read_reference(reference, *, trusted_stat=False):
     path = Path(reference['path'])
-    if not path.is_absolute() or not path.is_file() or file_digest(path) != reference['sha256']:
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError('recipe acquired reference bytes or absolute path differ')
+    if trusted_stat and 'stat' in reference:
+        from .asset_paths import verify_asset_stat
+        verify_asset_stat(path, reference['stat'])
+    elif file_digest(path) != reference['sha256']:
         raise ValueError('recipe acquired reference bytes or absolute path differ')
     return path
 
@@ -87,8 +97,10 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
     cache = json.loads(cache_path.read_text())
     if (cache.get('schema') != 'recipe-data-cache-v1' or cache.get('identity') != canonical_digest(
             {k: v for k, v in cache.items() if k != 'identity'})
-            or cache['tokenizer']['path'] != manifest['model_assets']['path']):
+            or _asset_path(cache['tokenizer']['path']) != _asset_path(manifest['model_assets']['path'])):
         raise ValueError('recipe cache/model acquisition differs')
+    from .original13_inputs import validate_recipe_cache
+    validate_recipe_cache(cache)
     for item in bound['trajectories']:
         config = item['config']
         if cache['dataset']['name'] != config['data']['name'] or cache['dataset']['revision'] != config['data']['revision']:
@@ -99,20 +111,17 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
         for name, record in cache['tokenizer']['files'].items():
             if manifest['model_assets']['files'].get(name) != record:
                 raise ValueError('recipe model/cache tokenizer bytes differ')
-        arrow = Path(cache['dataset']['path'])
-        if not arrow.is_file() or arrow.stat().st_size != cache['dataset']['bytes']:
-            raise ValueError('recipe acquired dataset presence/size differs')
         ref = manifest['initializations'].get(str(item['width']))
-        if not isinstance(ref, dict) or ref.get('seed') != 0:
+        if not isinstance(ref, dict) or ref.get('seed') != config['seed']:
             raise ValueError('recipe acquired width initializer missing or seed differs')
-        _read_reference(ref)
+        _read_reference(ref, trusted_stat=True)
         recipe_observation_identity(item, observation)
         scoring_template(terminal, item['evaluation'], item['evaluation'])
         fixed = cache['fixed_data_ids']
         for template, key in ((observation, 'development'), (terminal, 'final_validation')):
             panel = fixed.get(key)
-            if (not isinstance(panel, dict) or template['input_ids'] != panel['input_ids']
-                    or template['source_family_ids'] != panel['source_family_ids']
+            if (not isinstance(panel, dict) or template['input_ids'] != panel['input_ids'][:template['expected_items']]
+                    or template['source_family_ids'] != panel['source_family_ids'][:template['expected_items']]
                     or any(template['data_settings'].get(k) != config['data'][k] for k in ('name', 'revision'))
                     or ('noise' in panel and template['noise'] != panel['noise'])):
                 raise ValueError('recipe fixed template/cache membership differs')
@@ -124,15 +133,16 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_bi
                          output, synthetic=False):
     """Acquire a new source receipt reusing already acquired immutable assets."""
     from .runtime import source_state
-    model_path = Path(model_path).resolve()
+    model_path = _asset_path(model_path)
     config_path = Path(model_config_path).resolve()
-    if config_path != model_path/'config.json':
+    from .asset_paths import asset_file_path
+    if config_path != asset_file_path(model_path, 'config.json'):
         raise ValueError('recipe topology must come from acquired model config')
     resolved = resolve_recipe(recipe_path, model_config_path=config_path)
     revision = resolved['trajectories'][0]['config']['model']['revision']
     cache_ref = {'path': str(Path(cache_manifest).resolve()), 'sha256': cache_sha256}
     assets = json.loads(_read_reference(model_binding).read_text())
-    if assets['path'] != str(model_path) or assets['revision'] != revision:
+    if _asset_path(assets['path']) != model_path or assets['revision'] != revision:
         raise ValueError('recipe acquired model binding path/revision differs')
     inventory = recipe_source_inventory()
     manifest = {'schema': SCHEMA, 'source_commit': source_state()['revision'],
@@ -147,7 +157,10 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_bi
     validate_recipe_prepared(manifest)
     # Initializer integrity is a setup boundary; never decode it per update.
     for ref in initializations.values():
-        initial = torch.load(_read_reference(ref), map_location='cpu', weights_only=True)
+        if 'stat' in ref:
+            _read_reference(ref, trusted_stat=True)
+            continue
+        initial = torch.load(_read_reference(ref, trusted_stat=True), map_location='cpu', weights_only=True)
         if state_dict_identity(initial) != ref['state_identity']:
             raise ValueError('recipe acquired initializer tensor identity differs')
     with Path(output).open('x') as handle:
@@ -163,7 +176,7 @@ def load_recipe_workflow(path, *, checksum, width, ratio, resolved=None, load_da
         raise ValueError('recipe requires exact declared width/ratio')
     description = matches[0]
     ref = manifest['initializations'][str(width)]
-    initial = torch.load(_read_reference(ref), map_location='cpu', weights_only=True)
+    initial = torch.load(_read_reference(ref, trusted_stat=True), map_location='cpu', weights_only=True)
     if state_dict_identity(initial) != ref['state_identity']:
         raise ValueError('recipe initializer tensor identity differs')
     if not load_data:
@@ -241,12 +254,15 @@ def training_cli(args):
             raise ValueError('recipe train/resume require exact width/ratio')
         selected = resolved['trajectories'][0]
         args.width, args.ratio = selected['width'], selected['ratio']
+    if args.mode == 'check':
+        bound = validate_recipe_prepared(manifest, resolved=resolved)
+        if sum((d['width'], d['ratio']) == (args.width, args.ratio) for d in bound['trajectories']) != 1:
+            raise ValueError('recipe requires exact declared width/ratio')
+        return {'schema': SCHEMA, 'status': 'valid', 'resolved': bound,
+                'model_assets_status': manifest['model_assets']['status'], 'launch_authorized': False}
     manifest, config, plan, stream, initial, metadata, data_ids = load_recipe_workflow(
         args.prepared, checksum=args.prepared_sha256, width=args.width, ratio=args.ratio,
-        resolved=resolved, load_data=args.mode != 'check')
-    if args.mode == 'check':
-        return {'schema': SCHEMA, 'status': 'valid', 'resolved': workflow_resolution(resolved, manifest),
-                'model_assets_status': manifest['model_assets']['status'], 'launch_authorized': False}
+        resolved=resolved)
     if not args.output or not args.approved_source:
         raise ValueError('recipe execution requires output and approved source')
     verify_recipe_source(manifest, args.approved_source)

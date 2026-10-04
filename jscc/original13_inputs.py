@@ -216,8 +216,8 @@ def load_recipe_cached_data(description, *, cache_manifest, checksum):
 
     No hub resolution, model weights, cache transfer or per-update files. Byte
     integrity belongs to acquisition/transfer (bind_recipe_data_cache); startup
-    validates the receipt, pinned revisions, paths and sizes. Same-size external
-    edits violate the immutable-cache contract and require acquisition rebind.
+    validates the receipt, pinned revisions, paths, sizes and acquired stat state.
+    Changed acquired assets require an explicit acquisition rebind.
     """
     from datasets import Dataset
     from transformers import AutoConfig, AutoTokenizer
@@ -236,23 +236,36 @@ def load_recipe_cached_data(description, *, cache_manifest, checksum):
     if (dataset['name'] != config['data']['name'] or dataset['revision'] != config['data']['revision']
             or tokenizer['revision'] != config['model']['revision']):
         raise ValueError('recipe dataset/tokenizer revisions differ from local cache')
-    arrow, assets = Path(dataset['path']), Path(tokenizer['path'])
-    if not arrow.is_absolute() or not assets.is_absolute():
-        raise ValueError('recipe cache acquisition receipt requires absolute local paths')
-    required = [(arrow, dataset)]
-    if 'config.json' not in tokenizer['files'] or not any(n.startswith('tokenizer') for n in tokenizer['files']):
-        raise ValueError('recipe cache receipt requires tokenizer and model config assets')
-    for name, record in tokenizer['files'].items():
-        if Path(name).name != name:
-            raise ValueError('recipe tokenizer asset must be a local filename')
-        required.append((assets / name, record))
-    for asset_path, record in required:
-        if not asset_path.is_file():
-            raise FileNotFoundError(f'recipe cached asset missing: {asset_path}')
-        if asset_path.stat().st_size != record['bytes']:
-            raise ValueError(f'recipe cached asset size differs: {asset_path}')
+    arrow, assets = validate_recipe_cache(receipt)
     raw = Dataset.from_file(str(arrow))
     processor = AutoTokenizer.from_pretrained(assets, local_files_only=True)
     model_config = AutoConfig.from_pretrained(assets, local_files_only=True)
     return RecipeCachedData(description, raw=raw, tokenizer=processor, model_config=model_config,
                             cache_identity=receipt['identity'], fixed_data_ids=receipt['fixed_data_ids'])
+
+
+def validate_recipe_cache(receipt):
+    """Validate local cache receipt and cheap trust state without loading data."""
+    from .asset_paths import asset_file_path, normalize_asset_path, verify_asset_record, tokenizer_asset_names
+    if (receipt.get('schema') != 'recipe-data-cache-v1' or receipt.get('identity') != canonical_digest(
+            {k: v for k, v in receipt.items() if k != 'identity'})):
+        raise ValueError('recipe data cache receipt identity differs')
+    dataset, tokenizer = receipt['dataset'], receipt['tokenizer']
+    if not Path(dataset['path']).is_absolute() or not Path(tokenizer['path']).is_absolute():
+        raise ValueError('recipe cache acquisition receipt requires absolute local paths')
+    arrow, assets = normalize_asset_path(dataset['path']), normalize_asset_path(tokenizer['path'])
+    files = tokenizer['files']
+    if 'config.json' not in files or not any(n.startswith('tokenizer') for n in files):
+        raise ValueError('recipe cache receipt requires tokenizer and model config assets')
+    trust = receipt.get('trust')
+    if trust is not None and (not isinstance(trust, dict) or set(trust) != {'dataset', 'tokenizer'}
+                              or not isinstance(trust['tokenizer'], dict) or set(trust['tokenizer']) != set(files)):
+        raise ValueError('recipe cache trust inventory differs')
+    if trust is not None and set(tokenizer_asset_names(assets)) != set(files):
+        raise ValueError('recipe tokenizer asset layout changed; reacquire cache')
+    verify_asset_record(arrow, dataset, None if trust is None else trust['dataset'])
+    for name, record in files.items():
+        if Path(name).name != name:
+            raise ValueError('recipe tokenizer asset must be a local filename')
+        verify_asset_record(asset_file_path(assets, name), record, None if trust is None else trust['tokenizer'][name])
+    return arrow, assets

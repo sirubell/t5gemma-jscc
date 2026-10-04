@@ -19,8 +19,50 @@ def main(argv=None):
     parser.add_argument('--acquire-model', action='store_true', help='Hash an existing model once at acquisition')
     parser.add_argument('--model-path')
     parser.add_argument('--model-revision')
+    parser.add_argument('--registrations', help='Directory of exact acquired registrations; automatically prepare assets')
+    parser.add_argument('--register-assets', action='store_true', help='Explicitly register existing pinned acquisition receipts')
+    parser.add_argument('--register-from-prepared', help='Register retained prepared assets without modifying the receipt')
+    parser.add_argument('--model-name', help='Exact task YAML model name for registration')
+    parser.add_argument('--model-binding')
+    parser.add_argument('--cache')
+    parser.add_argument('--observation-template')
+    parser.add_argument('--terminal-template')
     parser.add_argument('--synthetic-cpu', action='store_true', help='Explicit local tiny fixture acquisition')
     args = parser.parse_args(argv)
+    registration_options = (args.model_binding, args.cache, args.observation_template, args.terminal_template)
+    if args.register_assets or args.register_from_prepared:
+        if (not args.model_name or args.acquire_model or args.config or args.model_config or args.assets
+                or args.model_path or args.model_revision or args.registrations
+                or (args.register_assets and args.register_from_prepared)):
+            parser.error('registration requires exact model-name and cannot combine with acquisition/preparation')
+        from jscc.recipe_assets import register_recipe_assets, register_prepared_assets
+        if args.register_from_prepared:
+            if any(registration_options) or args.synthetic_cpu:
+                parser.error('retained registration uses the existing prepared acquisition fields')
+            result = register_prepared_assets(args.register_from_prepared, model_name=args.model_name, output=args.output)
+        else:
+            if not all(registration_options):
+                parser.error('registration requires model-binding/cache/observation-template/terminal-template')
+            from jscc.activation_replay import file_digest
+            def reference(path):
+                path = Path(path).resolve()
+                return {'path': str(path), 'sha256': file_digest(path)}
+            result = register_recipe_assets(model_name=args.model_name,
+                model_binding=reference(args.model_binding), cache=reference(args.cache),
+                observation_template=reference(args.observation_template),
+                terminal_template=reference(args.terminal_template), output=args.output, synthetic=args.synthetic_cpu)
+        print(json.dumps({'identity': result['identity'], 'status': 'registered', 'launch_authorized': False}))
+        return result
+    if args.model_name or any(registration_options):
+        parser.error('registration options require --register-assets or --register-from-prepared')
+    if args.registrations:
+        if (not args.config or args.acquire_model or args.model_config or args.assets
+                or args.model_path or args.model_revision or args.synthetic_cpu):
+            parser.error('automatic preparation requires config/registrations and a fresh output directory')
+        from jscc.recipe_assets import prepare_recipe_assets
+        result = prepare_recipe_assets(args.config, registrations=args.registrations, output=args.output)
+        print(json.dumps({'prepared_identity': result['manifest_identity'], 'launch_authorized': False}))
+        return result
     if args.acquire_model:
         if not args.model_path or not args.model_revision or args.config or args.model_config or args.assets:
             parser.error('model acquisition requires model path/revision and cannot combine with recipe options')

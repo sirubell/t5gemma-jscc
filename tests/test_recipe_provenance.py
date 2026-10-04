@@ -31,7 +31,11 @@ def test_model_startup_reuses_acquisition_and_explicit_audit_hashes(tmp_path, mo
     assert set(calls) == {'config.json', 'tokenizer.json', 'model.safetensors'}
     target = tmp_path / 'model.safetensors'
     target.write_bytes(b'x' * target.stat().st_size)
-    verify_model_assets(config)  # Immutable-cache violation requires explicit rebind/audit.
+    with pytest.raises(ValueError, match='trust signature'):
+        verify_model_assets(config)
+    # Historical receipts retain their original presence/size contract.
+    config['model']['asset_binding'].pop('trust')
+    verify_model_assets(config)
     with pytest.raises(ValueError, match='asset bytes differ'):
         verify_model_assets(config, verify_bytes=True)
     rebound = bind_model_assets(tmp_path, 'fixed')

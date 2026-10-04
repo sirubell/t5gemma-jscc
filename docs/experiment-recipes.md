@@ -55,53 +55,89 @@ uv run --locked python scripts/experiment_recipe.py --acquire-model \
   --output /fresh/model-binding.json
 ```
 
-This is the full-byte acquisition boundary. Reuse its checksum-bound JSON for
-new source/recipe prepared receipts. Replacement, transfer or explicit byte audit
-requires new acquisition evidence; a source receipt never repeats weight hashing.
-Acquire immutable dataset/tokenizer assets once with
-`bind_recipe_data_cache`; bind existing initializer tensor references and fixed
-scoring templates. These are Python acquisition APIs for new assets, not edits
-required between recipes. A small `assets.json` supplies:
+Model acquisition hashes the consumed files once. Explicitly acquire existing
+Arrow/tokenizer bytes with `bind_recipe_data_cache`, then register the model and
+cache receipts and acquired fixed scoring panels. Registration is an explicit
+local operation; it never downloads or trains. The panel acquisition defines
+ordered validation IDs, source families, prompt, reference corpus, noise,
+precision/backend and native layout. Input checksums are computed automatically:
 
-```json
-{
-  "model_path": "/existing/pinned/backbone",
-  "model_binding": {"path": "/existing/model-binding.json", "sha256": "EXACT_SHA256"},
-  "cache_manifest": "/existing/cache.json",
-  "cache_sha256": "EXACT_SHA256",
-  "initializations": {
-    "512": {"path": "/existing/initial-B512.pt", "sha256": "EXACT_SHA256",
-            "state_identity": "EXACT_STATE_IDENTITY", "seed": 0}
-  },
-  "observation_template": {"path": "/existing/fixed-observation.json", "sha256": "EXACT_SHA256"},
-  "terminal_template": {"path": "/existing/fixed-terminal.json", "sha256": "EXACT_SHA256"},
-  "study_pairing_id": "EXPLICIT_PAIRED_STUDY"
-}
+```bash
+mkdir /existing/recipe-registrations
+uv run --locked python scripts/experiment_recipe.py --register-assets \
+  --model-name google/t5gemma-2-1b-1b \
+  --model-binding /existing/model-binding.json --cache /existing/cache.json \
+  --observation-template /existing/fixed-observation.json \
+  --terminal-template /existing/fixed-terminal.json \
+  --output /existing/recipe-registrations/pinned.json
 ```
 
-Every requested width requires its own matching initializer. Production assets
-use the pinned HF snapshot path. Templates contain task, ordered validation IDs,
-source families, settings, noise, data settings, scorer, precision, backend,
-reference corpus, prompt policy and layout. Their membership must exactly match
-cache `development` and `final_validation`; changed panel sizes need separately
-acquired templates and cache receipts. No implicit resize occurs.
+`--model-name` must equal the task YAML's exact model name; the example uses the retained
+recipe model name. Model and dataset revisions come from the
+checksum-bound acquisition receipts. For a retained `recipe-prepared-v1` receipt,
+registration can instead reuse its existing assets:
+
+```bash
+uv run --locked python scripts/experiment_recipe.py \
+  --register-from-prepared /existing/retained/prepared.json \
+  --model-name EXACT_TASK_MODEL_NAME \
+  --output /existing/recipe-registrations/pinned.json
+```
+
+Thereafter, edit only the supported task/recipe YAML and prepare a fresh owned
+directory. No handwritten assets JSON, initializer file, tensor package per
+update or new model acquisition is required between recipes:
 
 ```bash
 uv run --locked python scripts/experiment_recipe.py \
   --config configs/recipes/changed.yaml \
-  --model-config /existing/pinned/backbone/config.json \
-  --assets /existing/assets.json --output /fresh/prepared.json
+  --registrations /existing/recipe-registrations --output /fresh/preparation
 uv run --locked python scripts/original13_training.py check \
-  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256
+  --prepared /fresh/preparation/prepared.json --prepared-sha256 EXACT_SHA256
 ```
 
-`recipe-prepared-v1` binds the integrated source inventory, model acquisition,
-cache checksum, initializers, templates and complete effective YAML resolution.
-Operational model paths and acquired asset bindings are saved in the effective
-config and included in its identity. A new source needs a fresh small prepared
-receipt; it reuses unchanged model/cache/initializer bytes. Frozen source and
-historical receipts are never relabeled. Check validates small receipts, required asset presence/sizes and initializer
-bytes. It does not load backbone weights or assert target runtime acceptance.
+Registration discovery requires one exact model-name/revision and dataset-name/
+revision match. Duplicate identical registrations are equivalent; conflicting
+matches fail and require a directory containing the intended registration. No
+latest revision is selected. A missing acquisition fails with an explicit
+registration instruction. Normal preparation and check make no Hub calls.
+
+Preparation creates complete effective plans, fixed scoring templates,
+`prepared.json` and a small timing receipt. Width/seed initializers are generated
+once under the registration directory's `.initializers/`, keyed by codec design,
+seed, codec implementation and Torch version. Later preparations reuse these
+immutable tensors using acquisition stat checks. Keep this directory with its
+registrations and prepared consumers. An incomplete concurrent initializer
+reservation fails explicitly; retain it and reconcile before retry. Output
+directories are exclusive and a failed operation may retain partial evidence.
+
+Smaller YAML panels use the acquired ordered prefix while preserving the full
+cache's family exclusions and retained training pool. A larger panel or different
+few-shot/scoring policy requires explicit matching acquisition; noise, prompt,
+reference and layout are preserved. Ordered row selection and presentation
+budgets still use the existing cached-data loader; no per-update package is made.
+
+Production model paths use pinned HF snapshots. Links to files directly in the
+same HF repository's `blobs` directory are equivalent to snapshot files; links
+outside it, traversal and unexpected indirection fail. The approved `/work` to
+`/raid/work` alias is canonicalized at the asset seam. New model/cache receipts
+bind target path, device/inode, size and nanosecond modification/change times.
+Changed content or link targets fail cheap checks and require reacquisition.
+An explicit model audit uses `verify_model_assets(..., verify_bytes=True)`;
+reacquire a cache with `bind_recipe_data_cache` after replacement/transfer.
+Legacy receipts without stat bindings retain their prior presence/size policy;
+reacquire them to gain the stronger checks. Preserve frozen source and receipts.
+
+The callable consumer contract is
+`register_recipe_assets(...)` or `register_prepared_assets(...)`, followed by
+`prepare_recipe_assets(recipe_path, registrations=..., output=...,
+study_pairing_id=...)`, returning the existing `recipe-prepared-v1` manifest.
+`discover_recipe_assets` performs exact selection. Consumers use the resulting
+`prepared.json` checksum and existing loader; they must preserve registration,
+initializer and cache lifetimes. Automatic preparation does not wire public
+train/evaluate dispatch or scheduler preflight; those consumers integrate this
+interface separately. Existing `--assets` and low-level binding APIs remain
+available for already prepared callers.
 
 ## Train, resume and evaluate
 
@@ -177,13 +213,13 @@ commands and resource limits provide no such authorization.
 ## Cost and acceptance limits
 
 Acquisition hashes bytes once. Startup checks checksums for small receipts and
-required asset paths/sizes; replacing an immutable cache or same-size model/data
-file requires rebind or explicit byte audit. New target copies need target
+required asset paths/sizes/stat signatures; replacing an immutable cache or
+model/data file requires reacquisition or explicit byte audit. New target copies need target
 acquisition evidence. Training tokenizes selected rows once, builds Q actual
 BatchViews once and assembles one fresh padded batch per view/location cycle.
 Q view binding remains a setup cost; no full per-update tensor package is built.
 Evaluation currently repeats selected-row loading/view binding for its source/data
-check. Initializer and checkpoint integrity remain full-byte trust boundaries.
+check. Initializer acquisition and checkpoint integrity remain full-byte trust boundaries.
 
 Offline tiny CPU and mocked scheduler evidence establish mechanics, not pretrained
 model quality, target memory fit, GPU/backend equivalence or the ten-minute live

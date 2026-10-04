@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+from .asset_paths import asset_file_path
+
 import hashlib
 import json
 import os
@@ -184,7 +186,7 @@ def prepare_inputs(*, prefix_prepared, prefix_sha256, pool_manifest, pool_sha256
     if arrow.stat().st_size != pool['dataset_file']['bytes'] or file_digest(arrow) != pool['dataset_file']['sha256']:
         raise ValueError('pinned raw Arrow differs')
     for name, record in pool['tokenizer_assets']['files'].items():
-        if (assets / name).stat().st_size != record['bytes'] or file_digest(assets / name) != record['sha256']:
+        if asset_file_path(assets, name).stat().st_size != record['bytes'] or file_digest(asset_file_path(assets, name)) != record['sha256']:
             raise ValueError('pinned tokenizer/config differs: ' + name)
     sampler = PresentationSampler(ids['train_rows'], q * 16, seed=SEED)
     output.mkdir(parents=True, exist_ok=False)
@@ -403,9 +405,9 @@ def bind_recipe_data_cache(*, dataset_path, assets, dataset_name, dataset_revisi
     Keep the referenced files immutable; ordinary loading checks presence/size,
     not a repeated full-cache audit. Rebind after replacing cached assets.
     """
-    dataset_path, assets, output = map(lambda p: Path(p).resolve(), (dataset_path, assets, output))
-    names = sorted({p.name for pattern in ('config.json', 'tokenizer*', '*token*.json', '*.model')
-                    for p in assets.glob(pattern) if p.is_file()})
+    from .asset_paths import asset_trust_signature, normalize_asset_path, tokenizer_asset_names
+    dataset_path, assets, output = map(normalize_asset_path, (dataset_path, assets, output))
+    names = tokenizer_asset_names(assets)
     if not dataset_path.is_file() or 'config.json' not in names or not any(n.startswith('tokenizer') for n in names):
         raise FileNotFoundError('existing Arrow dataset and local tokenizer/config cache required')
     receipt = {'schema': 'recipe-data-cache-v1',
@@ -413,9 +415,11 @@ def bind_recipe_data_cache(*, dataset_path, assets, dataset_name, dataset_revisi
                     'path': str(dataset_path), 'bytes': dataset_path.stat().st_size,
                     'sha256': file_digest(dataset_path)},
         'tokenizer': {'path': str(assets), 'revision': model_revision,
-                      'files': {name: {'bytes': (assets / name).stat().st_size,
-                                       'sha256': file_digest(assets / name)} for name in names}},
-        'fixed_data_ids': copy.deepcopy(fixed_data_ids)}
+                      'files': {name: {'bytes': asset_file_path(assets, name).stat().st_size,
+                                       'sha256': file_digest(asset_file_path(assets, name))} for name in names}},
+        'fixed_data_ids': copy.deepcopy(fixed_data_ids),
+        'trust': {'dataset': asset_trust_signature(dataset_path),
+                  'tokenizer': {name: asset_trust_signature(asset_file_path(assets, name)) for name in names}}}
     receipt['identity'] = canonical_digest(receipt)
     with output.open('x') as handle:
         json.dump(receipt, handle, indent=2, allow_nan=False)

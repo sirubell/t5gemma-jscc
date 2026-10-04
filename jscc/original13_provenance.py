@@ -3,6 +3,7 @@ import copy
 from pathlib import Path
 import time
 
+from .asset_paths import asset_file_path, asset_trust_signature, normalize_asset_path, verify_asset_record
 from .activation_replay import file_digest
 from .sharing_preparation import source_inventory
 
@@ -52,13 +53,18 @@ def verify_original13_execution_source(manifest, approved_source):
                    stdout=subprocess.DEVNULL, check=True, env=env)
 
 
+def _model_asset_names(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()
+                  and p.suffix in {'.json', '.safetensors', '.bin', '.model', '.txt'}
+                  and '.cache' not in p.relative_to(root).parts)
+
+
 def model_asset_inventory(path):
     """Inventory consumed local HF configuration/tokenizer/weight files once."""
-    root = Path(path).expanduser().resolve()
-    files = {str(p.relative_to(root)): {'bytes': p.stat().st_size, 'sha256': file_digest(p)}
-             for p in sorted(root.rglob('*')) if p.is_file()
-             and p.suffix in {'.json', '.safetensors', '.bin', '.model', '.txt'}
-             and '.cache' not in p.relative_to(root).parts}
+    root = normalize_asset_path(path)
+    files = {name: {'bytes': asset_file_path(root, name).stat().st_size,
+                    'sha256': file_digest(asset_file_path(root, name))}
+             for name in _model_asset_names(root)}
     if ('config.json' not in files or not any(n.endswith(('.safetensors', '.bin')) for n in files)
             or not any(n.startswith('tokenizer') or n.startswith('vocab') for n in files)):
         raise ValueError('original13 complete local model/config/tokenizer assets required')
@@ -67,7 +73,7 @@ def model_asset_inventory(path):
 
 def bind_model_assets(path, revision, *, tokenizer_files=None, production=False):
     """Bind existing assets, or explicitly leave an unavailable target pending."""
-    root = Path(path).expanduser().resolve()
+    root = normalize_asset_path(path)
     reference = {'schema': 'original13-model-assets-v1', 'path': str(root), 'revision': revision,
                  'production': production, 'tokenizer_files': copy.deepcopy(tokenizer_files or {})}
     if not root.is_dir():
@@ -78,20 +84,21 @@ def bind_model_assets(path, revision, *, tokenizer_files=None, production=False)
     for name, expected in reference['tokenizer_files'].items():
         if name not in files or files[name]['sha256'] != expected['sha256'] or files[name]['bytes'] != expected['bytes']:
             raise ValueError('original13 cached tokenizer/config differs from retained inputs: ' + name)
-    return {**reference, 'status': 'complete', 'files': files}
+    return {**reference, 'status': 'complete', 'files': files,
+            'trust': {name: asset_trust_signature(asset_file_path(root, name)) for name in files}}
 
 
 def verify_model_assets(config, *, require_complete=True, verify_bytes=False):
     """Check acquisition-bound immutable assets before model construction.
 
-    Startup checks paths, presence and sizes. Acquisition/transfer must hash
+    Startup checks paths, presence, sizes and acquired stat signatures. Acquisition/transfer must hash
     bytes with bind_model_assets; use verify_bytes=True for an explicit audit.
-    Same-size external edits require rebind, as with recipe data caches.
+    New receipts detect changed target/stat state; legacy receipts check size.
     """
     binding = config['model'].get('asset_binding')
     if (not isinstance(binding, dict) or binding.get('schema') != 'original13-model-assets-v1'
             or binding.get('revision') != config['model']['revision']
-            or binding.get('path') != str(Path(config['model']['name']).expanduser().resolve())
+            or normalize_asset_path(binding.get('path', '')) != normalize_asset_path(config['model']['name'])
             or type(binding.get('production')) is not bool
             or not isinstance(binding.get('tokenizer_files'), dict)):
         raise ValueError('original13 model asset binding differs')
@@ -103,7 +110,7 @@ def verify_model_assets(config, *, require_complete=True, verify_bytes=False):
         return binding
     if binding.get('status') != 'complete' or not isinstance(binding.get('files'), dict):
         raise ValueError('original13 complete asset binding required')
-    root = Path(binding['path'])
+    root = normalize_asset_path(binding['path'])
     if binding['production'] and (root.name != binding['revision'] or root.parent.name != 'snapshots'):
         raise ValueError('original13 pinned snapshot provenance differs')
     for name, expected in binding['tokenizer_files'].items():
@@ -114,14 +121,20 @@ def verify_model_assets(config, *, require_complete=True, verify_bytes=False):
     if ('config.json' not in files or not any(n.endswith(('.safetensors', '.bin')) for n in files)
             or not any(n.startswith('tokenizer') or n.startswith('vocab') for n in files)):
         raise ValueError('original13 complete local model/config/tokenizer assets required')
-    for name, record in files.items():
-        relative = Path(name)
-        if relative.is_absolute() or '..' in relative.parts or not name:
-            raise ValueError('original13 model asset path differs')
-        asset = root / relative
-        if not asset.is_file() or asset.stat().st_size != record['bytes']:
-            raise ValueError('original13 model/tokenizer asset bytes differ (presence or size): ' + name)
+    if 'trust' in binding and set(_model_asset_names(root)) != set(files):
+        raise ValueError('original13 model asset layout changed; reacquire assets')
     if verify_bytes and model_asset_inventory(root) != files:
         raise ValueError('original13 model/tokenizer asset bytes differ')
+    for name, record in files.items():
+        try:
+            asset = asset_file_path(root, name)
+        except FileNotFoundError as error:
+            raise ValueError('original13 model/tokenizer asset bytes differ (presence): ' + name) from error
+        trust = binding.get('trust')
+        if trust is not None and (not isinstance(trust, dict) or set(trust) != set(files)):
+            raise ValueError('original13 asset trust inventory differs')
+        if asset.stat().st_size != record['bytes']:
+            raise ValueError('original13 model/tokenizer asset bytes differ (size): ' + name)
+        verify_asset_record(asset, record, None if trust is None else trust[name])
     return binding
 
