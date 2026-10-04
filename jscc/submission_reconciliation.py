@@ -76,16 +76,18 @@ def _intent(bundle, receipt, job):
 
 def _resolve(bundle, receipt, job, lookup):
     retained = job.get('job_id')
-    if retained and job['status'] in ('accepted', 'submitted'):
-        return {'status': 'accepted', 'job_id': retained, 'basis': 'original-receipt'}
+    def unknown(basis):
+        if retained and job['status'] in ('accepted', 'submitted'):
+            return {'status': 'accepted', 'job_id': retained, 'basis': 'original-receipt'}
+        return {'status': 'unknown', 'basis': basis}
     intent = _intent(bundle, receipt, job)
     if not isinstance(lookup, dict) or lookup.get('intent') != intent:
-        return {'status': 'unknown', 'basis': 'missing-exact-intent'}
+        return unknown('missing-exact-intent')
     if lookup.get('authoritative') is not True or lookup.get('query_status') != 'complete':
-        return {'status': 'unknown', 'basis': 'query-incomplete-or-failed'}
+        return unknown('query-incomplete-or-failed')
     matches = lookup.get('matches')
     if not isinstance(matches, list):
-        return {'status': 'unknown', 'basis': 'missing-matches'}
+        return unknown('missing-matches')
     if len(matches) == 1:
         match = matches[0]
         if (isinstance(match, dict) and match.get('intent') == intent
@@ -94,7 +96,7 @@ def _resolve(bundle, receipt, job, lookup):
     if not matches and lookup.get('nonacceptance') == {
             'exhaustive': True, 'final': True, 'acceptance_window_closed': True}:
         return {'status': 'not-accepted', 'basis': 'authoritative-final-nonacceptance'}
-    return {'status': 'unknown', 'basis': 'ambiguous-or-insufficient'}
+    return unknown('ambiguous-or-insufficient')
 
 
 def _retry_metadata(previous):
@@ -170,14 +172,17 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
                 resolution = _resolve(bundle, receipt, job, lookup)
             # Acceptance is monotonic across snapshots even if later lookup
             # data is delayed or fails. A conflicting ID is explicit failure.
-            if previous:
-                prior = previous['groups'][i]
+            prior = previous['groups'][i] if previous else None
+            if prior is None and job and job.get('job_id') and job['status'] in ('accepted', 'submitted'):
+                prior = {'status': 'accepted', 'job_id': job['job_id'], 'basis': 'original-receipt', 'group': i}
+            if prior:
                 if prior['status'] == 'not-accepted':
                     if resolution['status'] == 'accepted':
                         conflicts.append({'kind': 'group', 'group': i, 'index': None, 'prior': prior, 'new': resolution})
                     resolution = {key: prior[key] for key in ('status', 'basis')}
                 if prior['status'] == 'accepted':
-                    if resolution.get('job_id', prior['job_id']) != prior['job_id']:
+                    if (resolution['status'] == 'not-accepted'
+                            or resolution.get('job_id', prior['job_id']) != prior['job_id']):
                         conflicts.append({'kind': 'group', 'group': i, 'index': None, 'prior': prior, 'new': resolution})
                     resolution = {key: prior[key] for key in ('status', 'job_id', 'basis')}
             groups.append(dict(resolution, group=i))
@@ -423,7 +428,7 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
             raise ValueError('durable reconciliation record required')
         _require(record and not record.get('conflicts') and all(g['status'] != 'unknown' for g in record['groups']), 'fully reconciled attempt required')
         _require(not record.get('conflicts'), 'authoritative evidence conflict blocks recovery')
-        eligible = [i for i in eligible if str(i) not in record.get('recovery_claims', {})]
+        eligible = [i for i in record['retry_eligible_groups'] if str(i) not in record.get('recovery_claims', {})]
         selected = eligible if groups is None else groups
         _require(isinstance(selected, list) and selected and len(set(selected)) == len(selected)
                  and all(type(i) is int and i in eligible for i in selected),

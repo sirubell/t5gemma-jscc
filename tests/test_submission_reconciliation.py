@@ -31,14 +31,19 @@ def stopped(graph_job, *, partial=False):
 def evidence(bundle, *, result='accepted', query='complete'):
     intents = reconciliation_intents(bundle, bundle['output'])
     groups = []
+    receipt = json.loads((Path(bundle['output'])/'SUBMISSION.json').read_text())
+    retained = {row['group']: row['job_id'] for row in receipt['jobs']
+                if row.get('job_id') and row['status'] in ('accepted', 'submitted')}
     for intent in intents:
         row = {'group': intent['group'], 'intent': intent, 'authoritative': True,
                'query_status': query, 'matches': []}
-        match = {'job_id': str(9200+intent['group']), 'intent': intent}
+        match = {'job_id': retained.get(intent['group'], str(9200+intent['group'])), 'intent': intent}
         if result == 'accepted':
             row['matches'] = [match]
         elif result == 'ambiguous':
             row['matches'] = [match, dict(match, job_id='9999')]
+        elif result == 'rejected' and intent['group'] in retained:
+            row['matches'] = [match]
         elif result == 'rejected':
             row['nonacceptance'] = {'exhaustive': True, 'final': True, 'acceptance_window_closed': True}
         groups.append(row)
@@ -321,6 +326,8 @@ def _complete_evidence(bundle):
     value = evidence(bundle)
     record = reconcile(bundle, value)
     for group in record['groups']:
+        if group['status'] != 'accepted':
+            continue
         for index in bundle['groups'][group['group']]['indices']:
             value['tasks'].append({'group': group['group'], 'index': index, 'job_id': group['job_id'],
                 'scheduler_task_id': group['job_id']+'_'+str(index), 'query_status': 'complete',
@@ -478,3 +485,36 @@ def test_second_generation_legacy_dependency_retry(job_files):
         return subprocess.CompletedProcess(command, 0, '9802', '')
     submission.submit_job(second, second['output'], scheduler=accepted)
     assert len(calls) == 1 and '--dependency=afterok:9801' in calls[0]
+
+
+@pytest.mark.parametrize('basis', ['original-receipt', 'previous-reconciliation'])
+@pytest.mark.parametrize('contradiction', ['definitive-absence', 'different-id'])
+def test_authoritative_accepted_group_conflict_blocks_lifetime_and_retry(graph_job, basis, contradiction):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle, _ = stopped(graph_job, partial=basis == 'original-receipt')
+    value = evidence(bundle)
+    if basis == 'previous-reconciliation':
+        value = _complete_evidence(bundle)
+        assert reconcile(bundle, value)['all_tasks_terminal']
+    contradictory = deepcopy(value)
+    row = contradictory['groups'][0]
+    if contradiction == 'different-id':
+        row['matches'][0]['job_id'] = '99999'
+    else:
+        row['matches'] = []
+        row['nonacceptance'] = {'exhaustive': True, 'final': True, 'acceptance_window_closed': True}
+    original = (Path(bundle['output'])/'SUBMISSION.json').read_bytes()
+    with pytest.raises(ValueError, match='conflict'):
+        reconcile(bundle, contradictory)
+    path = sorted((Path(bundle['output'])/'reconciliation').glob('[0-9]*.json'))[-1]
+    blocker = json.loads(path.read_text())
+    expected_id = '9101' if basis == 'original-receipt' else '9200'
+    assert blocker['groups'][0]['status'] == 'accepted'
+    assert blocker['groups'][0]['job_id'] == expected_id
+    assert blocker['conflicts'][0]['kind'] == 'group'
+    assert not blocker['all_tasks_terminal']
+    with pytest.raises(ValueError, match='terminal evidence'):
+        finalize_source_consumer(bundle, bundle['output'], release=True)
+    with pytest.raises(ValueError, match='fully reconciled'):
+        prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
+    assert (Path(bundle['output'])/'SUBMISSION.json').read_bytes() == original
