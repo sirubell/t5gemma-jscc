@@ -2,7 +2,7 @@
 
 ## Research session quick start
 
-For research planning, implementation or experiments, read the [current handoff](docs/local/research/HANDOFF.md), [session procedure](docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md), and the explicitly assigned named ticket first. They identify the current scope, checkout role, dependencies and next action. Read the [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02) for shared conventions; Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
+For research planning, implementation or experiments, read the [current handoff](docs/local/research/HANDOFF.md), [session procedure](docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md), and the explicitly assigned named ticket first. The handoff identifies source roles and campaign receipts; the procedure defines claims and completion; the ticket defines scope, ownership and authority. Read the [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02) for shared conventions; Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
 
 ## Read the relevant documents
 
@@ -12,11 +12,10 @@ For research planning, implementation or experiments, read the [current handoff]
 - For config layout, read configs/README.md; for study expansion and paired jobs, read docs/studies.md.
 - Before remote access or Slurm work, read docs/running.md and the local docs/local/environment.md if present.
 - For actual run IDs, paths and decisions, consult docs/local/experiments.md if present.
-- When resuming research or scheduling experiments, read docs/local/research/HANDOFF.md if present for current state, owners and resume pointers. For backup work, also read backup-status.md if present. Current owner decisions supersede earlier proposals.
-- Research planning uses one local Markdown Wayfinder tracker; read docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md and the assigned ticket before starting a research task. Verify dependencies and claim exclusively before work. Keep decisions in tickets, execution state in HANDOFF.md and scientific evidence in result reports. Local research notes remain outside portable Git documentation.
+- For backup work, read backup-status.md if present.
 - For custom channels, read docs/channel-integration.md.
 - For retrospective research, start with docs/local/research/reported-experiments.md when present: prioritize presented experiments and map each slide to raw evidence. Use docs/research-roadmap.md for the portable research scope.
-- For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For storage cleanup, read docs/local/research/cleanup-plan.md before proposing deletion paths.
+- For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For branch/worktree cleanup, use the assigned cleanup ticket and verify ownership, unique work and evidence references first. Retain experiment pins, source packages, checkpoints, datasets/model caches and local research evidence; storage deletion requires its own scoped authorization.
 
 ## Working conventions
 
@@ -28,7 +27,7 @@ Keep the supplied task and smoke model designs aligned with the shared baseline 
 
 Study preview/export prepares configurations only. Do not treat a listed study or an exported manifest as authorization to run a full sweep. Use a fresh prepared directory for each new execution; evaluate an entry through its recorded training-run link rather than searching for the newest checkpoint.
 
-Git tracks code, configuration, uv.lock and portable docs. docs/local/ is intentionally ignored but remains readable by local agents. When it is absent, use docs/environment.example.md and request the missing machine/account details before remote work. Do not guess another user's SSH aliases, VPN commands or filesystem paths.
+Git tracks code, configuration, uv.lock and portable docs. docs/local/ is intentionally ignored but remains readable by local agents. Discover research files with `rg --files --no-ignore docs/local/research` from the project root; default Git-aware searches omit them. When it is absent, use docs/environment.example.md and request the missing machine/account details before remote work. Do not guess another user's SSH aliases, VPN commands or filesystem paths.
 
 Keep passwords, access tokens and private keys out of both portable and local Markdown; refer to the installed credential mechanism. Update only current commits to remove personal notes; preserve existing Git history unless the user explicitly requests a rewrite.
 
