@@ -252,6 +252,7 @@ def training_cli(args):
     guard = original13_execution_guard(config, synthetic=manifest['synthetic_cpu'],
         timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid)
     guard()
+    assert plan is not None and metadata is not None and stream is not None
     processor, model = initialize_recipe(config, initial, plan.trained_sites, synthetic=manifest['synthetic_cpu'])
     if config['model']['device'] == 'cuda' and (torch.cuda.device_count() != 1 or not torch.cuda.is_bf16_supported()):
         raise ValueError('recipe requires one assigned BF16-capable GPU')
@@ -284,6 +285,7 @@ def evaluation_cli(args):
             manifest, config, plan, _, initial, metadata, _ = load_recipe_workflow(args.prepared,
                 checksum=args.prepared_sha256, width=own_plan.width, ratio=own_plan.ratio, resolved=resolved)
             verify_recipe_source(manifest, args.approved_source)
+            assert plan is not None and metadata is not None
             for key, expected in {**metadata, 'plan_identity': plan.identity}.items():
                 if state.payload['metadata'].get(key) != expected:
                     raise ValueError('recipe evaluation acquired identity differs: '+key)
