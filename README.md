@@ -60,8 +60,10 @@ CPU smoke files use `runtime: {device: cpu, dtype: float32}` to override only ex
 The [YAML recipe workflow](docs/experiment-recipes.md) trains one direct-affine
 codec across an ordered list of HellaSwag encoder/decoder locations. YAML controls
 per-location update budgets, cached-row subsets, optimizer phases, saves and fixed
-observation/terminal requests. The same source-bound prepared receipt supports
-training, exact continuation, reporting and mocked submission. Start with
+observation/terminal requests. The public `train.py --config <recipe.yaml> --output <root> --registrations <directory>`
+automatically prepares pinned acquired inputs. Stable named cases support sequential
+local execution or independent case jobs, with exact checkpoint continuation.
+See [public recipe commands and records](docs/experiment-recipes.md#public-training-command-and-independent-cases). Start with
 [the retained original13 example](configs/recipes/original13.yaml) or
 [the changed recipe example](configs/recipes/changed.yaml); acquired model/data
 assets and explicit execution authority are required. COCO keeps the task workflow

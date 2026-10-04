@@ -45,6 +45,86 @@ conditions. Encoder hidden nMSE is .1; decoder hidden/memory are .05 each;
 functional training adds KL1.0. These values are example settings, not validator
 literals. The integrated learner honors the resolved coefficients.
 
+## Public training command and independent cases
+
+Explicitly register acquired pinned model/cache/fixed-panel assets once using
+the registration commands below. Routine training then needs only YAML, the
+registration directory and an exact output root; preparation is automatic:
+
+```bash
+uv run --locked python train.py --config configs/recipes/changed.yaml --registrations assets/registrations --output runs/changed
+uv run --locked python train.py --config configs/recipes/original13.yaml --registrations assets/registrations --output runs/comparison --case width-512-ratio-75
+uv run --locked python train.py --config configs/recipes/changed.yaml --registrations assets/registrations --check
+```
+
+The first fresh invocation binds every declared width/ratio case, even when
+selecting one. Case IDs are `width-<width>-ratio-<reconstruction-percent>`;
+reordering YAML does not rename a case. A fresh invocation without `--case`
+executes the declared cases sequentially on the one local device. Case selection
+is an execution choice and does not approve a sweep or retry. Other cases remain
+bound and unexecuted after a selected run or failure.
+
+To prepare once for independently resource-assigned case jobs, bind without
+model loading, then select a pending case in each job. Different case attempts
+can run concurrently; each case excludes concurrent training of itself:
+
+```bash
+uv run --locked python train.py --config configs/recipes/original13.yaml --registrations assets/registrations --output runs/comparison --prepare-only
+uv run --locked python train.py --config configs/recipes/original13.yaml --output runs/comparison --case width-512-ratio-75
+uv run --locked python train.py --config configs/recipes/original13.yaml --output runs/comparison --case width-512-ratio-50
+```
+
+The bound root uses its saved prepared receipt and complete effective configs;
+subsequent edits to authored YAML have no effect. A changed experiment needs a
+fresh root. Existing roots require one explicit case and cannot repeat all cases
+implicitly. Preparation/attempt failures preserve partial files, other cases and
+prior attempts. A process killed without cleanup can retain its `.training-active`
+reservation; reconcile that process before explicitly releasing the reservation.
+
+Exact continuation uses a checkpoint path published in that case's attempt
+`checkpoints.json`, with its recorded hash and size. No newest checkpoint is
+selected. Use a new explicit attempt name; a completed case is evaluated rather
+than trained again:
+
+```bash
+uv run --locked python train.py --config configs/recipes/changed.yaml --output runs/changed --case width-32-ratio-50 --resume runs/changed/cases/width-32-ratio-50/attempts/training-0001/engine/step_000120_pre_reset.pt --attempt 0002
+```
+
+This restores the existing recipe engine's optimizer/LR/scaler/RNG and indexed
+row/location/phase state. A pre-reset checkpoint resets before the next update;
+a post-reset checkpoint does not reset twice. Earlier observation obligations
+remain separately recorded. `--timeout-seconds` sets a per-case execution deadline
+(default 86,400 seconds). Portable standalone CUDA/Colab runs require one visible
+BF16-capable GPU; scheduler callers can additionally pass `--device-uuid` to
+verify their exact `CUDA_VISIBLE_DEVICES` assignment. CPU execution is restricted
+to explicitly registered synthetic fixtures. This contract grants no scheduler
+or experiment execution authority.
+
+Root record `recipe-run.json` (`recipe-run-v1`) publishes stable case paths,
+width/ratio, preparation reference/hash, per-case counts and comparison totals.
+Each `cases/<id>` contains ordinary `experiment-run-v1` case records and bound
+`config.yaml`, plus `recipe.json`, `counts.json` and `data_selection.json`.
+`attempts/training-<name>/attempt.json` retains status/request/source/runtime;
+its fresh `engine/` contains the existing campaign, metrics, full checkpoint and
+freeze records. `training.json` records both attempt and engine paths.
+`checkpoints.json` lists durable checkpoint path/hash/size/step/role, including
+pre/post reset separately. `checkpoint.json` is published only after completed
+training and identifies the exact `recipe-terminal` policy target and engine.
+Evaluation consumers use that engine and the prepared fixed terminal template;
+recipe evaluation through `evaluate.py` is a separate integration release.
+
+Counts distinguish actual selected rows, `Q × 16` base presentations and
+`N × Q × 16` processed/site presentations, with `N × Q` optimizer updates.
+Comparison selected-row totals sum per-case row counts, including reused rows;
+they are not distinct dataset rows. Actual completed/segment updates and exposures
+are recorded by the engine independently of declared budgets. Three versus
+thirteen locations at Q=10,000 declare 30,000 versus 130,000 updates per case;
+the retained nine cases declare 1,170,000 updates and 18,720,000 processed
+presentations. Supported native16/accumulation1, additive objectives, phase/reset,
+family exclusions and pinned noise/initializer policies remain with the existing
+recipe engine. Unsupported COCO shared-codec, custom recipe channels and batching
+fail explicitly; ordinary COCO/HellaSwag and their custom channels remain supported.
+
 ## Acquire and prepare
 
 Acquire the existing model once, after obtaining any required target authority:
