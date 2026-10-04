@@ -45,7 +45,9 @@ def resolve_locations(locations, model_metadata, config):
         raise ValueError('model metadata revision differs from recipe')
     topology = {}
     for stack in ('encoder', 'decoder'):
-        metadata = model_metadata[stack]
+        # T5Gemma2 serializes the multimodal encoder's text topology inside
+        # text_config; decoder and text-only metadata retain the flat layout.
+        metadata = model_metadata[stack].get('text_config', model_metadata[stack])
         count = _positive_int(metadata['num_hidden_layers'], f'{stack} layers')
         hidden = _positive_int(metadata['hidden_size'], f'{stack} hidden size')
         if hidden != config['codec']['hidden_dim']:
@@ -105,7 +107,9 @@ def resolve_recipe(path, *, model_config_path):
         raise ValueError('channel.train_snr_range must be ordered')
     _number(channel['clean_film_snr'], 'channel clean SNR', minimum=-1000, maximum=1000)
     q = _positive_int(recipe['updates_per_location'], 'updates_per_location')
-    if config['training']['batch_size'] != 16 or config['training']['gradient_accumulation'] != 1:
+    if (type(config['training']['batch_size']) is not int or config['training']['batch_size'] != 16
+            or type(config['training']['gradient_accumulation']) is not int
+            or config['training']['gradient_accumulation'] != 1):
         raise ValueError('shared-codec recipes support native16/accumulation1 only')
     data = config['data']
     if data.get('num_train') is not None:

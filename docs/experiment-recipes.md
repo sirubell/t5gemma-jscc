@@ -16,13 +16,15 @@ uv run --locked python scripts/experiment_recipe.py \
 ```
 
 Use the `config.json` from the selected locally cached backbone. Resolution reads
-its encoder/decoder layer counts and hidden dimensions without downloading or
+its encoder/decoder layer counts and hidden dimensions (including T5Gemma2
+`encoder.text_config`) without downloading or
 loading weights. A revision recorded in metadata must match the task model pin.
 The runtime loader must validate locations against the loaded backbone again;
 a JSON file alone does not establish loaded runtime identity. Output is exclusive
 creation: choose a fresh file for each resolution. References in recipe YAML are
 relative to that YAML; references in its task YAML retain the existing resolver's
-semantics. The resolved output contains the composed model, task, data, optimizer,
+semantics. Supported recipe channels are AWGN and identity with empty constructor kwargs;
+SNR endpoints must be finite and ordered. The resolved output contains the composed model, task, data, optimizer,
 channel, schedule, save states, scoring requests and all derived counts.
 
 `updates_per_location` is authoritative. For N ordered locations and Q updates
@@ -33,7 +35,9 @@ stream advances. Repeated data content is allowed. Unsupported batch semantics,
 independent declarations of derived budgets, invalid/duplicate boundaries, empty
 selections and fractional phase/save quotas fail explicitly.
 
-The retained example resolves nine independent trajectories with 13 locations,
+The retained example reuses `sharing_native16_long_b512.yaml` and its existing
+`sharing_direct_no_norm_b512.yaml` design: one direct-affine body, no nested
+memory codec, FiLM off. It resolves nine independent trajectories with 13 locations,
 Q=10,000, widths 2304/1152/512 and reconstruction percentages 50/75/90. Each has
 130,000 updates, 160,000 base-stream presentations and 2,080,000 site presentations.
 Quarter-phase states plus initialization, post-reset and the functional 10%

@@ -7,8 +7,9 @@ import pytest
 import yaml
 
 from jscc.experiment_recipe import resolve_recipe, validate_retained_recipe
-from jscc.recipe_plan import RecipePlan
+from jscc.recipe_plan import RecipePlan, phase_lr_factor
 from jscc.encoder_stages_plan import Original13Plan, ORIGINAL13_SITES
+from jscc.encoder_stages_preparation import validate_original13_config
 from test_original13_joined import cli, prepared as prepared, execution_args, offline_dataset
 from test_original13_plan_state import formal_views
 
@@ -18,11 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def recipe_files(tmp_path):
     recipe = yaml.safe_load((ROOT/'configs/recipes/original13.yaml').read_text())
-    recipe['task_config'] = str(ROOT/'configs/tasks/hellaswag.yaml')
+    recipe['task_config'] = str((ROOT/'configs/recipes'/recipe['task_config']).resolve())
     path = tmp_path/'recipe.yaml'
     path.write_text(yaml.safe_dump(recipe))
     metadata = tmp_path/'config.json'
-    metadata.write_text(json.dumps({'encoder': {'num_hidden_layers': 26, 'hidden_size': 1152},
+    metadata.write_text(json.dumps({'encoder': {'text_config': {'num_hidden_layers': 26, 'hidden_size': 1152}},
                                     'decoder': {'num_hidden_layers': 26, 'hidden_size': 1152}}))
     return path, metadata, recipe
 
@@ -36,6 +37,7 @@ def test_original13_yaml_counts_and_plan_parity(recipe_files):
     assert result['matrix_counts']['optimizer_updates'] == 1170000
     views = formal_views()
     for item in result['trajectories']:
+        validate_original13_config(item['config'], item['width'])
         assert item['counts'] == {'locations': 13, 'optimizer_updates': 130000,
             'base_stream_presentations': 160000, 'presentations_per_location': 160000,
             'site_presentations': 2080000}
@@ -109,6 +111,8 @@ def test_invalid_recipe_fields(recipe_files, change, match):
     ('training', {'max_steps': 20}, 'conflicting'),
     ('training', {'batch_size': 8}, 'native16'),
     ('training', {'gradient_accumulation': 2}, 'native16'),
+    ('training', {'gradient_accumulation': True}, 'native16'),
+    ('training', {'gradient_accumulation': 1.0}, 'native16'),
     ('training', {'lr': float('nan')}, 'finite'),
     ('training', {'betas': [1, .9]}, 'betas'),
     ('channel', {'train_snr_range': [float('nan'), 18]}, 'finite'),
@@ -156,3 +160,8 @@ def test_resolution_uses_real_tiny_config_and_retained_entrypoint(prepared, tmp_
                                             '--recipe', str(recipe_path)])
     assert trained['status'] == 'training_frozen' and trained['completed_updates'] == 5200
     assert len(trained['checkpoints']) == 11 and trained['observations_status'] == 'complete'
+
+
+def test_zero_warmup_uses_configured_peak_at_first_update():
+    assert phase_lr_factor(0, 40, 0, 0) == 1
+    assert phase_lr_factor(40, 40, 0, 0) == 0

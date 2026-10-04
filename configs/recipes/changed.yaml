@@ -1,6 +1,6 @@
 # Resolution example; execution requires the downstream integrated workflow.
 schema: shared-codec-recipe-v1
-task_config: ../tasks/hellaswag.yaml
+task_config: ../tasks/sharing_native16_long_b512.yaml
 locations:
 - dec_l3
 - enc_l2

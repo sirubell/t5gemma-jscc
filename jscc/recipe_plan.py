@@ -9,7 +9,7 @@ from .sharing_schedule import BatchView, ScheduledUpdate
 
 
 def phase_lr_factor(index, horizon, warmup_ratio, min_lr_ratio):
-    warmup = max(1, int(horizon * warmup_ratio))
+    warmup = max(1, int(horizon * warmup_ratio)) if warmup_ratio > 0 else 0
     if index < warmup:
         return index / warmup
     progress = min(1.0, (index - warmup) / max(1, horizon - warmup))
