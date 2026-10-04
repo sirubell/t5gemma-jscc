@@ -4,6 +4,7 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -127,7 +128,20 @@ def load_checkpoint(path, expected=None):
     required = {"compatibility", "cursor", "counters", "rng", "completed_updates", "best_step", "best_checkpoint"}
     if not required <= continuation.keys() or not isinstance(continuation["compatibility"], dict):
         raise ValueError("incomplete ordinary continuation runtime state")
+    best, bad, best_step = state["best"], state["bad_evaluations"], continuation["best_step"]
+    if (type(bad) is not int or bad < 0 or type(best) not in (int, float)
+            or (best_step is None and (best != float("inf") or bad != 0))
+            or (best_step is not None and (type(best_step) is not int
+                 or not 1 <= best_step <= state["step"] or not math.isfinite(best)))):
+        raise ValueError("invalid ordinary checkpoint selection state")
+    patience = state["config"]["training"]["patience"]
+    if patience and bad >= patience:
+        raise ValueError("ordinary checkpoint already reached terminal early-stop patience")
+    counter_names = {"presentations", "source_tokens_valid", "source_tokens_allocated",
+                     "target_tokens_valid", "target_tokens_allocated", "hidden_latent_valid",
+                     "hidden_latent_allocated", "memory_latent_valid", "memory_latent_allocated"}
     if (not isinstance(continuation["counters"], dict)
+            or set(continuation["counters"]) != counter_names
             or any(type(value) is not int or value < 0 for value in continuation["counters"].values())
             or not {"python", "numpy", "torch", "cuda"} <= continuation["rng"].keys()):
         raise ValueError("invalid ordinary continuation counters/RNG")

@@ -165,6 +165,9 @@ def test_exact_interrupted_task_crosses_cycles_and_observations(tmp_path, monkey
     monkeypatch.setattr(training, "append_metrics", original)
     ordinary_runs.train_task(config, root, resume=durable, attempt_id="0002")
     child = root / "attempts/training-0002"
+    completion = read(child / "completion.json")
+    assert completion["optimizer_updates"] == 9 and completion["attempt_optimizer_updates"] == 9 - checkpoint
+    assert completion["attempt_presentations"] == completion["presentations"] - saved["continuation"]["counters"]["presentations"]
     assert [json.loads(line)["step"] for line in (child / "feature_summary.jsonl").read_text().splitlines()] == [9]
     request = read(child / "attempt.json")["request"]
     assert request["next_optimizer_step"] == checkpoint + 1
@@ -409,3 +412,144 @@ def test_mid_accumulation_interruption_discards_unsaved_gradients(tmp_path, monk
         assert_state_equal(actual[key], expected[key])
     for key in ("cursor", "counters", "rng"):
         assert_state_equal(actual["continuation"][key], expected["continuation"][key])
+
+
+@pytest.mark.parametrize("change", ["nan-best", "negative-bad", "fractional-bad", "invalid-best-step", "missing-counters"])
+def test_published_malformed_selection_and_counters_reject(tmp_path, monkeypatch, change):
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    checkpoint = root / "attempts/training-0001/step_000003.pt"
+    state = torch.load(checkpoint, weights_only=True)
+    if change == "nan-best":
+        state["best"] = float("nan")
+    elif change == "negative-bad":
+        state["bad_evaluations"] = -1
+    elif change == "fractional-bad":
+        state["bad_evaluations"] = 1.5
+    elif change == "invalid-best-step":
+        state["continuation"]["best_step"] = 4
+    else:
+        state["continuation"]["counters"] = {}
+    ordinary_continuation.atomic_torch_save(state, checkpoint)
+    ordinary_continuation.publish_checkpoint(checkpoint, 3)
+    with pytest.raises(ValueError, match="(selection state|counters/RNG)"):
+        ordinary_runs.train_task(config, root, resume=checkpoint)
+
+
+def test_terminal_patience_state_rejects_even_before_loop_exit(tmp_path, monkeypatch):
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    config["training"].update(patience=1, selection_steps=[1, 3, 5, 9])
+    original = training.validate
+    def constant(*args, **kwargs):
+        metrics = original(*args, **kwargs)
+        metrics[config["training"]["monitor"]] = 1.
+        return metrics
+    monkeypatch.setattr(training, "validate", constant)
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    parent = root / "attempts/training-0001"
+    assert read(parent / "completion.json")["step"] == 3
+    for status in ("completed", "interrupted"):
+        record = read(parent / "attempt.json")
+        record["status"] = status  # Fault fixture: crash between durable save and policy loop exit.
+        (parent / "attempt.json").write_text(json.dumps(record))
+        with pytest.raises(ValueError, match="terminal early-stop"):
+            ordinary_runs.train_task(config, root, resume=parent / "last.pt")
+    # Earlier state remains resumable even though the parent later reached patience.
+    ordinary_runs.train_task(config, root, resume=parent / "checkpoint_000001.pt")
+    child = root / "attempts/training-resume-0001-1"
+    assert read(child / "completion.json")["step"] == 3
+
+
+def install_tiny_evaluation(monkeypatch, config):
+    from jscc import evaluation
+    monkeypatch.setattr(evaluation, "build_model", training.build_model)
+    monkeypatch.setattr(evaluation, "load_data", lambda *args, **kwargs: training.load_data(*args))
+    def score(model, processor, *args):
+        data = training.load_data(config, processor)
+        sample = next(iter(data.validation))
+        loss = training.batch_losses(model, sample, config["training"], None)["loss"].item()
+        return {"fixture_loss": loss, "num_samples": 2}
+    monkeypatch.setattr(evaluation, "evaluate_hellaswag", score)
+
+
+def evaluation_config(config):
+    config["evaluation"].pop("attention_backend", None)
+    config["evaluation"].update(snrs=["no_noise"], vanilla=False, noise_seed=0, num_samples=None)
+
+
+def test_partial_child_supplemental_checkpoint_is_selected(tmp_path, monkeypatch):
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    evaluation_config(config)
+    config["training"]["max_minutes"] = 1.e-12
+    install_tiny_evaluation(monkeypatch, config)
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    parent = root / "attempts/training-0001"
+    assert read(parent / "completion.json")["step"] == 1
+    ordinary_runs.train_task(config, root, resume=parent / "last.pt", attempt_id="0002")
+    child = root / "attempts/training-0002"
+    assert read(child / "completion.json")["step"] == 2
+    assert read(root / "training.json")["path"] == str(child)
+    output = ordinary_runs.evaluate_run(root, "last.pt", expected_step=2)
+    assert read(output / "results.json")["optimizer_step"] == 2
+    assert read(output / "attempt.json")["request"]["checkpoint"]["path"] == str(child / "last.pt")
+
+
+def test_partial_child_preserves_previous_default_checkpoint_ancestry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    evaluation_config(config)
+    config["training"]["max_minutes"] = 1.e-12
+    install_tiny_evaluation(monkeypatch, config)
+    original_time = training.time
+    clock = [0.]
+    def monotonic():
+        clock[0] += 1.e-16
+        return clock[0]
+    # Isolate policy clock only; optimizer/model work remains real CPU work.
+    monkeypatch.setattr(training, "time", SimpleNamespace(monotonic=monotonic))
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    original_target = read(root / "checkpoint.json")
+    parent = root / "attempts/training-0001"
+    monkeypatch.setattr(training, "time", original_time)
+    ordinary_runs.train_task(config, root, resume=parent / "step_000003.pt", attempt_id="0002")
+    assert read(root / "attempts/training-0002/attempt.json")["status"] == "partial"
+    assert read(root / "checkpoint.json") == original_target
+    output = ordinary_runs.evaluate_run(root)
+    assert read(output / "attempt.json")["request"]["checkpoint"] == original_target
+    assert read(output / "results.json")["checkpoint"] == original_target["path"]
+
+
+def test_split_root_publication_keeps_default_target_consistent_and_can_reconcile(tmp_path, monkeypatch):
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    evaluation_config(config)
+    install_tiny_evaluation(monkeypatch, config)
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    original = ordinary_runs.write_json_atomic
+    def fail(path, payload):
+        if path == root / "training.json":
+            raise OSError("training pointer publication failed")
+        return original(path, payload)
+    monkeypatch.setattr(ordinary_runs, "write_json_atomic", fail)
+    with pytest.raises(OSError, match="pointer publication"):
+        ordinary_runs.train_task(config, root, resume=root / "attempts/training-0001/step_000003.pt", attempt_id="0002")
+    child = root / "attempts/training-0002"
+    assert read(child / "attempt.json")["status"] == "completed"
+    assert read(child / "publication.json")["status"] == "pending"
+    assert read(root / "training.json")["path"].endswith("0001")
+    assert read(root / "checkpoint.json")["path"].startswith(str(child))
+    # The authoritative default target derives its own valid training ancestry.
+    output = ordinary_runs.evaluate_run(root)
+    assert read(output / "results.json")["checkpoint"].startswith(str(child))
+    monkeypatch.setattr(ordinary_runs, "write_json_atomic", original)
+    ordinary_runs.publish_continuation(child)
+    assert read(root / "training.json")["path"] == str(child)
+    assert read(child / "publication.json")["status"] == "published"
+    with pytest.raises(ValueError, match="no pending"):
+        ordinary_runs.publish_continuation(child)
+
+
+def test_new_recorded_cursor_state_cannot_silently_use_legacy_restart(tmp_path, monkeypatch):
+    config, _, _ = task_fixture(tmp_path, monkeypatch, "hellaswag")
+    root = ordinary_runs.train_task(config, tmp_path / "root")
+    with pytest.raises(ValueError, match="bound --output root"):
+        training.train(config, resume=root / "attempts/training-0001/step_000003.pt")

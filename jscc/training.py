@@ -256,6 +256,8 @@ def train(config, resume: str | Path | None = None,
                 raise ValueError("incompatible ordinary continuation config")
         else:
             state = torch.load(resume_path, map_location="cpu", weights_only=True)
+    if state and state.get("continuation") is not None and run_directory is None:
+        raise ValueError("recorded ordinary continuation requires its bound --output root; legacy iterator restart rejected")
     if state and state.get("schema") == "experiment-state-v2":
         raise ValueError("versioned state requires the baseline lifecycle, not legacy resume")
     transfer = None
@@ -435,6 +437,7 @@ def train(config, resume: str | Path | None = None,
     stop_reason = "max_steps"
     step = start
     completed_updates = start
+    starting_presentations = counters["presentations"]
     saved_step = None
     saved_reference = None
     def save(name, step):
@@ -687,6 +690,9 @@ def train(config, resume: str | Path | None = None,
                   "elapsed_seconds": time.monotonic() - started, **counters,
                   "optimizer_updates": completed_updates,
                   "presentation_budget_verified": (counters["presentations"] == stream_options["total_presentations"]) if stream_options else None}
+    if cursor is not None:
+        completion.update(attempt_optimizer_updates=completed_updates - start,
+                          attempt_presentations=counters["presentations"] - starting_presentations)
     if stream_options:
         final_path = run / f"step_{settings['max_steps']:06d}.pt"
         source_verified = (source_state() == run_metadata["source"]

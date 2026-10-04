@@ -232,15 +232,64 @@ def _continue_task(config, output, resume, *, attempt_id=None):
             "resumed_checkpoint": _read(attempt / "attempt.json")["request"]["resume"],
             "input_record": str(attempt / "data_ids.json"), "runtime_record": str(attempt / "run.json"),
             "elapsed_seconds": time.perf_counter() - started})
-        if target is not None:
-            write_json_atomic(case / "checkpoint.json", target)
-            write_json_atomic(case / "training.json", {"path": str(attempt)})
+        write_json_atomic(attempt / "publication.json", {
+            "schema": "ordinary-continuation-publication-v1", "status": "pending",
+            "training": {"path": str(attempt)}, "checkpoint": target,
+            "previous_training": _read(case / "training.json"),
+            "previous_checkpoint": _read(case / "checkpoint.json") if (case / "checkpoint.json").exists() else None})
+        _publish_continuation(attempt)
     except BaseException as error:
         if attempt is not None and _read(attempt / "attempt.json")["status"] == "running":
             finish_attempt(attempt, "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed",
                            details={"error_type": type(error).__name__, "message": str(error),
                                     "elapsed_seconds": time.perf_counter() - started})
         raise
+    finally:
+        lock.rmdir()
+    return case
+
+
+def _publish_continuation(attempt):
+    """Complete the saved root publication plan; never repeat optimizer work."""
+    record = _read(attempt / "attempt.json")
+    if record["stage"] != "training" or record["status"] not in ("completed", "partial"):
+        raise ValueError("continuation publication requires a finalized scientific outcome")
+    if record["source"] != source_state() or record["runtime"] != runtime_identity():
+        raise ValueError("incompatible continuation publication source/runtime")
+    case = Path(record["case"])
+    plan = _read(attempt / "publication.json")
+    if plan.get("schema") != "ordinary-continuation-publication-v1" or plan.get("status") != "pending":
+        raise ValueError("no pending continuation publication")
+    if plan["training"] != {"path": str(attempt)}:
+        raise ValueError("continuation publication attempt identity changed")
+    target = plan["checkpoint"]
+    current_training = _read(case / "training.json")
+    current_target = _read(case / "checkpoint.json") if (case / "checkpoint.json").exists() else None
+    if (current_training not in (plan["previous_training"], plan["training"])
+            or current_target not in (plan["previous_checkpoint"], target)):
+        raise ValueError("continuation publication superseded by another attempt")
+    if target is not None:
+        if Path(target["path"]).parent != attempt or _checkpoint(Path(target["path"]), role=target["role"],
+                                                                 expected_config=bound_config(case)) != target:
+            raise ValueError("continuation publication checkpoint identity changed")
+        write_json_atomic(case / "checkpoint.json", target)
+    # Even a partial child becomes the current supplemental training attempt.
+    # A prior eligible default keeps its own independently recorded ancestry.
+    write_json_atomic(case / "training.json", plan["training"])
+    plan["status"] = "published"
+    write_json_atomic(attempt / "publication.json", plan)
+
+
+def publish_continuation(attempt):
+    """Explicitly reconcile pending root records from a completed continuation."""
+    attempt = Path(attempt).resolve()
+    case = Path(_read(attempt / "attempt.json")["case"]).resolve()
+    if attempt.parent != case / "attempts":
+        raise ValueError("continuation publication requires this case's training attempt")
+    lock = case / ".training-update"
+    lock.mkdir(exist_ok=False)
+    try:
+        _publish_continuation(attempt)
     finally:
         lock.rmdir()
     return case
@@ -255,9 +304,14 @@ def evaluate_run(root, checkpoint_name=None, overrides_path=None, expected_step=
     config = bound_config(case)
     if expected_step is not None and checkpoint_name is None:
         raise ValueError("expected-step requires an explicit checkpoint")
-    training_run = Path(_read(case / "training.json")["path"])
     target = _read(case / "checkpoint.json") if checkpoint_name is None else None
+    training_run = (Path(target["path"]).parent if target is not None
+                    else Path(_read(case / "training.json")["path"]))
+    if training_run.parent != case / "attempts":
+        raise ValueError("ordinary checkpoint has incompatible training-attempt ancestry")
     training_record = _read(training_run / "attempt.json")
+    if training_record.get("case") != str(case) or training_record.get("stage") != "training":
+        raise ValueError("ordinary checkpoint has incompatible training-attempt ancestry")
     if training_record["status"] not in ("completed", "partial"):
         raise ValueError("training attempt has no eligible completed outcome")
     if checkpoint_name is not None:
