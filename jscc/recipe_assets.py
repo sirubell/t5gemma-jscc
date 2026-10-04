@@ -139,23 +139,27 @@ def _initializer(config, directory):
     from .asset_paths import asset_stat
     identity = canonical_digest({'codec': config['codec'], 'seed': config['seed'],
                                  'implementation': file_digest(Path(__file__).parent/'models/codec.py'),
-                                 'torch': torch.__version__})
+                                 'torch': torch.__version__, 'acquisition_schema': 'recipe-initializer-acquisition-v1'})
     directory.mkdir(exist_ok=True)
     own = directory/identity
     try:
         own.mkdir()
     except FileExistsError:
         record_path = own/'reference.json'
+        deadline = time.monotonic()+10
+        while not record_path.is_file() and time.monotonic() < deadline:
+            time.sleep(.05)
         if not record_path.is_file():
             raise ValueError(f'initializer acquisition incomplete/in progress: {own}; retain and reconcile before retry') from None
         record = json.loads(record_path.read_text())
         if record.get('identity') != canonical_digest({k: v for k, v in record.items() if k != 'identity'}):
             raise ValueError('initializer acquisition reference identity differs')
         reference = record['reference']
-        if record['config_identity'] != identity or reference['seed'] != config['seed']:
+        if (record.get('schema') != 'recipe-initializer-acquisition-v1'
+                or record['config_identity'] != identity or reference['seed'] != config['seed']):
             raise ValueError('initializer acquisition config/seed differs')
         _read_reference(reference, trusted_stat=True)
-        return reference
+        return {**reference, 'acquisition': {'path': str(record_path.resolve()), 'sha256': file_digest(record_path)}}
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(config['seed'])
         initial = Codec(config['codec']['hidden_dim'], deepcopy(config['codec'])).state_dict()
@@ -164,10 +168,12 @@ def _initializer(config, directory):
     reference = {'path': str(initial_path.resolve()), 'sha256': file_digest(initial_path),
                  'state_identity': state_dict_identity(initial), 'seed': config['seed'],
                  'stat': asset_stat(initial_path)}
-    record = {'config_identity': identity, 'reference': reference}
+    record = {'schema': 'recipe-initializer-acquisition-v1', 'config_identity': identity, 'reference': reference}
     record['identity'] = canonical_digest(record)
-    _write(own/'reference.json', record)
-    return reference
+    acquisition = _write(own/'reference.pending.json', record)
+    (own/'reference.pending.json').rename(own/'reference.json')
+    acquisition['path'] = str((own/'reference.json').resolve())
+    return {**reference, 'acquisition': acquisition}
 
 
 def prepare_recipe_assets(recipe_path, *, registrations, output, study_pairing_id=None):

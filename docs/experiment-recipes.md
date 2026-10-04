@@ -106,9 +106,10 @@ Preparation creates complete effective plans, fixed scoring templates,
 `prepared.json` and a small timing receipt. Width/seed initializers are generated
 once under the registration directory's `.initializers/`, keyed by codec design,
 seed, codec implementation and Torch version. Later preparations reuse these
-immutable tensors using acquisition stat checks. Keep this directory with its
-registrations and prepared consumers. An incomplete concurrent initializer
-reservation fails explicitly; retain it and reconcile before retry. Output
+immutable tensors using checksum-bound acquisition receipts and stat checks. Keep this directory with its
+registrations and prepared consumers. A concurrent first-use caller waits up to ten seconds for an atomically
+published acquisition receipt; an incomplete reservation then fails explicitly.
+Retain it and reconcile before retry. Output
 directories are exclusive and a failed operation may retain partial evidence.
 
 Smaller YAML panels use the acquired ordered prefix while preserving the full

@@ -45,6 +45,19 @@ def _read_reference(reference, *, trusted_stat=False):
     return path
 
 
+def _acquired_initializer(reference):
+    """Only a checksum-bound owned acquisition record permits cheap reuse."""
+    acquisition = reference.get('acquisition')
+    if acquisition is None:
+        return False
+    record = json.loads(_read_reference(acquisition).read_text())
+    if (record.get('schema') != 'recipe-initializer-acquisition-v1'
+            or record.get('identity') != canonical_digest({k: v for k, v in record.items() if k != 'identity'})
+            or record.get('reference') != {k: v for k, v in reference.items() if k != 'acquisition'}):
+        raise ValueError('recipe initializer acquisition evidence differs')
+    return True
+
+
 def _read_prepared(path, checksum):
     path = Path(path).resolve()
     if file_digest(path) != checksum:
@@ -114,7 +127,7 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
         ref = manifest['initializations'].get(str(item['width']))
         if not isinstance(ref, dict) or ref.get('seed') != config['seed']:
             raise ValueError('recipe acquired width initializer missing or seed differs')
-        _read_reference(ref, trusted_stat=True)
+        _read_reference(ref, trusted_stat=_acquired_initializer(ref))
         recipe_observation_identity(item, observation)
         scoring_template(terminal, item['evaluation'], item['evaluation'])
         fixed = cache['fixed_data_ids']
@@ -157,10 +170,10 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_bi
     validate_recipe_prepared(manifest)
     # Initializer integrity is a setup boundary; never decode it per update.
     for ref in initializations.values():
-        if 'stat' in ref:
-            _read_reference(ref, trusted_stat=True)
+        if _acquired_initializer(ref):
+            _read_reference(ref, trusted_stat=_acquired_initializer(ref))
             continue
-        initial = torch.load(_read_reference(ref, trusted_stat=True), map_location='cpu', weights_only=True)
+        initial = torch.load(_read_reference(ref, trusted_stat=_acquired_initializer(ref)), map_location='cpu', weights_only=True)
         if state_dict_identity(initial) != ref['state_identity']:
             raise ValueError('recipe acquired initializer tensor identity differs')
     with Path(output).open('x') as handle:
@@ -176,7 +189,7 @@ def load_recipe_workflow(path, *, checksum, width, ratio, resolved=None, load_da
         raise ValueError('recipe requires exact declared width/ratio')
     description = matches[0]
     ref = manifest['initializations'][str(width)]
-    initial = torch.load(_read_reference(ref, trusted_stat=True), map_location='cpu', weights_only=True)
+    initial = torch.load(_read_reference(ref, trusted_stat=_acquired_initializer(ref)), map_location='cpu', weights_only=True)
     if state_dict_identity(initial) != ref['state_identity']:
         raise ValueError('recipe initializer tensor identity differs')
     if not load_data:
@@ -258,6 +271,12 @@ def training_cli(args):
         bound = validate_recipe_prepared(manifest, resolved=resolved)
         if sum((d['width'], d['ratio']) == (args.width, args.ratio) for d in bound['trajectories']) != 1:
             raise ValueError('recipe requires exact declared width/ratio')
+        # Legacy caller-supplied tensors retain their setup identity check.
+        for ref in manifest['initializations'].values():
+            if not _acquired_initializer(ref):
+                initial = torch.load(_read_reference(ref), map_location='cpu', weights_only=True)
+                if state_dict_identity(initial) != ref['state_identity']:
+                    raise ValueError('recipe initializer tensor identity differs')
         return {'schema': SCHEMA, 'status': 'valid', 'resolved': bound,
                 'model_assets_status': manifest['model_assets']['status'], 'launch_authorized': False}
     manifest, config, plan, stream, initial, metadata, data_ids = load_recipe_workflow(

@@ -164,3 +164,55 @@ def test_direct_registration_and_hf_snapshot_blob_preparation(joined_assets):
     assert Path(result['model_config']['path']).parent == blobs
     validate_recipe_prepared(result)
     assert result['model_assets']['path'] == str(snapshot)
+
+
+def test_low_level_stat_reference_cannot_skip_tensor_setup_validation(joined_assets):
+    from jscc.asset_paths import asset_stat
+    from jscc.recipe_workflow import bind_recipe_workflow
+    _, _, recipe, _, acquired = workflow(joined_assets, 'caller-assets')
+    initializations = deepcopy(acquired['initializations'])
+    reference = initializations['8']
+    reference['stat'] = asset_stat(reference['path'])
+    reference['state_identity'] = 'incorrect-state'
+    with pytest.raises(ValueError, match='initializer tensor identity differs'):
+        bind_recipe_workflow(recipe, model_config_path=joined_assets['model']/'config.json',
+            model_path=joined_assets['model'], model_binding=acquired['model_binding'],
+            cache_manifest=acquired['cache']['path'], cache_sha256=acquired['cache']['sha256'],
+            initializations=initializations, observation_template=acquired['observation_template'],
+            terminal_template=acquired['terminal_template'], study_pairing_id='caller-assets',
+            output=joined_assets['root']/'incorrect.json', synthetic=True)
+    assert not (joined_assets['root']/'incorrect.json').exists()
+
+
+def test_owned_initializer_metadata_requires_acquisition_evidence(joined_assets):
+    recipe, directory, _ = registered(joined_assets)
+    manifest = prepare_recipe_assets(recipe, registrations=directory, output=joined_assets['root']/'auto')
+    manifest['initializations']['8']['state_identity'] = 'stale-state'
+    manifest['manifest_identity'] = canonical_digest({k: v for k, v in manifest.items() if k != 'manifest_identity'})
+    with pytest.raises(ValueError, match='acquisition evidence differs'):
+        validate_recipe_prepared(manifest)
+
+
+def test_simultaneous_first_use_waits_for_atomic_initializer_receipt(joined_assets, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    from jscc import recipe_assets
+    from jscc.config import load_config
+    config = load_config(joined_assets['task'])
+    config['codec']['bottleneck_dim'] = 8
+    directory = joined_assets['root']/'concurrent-initializers'
+    entered = threading.Event()
+    write = recipe_assets._write
+    def slow_publish(path, value):
+        entered.set()
+        time.sleep(.1)
+        return write(path, value)
+    monkeypatch.setattr(recipe_assets, '_write', slow_publish)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(recipe_assets._initializer, config, directory)
+        assert entered.wait(timeout=5)
+        second = executor.submit(recipe_assets._initializer, config, directory)
+        assert first.result(timeout=5) == second.result(timeout=5)
+    assert len(list(directory.glob('*/initial.pt'))) == 1
+    assert len(list(directory.glob('*/reference.json'))) == 1
