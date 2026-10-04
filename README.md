@@ -214,3 +214,7 @@ Source, tests, portable regression fixtures, YAML, uv.lock and portable document
 A collaborator can clone the repository and use the standard commands above. Machine-specific setup is optional until remote execution is needed; copy the environment template locally and fill in your own details. Channel collaboration has its own guide and does not change the project's normal research workflow.
 
 `run.json` records the Git revision and dirty state when Git information is available. Bind uncommitted file contents separately when exact source reproduction is required; the commit and dirty flag alone do not identify those bytes. Use branches and pull requests for shared changes; publishing a GitHub remote is a separate step from local version control.
+
+## Collect recorded results
+
+[Compact collection](docs/result-collection.md) exports all recorded scalar rows, final and intermediate result tables, and small identity/status companions from ordinary COCO/HellaSwag or recipe roots. One local action retains snapshot verification, missing-file accounting and retry receipts; large artifacts keep exact retrieval references.
