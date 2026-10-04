@@ -142,10 +142,10 @@ def _checkpoint(path, *, role, expected_config):
             "sha256": file_digest(path), "size_bytes": path.stat().st_size}
 
 
-def train_task(config, output, *, authored_config=None, resume=None):
+def train_task(config, output, *, authored_config=None, resume=None, attempt_id=None):
     """Train one ordinary task at exactly output; no implicit retry or resume."""
     if resume is not None:
-        raise ValueError("exact ordinary-task resume is not released; iterator restoration is required")
+        return _continue_task(config, output, resume, attempt_id=attempt_id)
     if config.get("task") not in ("coco", "hellaswag") or config.get("schema"):
         raise ValueError("ordinary roots support COCO/HellaSwag task configs only")
     root = reserve_root(output)
@@ -153,7 +153,7 @@ def train_task(config, output, *, authored_config=None, resume=None):
     effective["run"]["output_dir"] = str(root)
     case = bind_case(root, effective, authored_config=authored_config)
     effective = bound_config(case)
-    attempt = reserve_attempt(case, "training")
+    attempt = reserve_attempt(case, "training", attempt_id=attempt_id or "0001")
     write_json_atomic(case / "training.json", {"path": str(attempt)})
     started = time.perf_counter()
     from .training import train
@@ -185,6 +185,65 @@ def train_task(config, output, *, authored_config=None, resume=None):
         raise
     return root
 
+
+
+def _continue_task(config, output, resume, *, attempt_id=None):
+    """Resume explicitly selected durable ordinary state in a retained new attempt."""
+    from .ordinary_continuation import load_checkpoint
+    case = Path(output).resolve()
+    effective = copy.deepcopy(config)
+    effective["run"]["output_dir"] = str(case)
+    saved = bound_config(case)
+    if saved != effective:
+        raise ValueError("incompatible ordinary continuation config")
+    path = Path(resume).resolve()
+    parent = _read(path.parent / "attempt.json")
+    if (parent.get("case") != str(case) or parent.get("stage") != "training"
+            or parent.get("status") not in ("completed", "partial", "interrupted", "failed")
+            or path.parent.parent != case / "attempts"):
+        raise ValueError("continuation requires a finalized training attempt in this bound case")
+    state, target = load_checkpoint(path)
+    identity = state["continuation"]["compatibility"]
+    for key, current in (("source", source_state()), ("runtime", runtime_identity()), ("config", saved)):
+        if identity.get(key) != current:
+            raise ValueError(f"incompatible ordinary continuation {key}")
+    if state["step"] >= saved["training"]["max_steps"]:
+        raise ValueError("checkpoint has already reached max_steps")
+    lock = case / ".training-update"
+    lock.mkdir(exist_ok=False)
+    attempt = None
+    started = time.perf_counter()
+    try:
+        attempt = reserve_attempt(case, "training", attempt_id=attempt_id or
+                                  f"resume-{parent['attempt_id']}-{state['step']}",
+                                  request={"resume": target, "parent_attempt": str(path.parent),
+                                           "next_optimizer_step": state["step"] + 1})
+        from .training import train
+        run = train(saved, resume=path, run_directory=attempt, expected_resume=target)
+        if Path(run).resolve() != attempt:
+            raise ValueError("training engine returned a different reserved output")
+        completion = _read(attempt / "completion.json")
+        eligible = (completion["reason"] == "early_stopping" or
+                    (completion["reason"] == "max_steps" and completion["optimizer_updates"]
+                     == saved["training"]["max_steps"]))
+        target = _checkpoint(attempt / "best.pt", role="ordinary-best", expected_config=saved) if eligible else None
+        finish_attempt(attempt, "completed" if eligible else "partial", details={
+            "completion": completion, "checkpoint": target, "parent_attempt": str(path.parent),
+            "resumed_checkpoint": _read(attempt / "attempt.json")["request"]["resume"],
+            "input_record": str(attempt / "data_ids.json"), "runtime_record": str(attempt / "run.json"),
+            "elapsed_seconds": time.perf_counter() - started})
+        if target is not None:
+            write_json_atomic(case / "checkpoint.json", target)
+            write_json_atomic(case / "training.json", {"path": str(attempt)})
+    except BaseException as error:
+        if attempt is not None and _read(attempt / "attempt.json")["status"] == "running":
+            finish_attempt(attempt, "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed",
+                           details={"error_type": type(error).__name__, "message": str(error),
+                                    "elapsed_seconds": time.perf_counter() - started})
+        raise
+    finally:
+        lock.rmdir()
+    return case
 
 def is_recorded_root(path):
     return (Path(path) / "experiment.json").is_file() or (Path(path) / "case.json").is_file()

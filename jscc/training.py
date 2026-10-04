@@ -28,6 +28,8 @@ from .training_objectives import (
     scaled_batch_loss as scaled_batch_loss,
 )
 from .data import load_data
+from .data.continuation import OrdinaryCursor, cursor_support
+from . import ordinary_continuation as continuation
 from .data.coco import coco_input_evidence
 from .losses import (
     aggregate_stream_numerators,
@@ -213,8 +215,8 @@ def make_scheduler(optimizer, settings):
 
 
 def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step, best, bad,
-                    *, phase_transfer=None, phase_record=None):
-    torch.save({"codec": model.codec.state_dict(), "channel": model.channel.state_dict(),
+                    *, phase_transfer=None, phase_record=None, continuation_state=None):
+    continuation.atomic_torch_save({"codec": model.codec.state_dict(), "channel": model.channel.state_dict(),
                 "memory_codec": model.memory_codec.state_dict() if model.memory_codec is not None else None,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(), "config": config, "data_ids": ids,
@@ -222,17 +224,21 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step
                 "python_rng": random.getstate(),
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
-                "phase_transfer": phase_transfer, "phase_record": phase_record}, path)
+                "phase_transfer": phase_transfer, "phase_record": phase_record,
+                "continuation": continuation_state}, path)
 
 
 def train(config, resume: str | Path | None = None,
           initial_checkpoint: str | Path | None = None,
-          deadline: float | None = None, *, run_directory: Path | None = None):
+          deadline: float | None = None, *, run_directory: Path | None = None,
+          expected_resume: dict | None = None):
     setup_started = time.monotonic()
     if run_directory is not None:
         from .ordinary_runs import validate_reserved_attempt
-        if resume is not None or initial_checkpoint is not None:
-            raise ValueError("reserved ordinary attempts require fresh training")
+        if initial_checkpoint is not None:
+            raise ValueError("reserved ordinary attempts do not accept weight-only transfer")
+        if resume is not None and expected_resume is None:
+            raise ValueError("reserved continuation requires a recorded checkpoint identity")
         if config != validate_reserved_attempt(run_directory, "training"):
             raise ValueError("training configuration differs from its bound case")
     if deadline is not None and setup_started >= deadline:
@@ -242,14 +248,21 @@ def train(config, resume: str | Path | None = None,
     if resume and config["training"].get("presentation_stream"):
         raise ValueError("fixed presentation study is fresh-only; exact resume unsupported")
     resume_path = Path(resume) if resume is not None else None
-    state = torch.load(resume_path, map_location="cpu", weights_only=True) if resume_path else None
+    state = None
+    if resume_path:
+        if run_directory is not None:
+            state, _ = continuation.load_checkpoint(resume_path, expected_resume)
+            if state["config"] != config:
+                raise ValueError("incompatible ordinary continuation config")
+        else:
+            state = torch.load(resume_path, map_location="cpu", weights_only=True)
     if state and state.get("schema") == "experiment-state-v2":
         raise ValueError("versioned state requires the baseline lifecycle, not legacy resume")
     transfer = None
     if initial_checkpoint is not None:
         from .local_reconstruction import validate_phase_transfer
         transfer = validate_phase_transfer(initial_checkpoint, config)
-    if state:
+    if state and run_directory is None:
         # Resume the saved recipe. The supplied YAML chooses output location/device only.
         destination, device = config["run"], config["model"]["device"]
         config = copy.deepcopy(state["config"])
@@ -303,7 +316,24 @@ def train(config, resume: str | Path | None = None,
     scheduler = make_scheduler(optimizer, settings)
     scaler = GradScaler("cuda", enabled=config["model"]["dtype"] == "float16"
                                  and config["model"]["device"] == "cuda")
+    cursor = None
+    resume_identity = None
+    unsupported_resume = cursor_support(data.train) if run_directory is not None else None
+    if run_directory is not None:
+        unsupported_resume = unsupported_resume or continuation.channel_support(model)
+    if stream_options:
+        unsupported_resume = "fixed presentation study is fresh-only; exact resume unsupported"
+    if run_directory is not None and unsupported_resume is None:
+        resume_identity = continuation.compatibility(config, model, processor, data, optimizer, determinism)
+        if state:
+            continuation.validate_compatibility(state["continuation"]["compatibility"], resume_identity)
+        cursor = OrdinaryCursor(data.train, state["continuation"]["cursor"] if state else None)
+        data.train = cursor.loader
+    elif state and run_directory is not None:
+        raise ValueError(unsupported_resume)
     start, best, bad = 0, float("inf"), 0
+    best_reference = None
+    best_step = None
     if state and resume_path is not None:
         model.load_communication_state(state)
         optimizer.load_state_dict(state["optimizer"])
@@ -315,12 +345,27 @@ def train(config, resume: str | Path | None = None,
         torch.set_rng_state(state["torch_rng"])
         if torch.cuda.is_available() and state["cuda_rng"]:
             torch.cuda.set_rng_state_all(state["cuda_rng"])
+        if run_directory is not None:
+            best_step = state["continuation"]["best_step"]
+            best_reference = state["continuation"]["best_checkpoint"]
+            if best_step == start:
+                best_reference = expected_resume
+            if best_step is not None:
+                if best_reference is None:
+                    raise ValueError("ordinary continuation has no durable best checkpoint")
+                earlier_best, best_reference = continuation.load_checkpoint(best_reference["path"], best_reference)
+                if earlier_best["config"] != config or earlier_best["step"] != best_step or best_step > start:
+                    raise ValueError("ordinary continuation best checkpoint mismatch")
+                continuation.link_checkpoint(best_reference, run / "best.pt")
+            elif best_reference is not None or best != float("inf") or bad != 0:
+                raise ValueError("invalid ordinary continuation selection state")
+            counters = dict(state["continuation"]["counters"])
         # Carry the earlier best into the resumed run when it precedes this checkpoint.
-        best_path = resume_path.with_name("best.pt")
-        earlier_best = torch.load(best_path, map_location="cpu", weights_only=True) if best_path.exists() else None
+        best_path = resume_path.with_name("best.pt") if run_directory is None else None
+        earlier_best = torch.load(best_path, map_location="cpu", weights_only=True) if best_path is not None and best_path.exists() else None
         if earlier_best and earlier_best["step"] <= start:
             torch.save(earlier_best, run / "best.pt")
-        else:
+        elif run_directory is None:
             best, bad = float("inf"), 0
     setup_identity = None
     if run_directory is not None:
@@ -330,7 +375,7 @@ def train(config, resume: str | Path | None = None,
             "processor_class": type(processor).__name__,
             "tokenizer_name": getattr(getattr(processor, "tokenizer", processor), "name_or_path", None),
             "selected_train_rows": len(data.train.dataset) if hasattr(data.train, "dataset") else None,
-            "initial_communication": {
+            "initial_communication": resume_identity["initializer"] if resume_identity else {
                 name: {key: {"shape": list(value.shape), "dtype": str(value.dtype),
                              "sha256": tensor_digest(value.reshape(-1))} if torch.is_tensor(value)
                        else {"identity_available": False, "reason": "non-tensor module extra state",
@@ -362,7 +407,8 @@ def train(config, resume: str | Path | None = None,
         "determinism": determinism,
         "presentation_stream": stream_options,
         "paired_randomness": paired,
-        "resume_contract": "fresh-only; exact resume unsupported" if stream_options else "legacy iterator restart",
+        "resume_contract": (unsupported_resume or continuation.SCHEMA) if run_directory is not None
+                           else "fresh-only; exact resume unsupported" if stream_options else "legacy iterator restart",
         "setup_seconds": time.monotonic() - setup_started,
         "execution_options": {
             "streamed_backward": bool(settings.get("streamed_backward", False)),
@@ -375,7 +421,13 @@ def train(config, resume: str | Path | None = None,
     if config["run"].get("wandb_project"):
         wandb = importlib.import_module("wandb")  # Optional extra, loaded only when requested.
         tracker = wandb.init(project=config["run"]["wandb_project"], name=run.name, config=config)
-    iterator = iter(data.train)
+    if cursor is not None and state:
+        # Recreating the mid-cycle iterator must not draw another training seed.
+        with isolated_rng(config["seed"]):
+            iterator = iter(data.train)
+        continuation.restore_rng(state["continuation"]["rng"])
+    else:
+        iterator = iter(data.train)
     model.train()
     progress = tqdm(range(start + 1, settings["max_steps"] + 1), desc="Optimizer steps")
     started = time.monotonic()
@@ -383,8 +435,27 @@ def train(config, resume: str | Path | None = None,
     stop_reason = "max_steps"
     step = start
     completed_updates = start
+    saved_step = None
+    saved_reference = None
     def save(name, step):
+        nonlocal saved_step, saved_reference, best_reference
         checkpoint_started = time.monotonic()
+        if cursor is not None:
+            if saved_step != step:
+                checkpoint_path = run / f"checkpoint_{step:06d}.pt"
+                save_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler, config, data.ids,
+                                step, best, bad, continuation_state={
+                                    "schema": continuation.SCHEMA, "compatibility": resume_identity,
+                                    "cursor": cursor.state_dict(), "counters": dict(counters),
+                                    "completed_updates": completed_updates,
+                                    "rng": continuation.capture_rng(), "best_step": best_step,
+                                    "best_checkpoint": best_reference if best_step != step else None})
+                saved_reference = continuation.publish_checkpoint(checkpoint_path, step)
+                saved_step = step
+                if best_step == step:
+                    best_reference = saved_reference
+            continuation.link_checkpoint(saved_reference, run / name)
+            return
         save_checkpoint(run / name, model, optimizer, scheduler, scaler, config, data.ids,
                         step, best, bad,
                         phase_transfer=transfer["metadata"] if transfer else None)
@@ -392,8 +463,9 @@ def train(config, resume: str | Path | None = None,
             append_metrics(run / "checkpoint_timing.jsonl", {"step": step, "file": name,
                            "seconds": time.monotonic() - checkpoint_started, **counters})
     try:
-        if settings.get("feature_summary") and 0 in settings["feature_summary"]["steps"]:
-            record_feature_summary(model, data, config, run, 0)
+        if start == 0 and settings.get("feature_summary") and 0 in settings["feature_summary"]["steps"]:
+            with continuation.isolated_observation(model) if cursor is not None else nullcontext():
+                record_feature_summary(model, data, config, run, 0)
         for step in progress:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("functional phase wall deadline reached before next update")
@@ -413,6 +485,8 @@ def train(config, resume: str | Path | None = None,
                         raise RuntimeError("fixed presentation stream exhausted before budget completion")
                     iterator = iter(data.train)
                     batch = next(iterator)
+                if cursor is not None:
+                    cursor.consumed()
                 count = batch["labels"].shape[0]
                 if stream_options:
                     assert isinstance(sampler, PresentationSampler)
@@ -489,11 +563,11 @@ def train(config, resume: str | Path | None = None,
                     values.append(run_batch(batch))
                 totals = aggregate_batch_losses(values, settings)
                 scaler.scale(totals["loss"]).backward()
-            if stream_options and not torch.isfinite(totals["loss"]).item():
+            if (stream_options or cursor is not None) and not torch.isfinite(totals["loss"]).item():
                 raise FloatingPointError(f"nonfinite loss at optimizer step {step}")
             scaler.unscale_(optimizer)
             gradient_norm = torch.nn.utils.clip_grad_norm_(parameters, settings["grad_clip"])
-            if stream_options and not torch.isfinite(gradient_norm).item():
+            if (stream_options or cursor is not None) and not torch.isfinite(gradient_norm).item():
                 raise FloatingPointError(f"nonfinite gradient at optimizer step {step}")
             old_scale = scaler.get_scale()
             scaler.step(optimizer)
@@ -501,7 +575,7 @@ def train(config, resume: str | Path | None = None,
             if scaler.get_scale() >= old_scale:
                 scheduler.step()
                 completed_updates += 1
-            elif stream_options:
+            elif stream_options or cursor is not None:
                 raise FloatingPointError("optimizer update skipped; exact study budget cannot advance")
             update_l2 = parameter_update_l2(
                 parameters, before_parameters,
@@ -543,7 +617,8 @@ def train(config, resume: str | Path | None = None,
                                  if key not in {"step", "phase"} and value is not None}, step=step)
                 last_log_time, last_log_step = logged_at, step
             if settings.get("feature_summary") and step in settings["feature_summary"]["steps"]:
-                record_feature_summary(model, data, config, run, step)
+                with continuation.isolated_observation(model) if cursor is not None else nullcontext():
+                    record_feature_summary(model, data, config, run, step)
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("functional phase wall deadline reached before validation")
             time_limit = settings.get("max_minutes")
@@ -551,11 +626,12 @@ def train(config, resume: str | Path | None = None,
                          or (deadline is not None and time.monotonic() >= deadline))
             if (step in settings["selection_steps"] if "selection_steps" in settings else step % settings["eval_every"] == 0) or step == settings["max_steps"] or timed_out:
                 validation_started = time.monotonic()
-                if config["task"] == "coco" and settings.get("record_coco_presentations", False):
-                    metrics = validate(model, data.validation, config,
-                                       evidence_path=run / "coco_presentations.jsonl", step=step)
-                else:
-                    metrics = validate(model, data.validation, config)
+                with continuation.isolated_observation(model) if cursor is not None else nullcontext():
+                    if config["task"] == "coco" and settings.get("record_coco_presentations", False):
+                        metrics = validate(model, data.validation, config,
+                                           evidence_path=run / "coco_presentations.jsonl", step=step)
+                    else:
+                        metrics = validate(model, data.validation, config)
                 validation_finished = time.monotonic()
                 validation_row = {"elapsed_seconds": validation_finished - started,
                                   "validation_seconds": validation_finished - validation_started, **metrics}
@@ -564,8 +640,11 @@ def train(config, resume: str | Path | None = None,
                 improved = score < best * (1.0 - settings["min_delta"])
                 if improved:
                     best, bad = score, 0
+                    best_step = step
                 elif step >= settings["min_steps"]:
                     bad += 1
+                if cursor is not None and not math.isfinite(score):
+                    raise FloatingPointError(f"nonfinite validation score at optimizer step {step}")
                 save("last.pt", step)
                 if improved:
                     save("best.pt", step)

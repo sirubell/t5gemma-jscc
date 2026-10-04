@@ -162,7 +162,7 @@ def test_case_reservations_references_and_bound_mutation(tmp_path):
 def test_resume_and_unsupported_reject_before_reservation(tmp_path):
     config = load_config(REPO / "configs/tasks/hellaswag.yaml")
     root = tmp_path / "root"
-    with pytest.raises(ValueError, match="iterator restoration"):
+    with pytest.raises(FileNotFoundError, match="case.json"):
         ordinary_runs.train_task(config, root, resume="last.pt")
     with pytest.raises(ValueError, match="COCO/HellaSwag"):
         ordinary_runs.train_task({"task": "joint"}, root)
