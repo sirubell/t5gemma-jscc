@@ -97,6 +97,28 @@ def _resolve(bundle, receipt, job, lookup):
     return {'status': 'unknown', 'basis': 'ambiguous-or-insufficient'}
 
 
+def _retry_metadata(previous):
+    return {key: previous[key] for key in ('retry_authorization', 'new_bundle_identity', 'recovery_claims', 'recovery_approvals')
+            if previous and key in previous}
+
+
+def _approve_recovery(record, authorization, new_identity, groups):
+    from copy import deepcopy
+    _require(not record.get('conflicts'), 'authoritative evidence conflict blocks recovery')
+    approvals = dict(record.get('recovery_approvals', {}))
+    _require(approvals.get(new_identity, authorization) == authorization, 'recorded retry authority is immutable')
+    approvals[new_identity] = authorization
+    claims = dict(record.get('recovery_claims', {}))
+    for group in groups:
+        _require(claims.get(str(group), new_identity) == new_identity, 'group already claimed by another recovery')
+        claims[str(group)] = new_identity
+    approved = deepcopy(record)
+    approved.setdefault('retry_authorization', authorization)
+    approved.setdefault('new_bundle_identity', new_identity)
+    approved.update(recovery_claims=claims, recovery_approvals=approvals)
+    return approved
+
+
 def reconciliation_intents(bundle, receipt_dir):
     """Read exact anchors to include in recorded evidence, including legacy."""
     directory = Path(receipt_dir)
@@ -117,7 +139,18 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
         digest = canonical_digest(evidence)
         previous = _latest(directory)
         if previous and previous.get('evidence_sha256') == digest:
+            _require(not previous.get('conflicts'), 'authoritative task evidence conflict remains unresolved')
             return previous
+        conflict_resolution = evidence.get('conflict_resolution')
+        resolving = bool(previous and previous.get('conflicts'))
+        if previous and previous.get('conflicts'):
+            _require(not any(c.get('kind') == 'group' for c in previous['conflicts']),
+                     'group identity conflict requires separate exact lifecycle investigation')
+            _require(isinstance(conflict_resolution, dict)
+                     and conflict_resolution.get('authoritative') is True
+                     and conflict_resolution.get('reference')
+                     and conflict_resolution.get('conflict_sha256') == canonical_digest(previous),
+                     'explicit authoritative conflict resolution required')
         lookups = evidence.get('groups', [])
         _require(isinstance(lookups, list), 'group evidence must be a list')
         indices = [row.get('group') for row in lookups if isinstance(row, dict)]
@@ -125,7 +158,7 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
                  and all(type(i) is int and 0 <= i < len(bundle['groups']) for i in indices),
                  'duplicate or invalid group evidence')
         jobs = {job['group']: job for job in receipt['jobs']}
-        groups, tasks = [], []
+        groups, tasks, conflicts = [], [], []
         for i, group in enumerate(bundle['groups']):
             job = jobs.get(i)
             if job is None:
@@ -140,30 +173,43 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
             if previous:
                 prior = previous['groups'][i]
                 if prior['status'] == 'not-accepted':
-                    _require(resolution['status'] != 'accepted', 'authoritative final nonacceptance contradicted')
+                    if resolution['status'] == 'accepted':
+                        conflicts.append({'kind': 'group', 'group': i, 'index': None, 'prior': prior, 'new': resolution})
                     resolution = {key: prior[key] for key in ('status', 'basis')}
                 if prior['status'] == 'accepted':
-                    _require(resolution.get('job_id', prior['job_id']) == prior['job_id'], 'accepted scheduler ID differs')
+                    if resolution.get('job_id', prior['job_id']) != prior['job_id']:
+                        conflicts.append({'kind': 'group', 'group': i, 'index': None, 'prior': prior, 'new': resolution})
                     resolution = {key: prior[key] for key in ('status', 'job_id', 'basis')}
             groups.append(dict(resolution, group=i))
             for index in group['indices']:
                 row = {'group': i, 'index': index, 'status': 'unknown'}
                 if resolution['status'] in ('not-accepted', 'not-attempted'):
                     row.update(status='rejected', basis=resolution['basis'])
-                elif resolution['status'] == 'accepted':
+                authoritative_task = None
+                if resolution['status'] == 'accepted':
                     candidates = [t for t in evidence.get('tasks', []) if
                                   t.get('group') == i and t.get('index') == index]
                     if len(candidates) == 1:
                         t = candidates[0]
                         if (t.get('job_id') == resolution['job_id'] and t.get('authoritative') is True
-                                and t.get('status') in TERMINAL and t.get('reference')
+                                and t.get('status') in TERMINAL | {'pending', 'queued', 'running'} and t.get('reference')
                                 and t.get('query_status') == 'complete'
                                 and t.get('scheduler_task_id') == resolution['job_id']+'_'+str(index)):
-                            row.update(status=t['status'], basis='authoritative-task', evidence=t)
+                            authoritative_task = t
+                            if t['status'] in TERMINAL:
+                                row.update(status=t['status'], basis='authoritative-task', evidence=t)
                 if previous:
                     prior_task = next(t for t in previous['tasks'] if t['group'] == i and t['index'] == index)
-                    if prior_task['status'] in TERMINAL:
-                        row = prior_task
+                    affected = resolving and any(c['group'] == i and c['index'] == index for c in previous['conflicts'])
+                    if affected:
+                        _require(authoritative_task is not None and authoritative_task['status'] in TERMINAL,
+                                 'conflict resolution needs exact authoritative terminal task evidence')
+                    elif prior_task['status'] in TERMINAL:
+                        if authoritative_task and authoritative_task['status'] != prior_task['status']:
+                            conflicts.append({'group': i, 'index': index, 'prior': prior_task, 'new': authoritative_task})
+                            row = dict(row, status='unknown', basis='authoritative-conflict')
+                        else:
+                            row = prior_task
                 tasks.append(row)
         if previous and previous.get('retry_authorization'):
             for old, new in zip(previous['groups'], groups, strict=True):
@@ -172,10 +218,23 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
         record = {'schema': 'submission-reconciliation-v1', 'bundle_identity': bundle['identity'],
                   'submission_sha256': receipt['_sha256'], 'evidence_sha256': digest,
                   'evidence': evidence, 'groups': groups, 'tasks': tasks,
-                  'all_tasks_terminal': all(t['status'] in TERMINAL for t in tasks),
+                  'all_tasks_terminal': not conflicts and all(t['status'] in TERMINAL for t in tasks),
                   'retry_eligible_groups': [g['group'] for g in groups if g['status'] in ('not-accepted', 'not-attempted')],
                   'retry_requires_new_exact_authorization': True}
-        return _save(directory, record)
+        record.update(_retry_metadata(previous))
+        if conflicts:
+            record['conflicts'] = conflicts
+            from .recipe_submission import source_consumers
+            registry = source_consumers(bundle)
+            registry_path = registry.directory/(canonical_digest(str(Path(bundle['source']['path']).resolve()))+'.json')
+            consumers = json.loads(registry_path.read_text())['consumers'] if registry_path.exists() else {}
+            record['source_already_released'] = consumers.get(bundle['identity'], {}).get('released', False)
+        saved = _save(directory, record)
+        if conflicts:
+            limitation = ('; historical source release is immutable and cannot be undone'
+                          if saved.get('source_already_released') else '; source hold requires explicit resolution')
+            raise ValueError('authoritative evidence conflict/contradiction recorded'+limitation)
+        return saved
 
 
 def finalize_source_consumer(bundle, receipt_dir, *, release=False):
@@ -188,7 +247,7 @@ def finalize_source_consumer(bundle, receipt_dir, *, release=False):
         if record is None:
             raise ValueError('durable reconciliation record required')
         _require(record and record['submission_sha256'] == file_digest(directory/'SUBMISSION.json')
-                 and record['all_tasks_terminal'], 'every bound task needs durable terminal evidence')
+                 and not record.get('conflicts') and record['all_tasks_terminal'], 'every bound task needs durable terminal evidence')
         registry = source_consumers(bundle)
         # Registry API is intentionally reused unchanged. Inspect persisted
         # state to make recovery after a crash between terminal/release idempotent.
@@ -215,16 +274,15 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
     Changed science/source/resources requires its separate revision procedure.
     """
     from .recipe_submission import CASE_SCHEMA, _sync_directory, validate_bundle
-    from copy import deepcopy
     directory = Path(receipt_dir)
     validate_bundle(new_bundle)
     with _locked(directory):
-        _read(bundle, directory)
+        receipt = _read(bundle, directory)
         record = _latest(directory)
         if record is None:
             raise ValueError('durable reconciliation record required')
         _require(record and record['submission_sha256'] == file_digest(directory/'SUBMISSION.json')
-                 and all(g['status'] != 'unknown' for g in record['groups']), 'fully reconciled attempt required')
+                 and not record.get('conflicts') and all(g['status'] != 'unknown' for g in record['groups']), 'fully reconciled attempt required')
         _require(isinstance(authorization, dict) and authorization.get('approved') is True
                  and authorization.get('operation') == 'authorize-recipe-retry'
                  and authorization.get('bundle_identity') == bundle['identity']
@@ -256,7 +314,8 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
             group = new_bundle['groups'][position]
             predecessor = bundle['groups'][old_index][dependency_key]
             if predecessor is None:
-                _require(group[dependency_key] is None and not group.get('accepted_dependency_job_id'),
+                inherited = bundle['groups'][old_index].get('accepted_dependency_job_id')
+                _require(group[dependency_key] is None and group.get('accepted_dependency_job_id') == inherited,
                          'retry dependency differs')
             elif predecessor in old_indices:
                 mapped = old_indices.index(predecessor)
@@ -273,9 +332,8 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
                            if old['indices'] == group['indices'] and old['concurrency'] == group['concurrency']]
                 _require(len(matches) == 1 and record['groups'][matches[0]]['status'] in ('not-accepted', 'not-attempted'),
                          'accepted or changed legacy groups cannot be retried')
-            approved = deepcopy(record)
-            approved.update(retry_authorization=authorization, new_bundle_identity=new_bundle['identity'])
-            if record.get('retry_authorization') != authorization:
+            approved = _approve_recovery(record, authorization, new_bundle['identity'], old_indices)
+            if record.get('recovery_approvals', {}).get(new_bundle['identity']) != authorization:
                 record = _save(directory, approved)
             return {'new_bundle_identity': new_bundle['identity'], 'submission_performed': False,
                     'authorization_record': record['sequence'], 'retired_fences': []}
@@ -324,17 +382,25 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
             path = Path(old_case['path'])/'scheduler-reservations'/(stage+'.json')
             archive = path.parent/(stage+'.retired-'+bundle['identity']+'.json')
             if path.exists():
-                _require(json.loads(path.read_text()).get('identity') == bundle['identity'], 'stage fence belongs to another attempt')
+                try:
+                    owner = json.loads(path.read_text()).get('identity')
+                except (ValueError, AttributeError):
+                    metadata = path.stat()
+                    proven = any(row.get('path') == str(path) and row.get('identity') == bundle['identity']
+                                 and row.get('device') == metadata.st_dev and row.get('inode') == metadata.st_ino
+                                 for row in receipt.get('created_stage_fences', []))
+                    _require(proven and group['status'] == 'not-attempted'
+                             and receipt['status'] == 'stopped-no-retry', 'incomplete stage fence ownership unproven')
+                    owner = bundle['identity']
+                _require(owner == bundle['identity'], 'stage fence belongs to another attempt')
             else:
                 _require(archive.exists() or group['status'] == 'not-attempted', 'missing retained stage fence')
             fences.append((path, archive))
         _require(selected > 0, 'retry selects no tasks')
         # Record approval before any retirement. A crash may leave some fences
         # retired; the same action resumes, while all uncertain fences stay held.
-        approved = deepcopy(record)
-        approved['retry_authorization'] = authorization
-        approved['new_bundle_identity'] = new_bundle['identity']
-        if record.get('retry_authorization') != authorization:
+        approved = _approve_recovery(record, authorization, new_bundle['identity'], old_indices)
+        if record.get('recovery_approvals', {}).get(new_bundle['identity']) != authorization:
             record = _save(directory, approved)
         for path, archive in fences:
             if path.exists():
@@ -355,10 +421,12 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
         record = _latest(directory)
         if record is None:
             raise ValueError('durable reconciliation record required')
-        _require(record and all(g['status'] != 'unknown' for g in record['groups']), 'fully reconciled attempt required')
-        selected = record['retry_eligible_groups'] if groups is None else groups
+        _require(record and not record.get('conflicts') and all(g['status'] != 'unknown' for g in record['groups']), 'fully reconciled attempt required')
+        _require(not record.get('conflicts'), 'authoritative evidence conflict blocks recovery')
+        eligible = [i for i in eligible if str(i) not in record.get('recovery_claims', {})]
+        selected = eligible if groups is None else groups
         _require(isinstance(selected, list) and selected and len(set(selected)) == len(selected)
-                 and all(type(i) is int and i in record['retry_eligible_groups'] for i in selected),
+                 and all(type(i) is int and i in eligible for i in selected),
                  'only eligible unaccepted groups may be selected')
         _require(isinstance(attempt, str) and re.fullmatch(r'[A-Za-z0-9_-]+', attempt), 'safe fresh attempt required')
         new = deepcopy(bundle)
@@ -405,7 +473,9 @@ def require_retry_authorization(bundle):
         record = _latest(directory)
         if record is None:
             raise ValueError('durable reconciliation record required')
-        _require(record and record.get('new_bundle_identity') == bundle['identity']
-                 and record.get('retry_authorization', {}).get('approved') is True
-                 and record.get('retry_authorization', {}).get('operation') == 'authorize-recipe-retry',
+        approval = record.get('recovery_approvals', {}).get(bundle['identity'], {})
+        _require(record and not record.get('conflicts')
+                 and all(record.get('recovery_claims', {}).get(str(i)) == bundle['identity'] for i in bundle['retry_of']['groups'])
+                 and approval.get('approved') is True
+                 and approval.get('operation') == 'authorize-recipe-retry',
                  'new explicit exact retry authorization required before submission')

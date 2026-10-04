@@ -304,3 +304,31 @@ has terminal accounting evidence. Definitively unaccepted or stopped unattempted
 groups need no fabricated launch result, including groups after partial acceptance
 and a reservation write failure before scheduler invocation. Reservations and
 scientific output stay retained; no automatic cancellation or release is added.
+
+Recovery approval also records immutable `recovery_claims` per original group and
+`recovery_approvals` per child bundle. Once claimed, a group cannot fund a second
+recovery from that original receipt, even under a new approval. Reconcile the
+child's own stopped attempt to prepare its next recovery. Disjoint unclaimed
+groups may receive separate exact approvals; later evidence retains all claims
+and approvals. Inherited accepted dependencies remain fixed across successive
+case or legacy recovery generations.
+
+An exact authoritative task result contradicting retained terminal evidence
+writes a durable conflict snapshot before reporting failure. Missing or failed
+queries still retain supported prior evidence. Conflict snapshots block terminal,
+release, retry preparation/approval and recovery submission. To resolve a task
+conflict, supply complete corrected authoritative terminal evidence for each
+conflicted task and `conflict_resolution` with `authoritative:true`, a retained
+`reference` and the exact canonical `conflict_sha256` of the blocking snapshot.
+Group acceptance/nonacceptance identity contradictions require a separate exact
+lifecycle investigation and stay blocked. If the source was already released,
+the conflict explicitly reports that historical release is immutable; it cannot
+undo the provider's recorded release or promise retrospective protection.
+
+The producer records exclusive stage-fence creation path, bundle/group/task
+identity and inode/device before writing the stage JSON. A durably stopped,
+never-invoked group may archive an incomplete fence only when this creation
+proof matches its current file. Malformed bytes alone and another attempt's
+empty fence never permit retirement. Approval/group claims precede individual
+retirements, so interruption resumes only the same exact child recovery and
+keeps archived bytes unchanged.

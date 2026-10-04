@@ -673,8 +673,16 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
                     arguments = case['commands'][stage]
                     attempt = arguments[arguments.index('--attempt')+1]
                     stage_reservation = case_reservations/(stage+'.json')
-                    with stage_reservation.open('x'):
-                        pass
+                    with stage_reservation.open('x') as stream:
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    _sync_directory(case_reservations)
+                    metadata = stage_reservation.stat()
+                    receipt.setdefault('created_stage_fences', []).append({
+                        'path': str(stage_reservation), 'identity': bundle['identity'],
+                        'group': i, 'index': index, 'stage': stage,
+                        'device': metadata.st_dev, 'inode': metadata.st_ino})
+                    write_json(receipt_path, receipt)
                     write_json(stage_reservation, {'identity': bundle['identity'], 'group': i, 'index': index,
                                'stage': stage, 'attempt': attempt, 'submission': bundle['output']})
                 reservation = directory/'tasks'/f'g{i}-i{index}.reservation.json'

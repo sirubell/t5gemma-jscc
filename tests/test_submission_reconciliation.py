@@ -219,6 +219,14 @@ def test_failed_reservation_write_before_scheduler_lifecycle(graph_job, monkeypa
     record = reconcile(bundle, evidence(bundle, result='delayed'))
     assert record['all_tasks_terminal']
     assert all(g['status'] == 'not-attempted' for g in record['groups'])
+    original = (Path(bundle['output'])/'SUBMISSION.json').read_bytes()
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    new = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
+    result = authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+    empty_archive = Path(result['retired_fences'][0])
+    assert empty_archive.exists() and empty_archive.read_bytes() == b''
+    submission.submit_job(new, new['output'], scheduler=lambda c: subprocess.CompletedProcess(c, 0, '9601', ''))
+    assert (Path(bundle['output'])/'SUBMISSION.json').read_bytes() == original
     finalize_source_consumer(bundle, bundle['output'], release=True)
 
 
@@ -307,3 +315,166 @@ def test_retry_changed_budget_blocked(graph_job):
     new['identity'] = canonical_digest(new)
     with pytest.raises(ValueError, match='budget'):
         authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+
+
+def _complete_evidence(bundle):
+    value = evidence(bundle)
+    record = reconcile(bundle, value)
+    for group in record['groups']:
+        for index in bundle['groups'][group['group']]['indices']:
+            value['tasks'].append({'group': group['group'], 'index': index, 'job_id': group['job_id'],
+                'scheduler_task_id': group['job_id']+'_'+str(index), 'query_status': 'complete',
+                'authoritative': True, 'status': 'completed', 'reference': 'fake-terminal-record'})
+    return value
+
+
+@pytest.mark.parametrize('status', ['failed', 'running'])
+def test_authoritative_task_conflict_durably_blocks_release(graph_job, status):
+    bundle, _ = stopped(graph_job, partial=True)
+    value = _complete_evidence(bundle)
+    reconcile(bundle, value)
+    conflicting = deepcopy(value)
+    conflicting['tasks'][0]['status'] = status
+    with pytest.raises(ValueError, match='conflict'):
+        reconcile(bundle, conflicting)
+    latest_path = sorted((Path(bundle['output'])/'reconciliation').glob('[0-9]*.json'))[-1]
+    blocker = json.loads(latest_path.read_text())
+    assert blocker['conflicts'] and not blocker['all_tasks_terminal']
+    with pytest.raises(ValueError, match='terminal evidence'):
+        finalize_source_consumer(bundle, bundle['output'], release=True)
+    with pytest.raises(ValueError, match='conflict resolution'):
+        reconcile(bundle, value)
+    value['conflict_resolution'] = {'authoritative': True, 'reference': 'fake-final-corrected-accounting',
+                                    'conflict_sha256': canonical_digest(blocker)}
+    assert reconcile(bundle, value)['all_tasks_terminal']
+    assert finalize_source_consumer(bundle, bundle['output'], release=True)['released']
+
+
+def test_conflict_after_historical_release_reports_immutable_limit(graph_job):
+    bundle, _ = stopped(graph_job, partial=True)
+    value = _complete_evidence(bundle)
+    reconcile(bundle, value)
+    finalize_source_consumer(bundle, bundle['output'], release=True)
+    value['tasks'][0]['status'] = 'running'
+    with pytest.raises(ValueError, match='historical source release is immutable'):
+        reconcile(bundle, value)
+
+
+def test_reconcile_preserves_claim_and_exact_approval(graph_job):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle, _ = stopped(graph_job)
+    value = evidence(bundle, result='rejected')
+    reconcile(bundle, value)
+    new = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
+    authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+    value['reference'] = 'fake-second-consistent-query'
+    record = reconcile(bundle, value)
+    assert record['new_bundle_identity'] == new['identity']
+    assert record['retry_authorization'] == approval(bundle, new)
+    assert record['recovery_claims'] == {'0': new['identity'], '1': new['identity']}
+    submission.submit_job(new, new['output'], scheduler=lambda c: subprocess.CompletedProcess(c, 0, '9701', ''))
+
+
+def test_legacy_parent_cannot_authorize_second_duplicate_recovery(job_files):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle = submission.prepare_job(*job_files[:2])
+    with pytest.raises(ConnectionError):
+        submission.submit_job(bundle, bundle['output'], scheduler=lambda _: (_ for _ in ()).throw(ConnectionError('lost')))
+    reconcile(bundle, evidence(bundle, result='rejected'))
+    first = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-A', attempt='0002')
+    authorize_retry_job(bundle, bundle['output'], new_bundle=first, authorization=approval(bundle, first))
+    submission.submit_job(first, first['output'], scheduler=lambda c: subprocess.CompletedProcess(c, 0, '9702', ''))
+    with pytest.raises(ValueError, match='eligible'):
+        prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-B', attempt='0003')
+    second = deepcopy(first)
+    second['output'] = bundle['output']+'-B'
+    second.pop('identity')
+    second['identity'] = canonical_digest(second)
+    with pytest.raises(ValueError, match='already claimed'):
+        authorize_retry_job(bundle, bundle['output'], new_bundle=second, authorization=approval(bundle, second))
+
+
+def test_second_generation_evaluation_retry_retains_external_dependency(graph_job):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle, _ = stopped(graph_job, partial=True)
+    reconcile(bundle, evidence(bundle, result='rejected'))
+    first = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-A', attempt='0002')
+    authorize_retry_job(bundle, bundle['output'], new_bundle=first, authorization=approval(bundle, first))
+    with pytest.raises(ConnectionError):
+        submission.submit_job(first, first['output'], scheduler=lambda _: (_ for _ in ()).throw(ConnectionError('lost')))
+    reconcile(first, evidence(first, result='rejected'))
+    second = prepare_retry_bundle(first, first['output'], output=bundle['output']+'-B', attempt='0003')
+    authorize_retry_job(first, first['output'], new_bundle=second, authorization=approval(first, second))
+    calls = []
+    def scheduler(command):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, '9703', '')
+    submission.submit_job(second, second['output'], scheduler=scheduler)
+    assert len(calls) == 1 and '--dependency=aftercorr:9101' in calls[0]
+    assert second['cases'][1]['commands']['training'] == bundle['cases'][1]['commands']['training']
+
+
+def test_interrupted_fence_retirement_recovers_exact_claim(graph_job, monkeypatch):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle, _ = stopped(graph_job)
+    reconcile(bundle, evidence(bundle, result='rejected'))
+    new = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
+    rename = Path.rename
+    count = 0
+    def interrupted(path, target):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError('fake interruption between fence retirements')
+        return rename(path, target)
+    monkeypatch.setattr(Path, 'rename', interrupted)
+    with pytest.raises(OSError):
+        authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+    assert len(list(Path(bundle['run_output']).glob('cases/*/scheduler-reservations/*.retired-*.json'))) == 1
+    monkeypatch.setattr(Path, 'rename', rename)
+    result = authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+    assert all(Path(p).exists() for p in result['retired_fences'])
+
+
+def test_foreign_empty_stage_fence_never_retired(graph_job):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle = submission.prepare_job(*graph_job[:2])
+    folder = Path(bundle['cases'][0]['path'])/'scheduler-reservations'
+    folder.mkdir()
+    foreign = folder/'training.json'
+    foreign.write_bytes(b'')
+    with pytest.raises(FileExistsError):
+        submission.submit_job(bundle, bundle['output'], scheduler=lambda _: pytest.fail('no call'))
+    reconcile(bundle, evidence(bundle, result='delayed'))
+    new = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
+    with pytest.raises(ValueError, match='ownership unproven'):
+        authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
+    assert foreign.exists() and foreign.read_bytes() == b''
+
+
+def test_second_generation_legacy_dependency_retry(job_files):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle = submission.prepare_job(*job_files[:2])
+    count = 0
+    def partial(command):
+        nonlocal count
+        count += 1
+        if count == 1:
+            return subprocess.CompletedProcess(command, 0, '9801', '')
+        raise ConnectionError('lost original second group')
+    with pytest.raises(ConnectionError):
+        submission.submit_job(bundle, bundle['output'], scheduler=partial)
+    reconcile(bundle, evidence(bundle, result='rejected'))
+    first = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-A', attempt='0002')
+    authorize_retry_job(bundle, bundle['output'], new_bundle=first, authorization=approval(bundle, first))
+    with pytest.raises(ConnectionError):
+        submission.submit_job(first, first['output'], scheduler=lambda _: (_ for _ in ()).throw(ConnectionError('lost recovery')))
+    reconcile(first, evidence(first, result='rejected'))
+    second = prepare_retry_bundle(first, first['output'], output=bundle['output']+'-B', attempt='0003')
+    authorize_retry_job(first, first['output'], new_bundle=second, authorization=approval(first, second))
+    calls = []
+    def accepted(command):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, '9802', '')
+    submission.submit_job(second, second['output'], scheduler=accepted)
+    assert len(calls) == 1 and '--dependency=afterok:9801' in calls[0]
