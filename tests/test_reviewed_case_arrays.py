@@ -75,7 +75,7 @@ def test_real_tiny_assets_prepare_only(joined_assets, monkeypatch, tmp_path):
     assert record['cases'][0]['case_id'] == 'width-8-ratio-50'
     assert record['cases'][0]['counts']['selected_rows'] == 12
     assert record['cases'][0]['counts']['optimizer_updates'] == 24
-    preview = submission.preview_job(bundle, job['output']+'/bundle.json')
+    preview = submission.preview_job(bundle, str(job['output'])+'/bundle.json')
     assert preview['task_count'] == 2
     assert preview['scientific_totals']['optimizer_updates'] == 24
     assert preview['scientific_totals']['selected_rows'] == 12
@@ -111,7 +111,8 @@ def graph_job(case_job, monkeypatch):
             case = root/'cases'/f'width-8-ratio-{ratio}'
             case.mkdir(parents=True)
             config = {'data': {'num_train': 12}, 'training': {'lr': .001}, 'ratio': ratio}
-            (case/'recipe.json').write_text(json.dumps({'config': config}))
+            (case/'recipe.json').write_text(json.dumps({'config': config, 'locations': ['dec_l3', 'enc_l2', 'enc_emb'],
+                                                     'updates_per_location': 8}))
             (case/'config.yaml').write_text(yaml.safe_dump(config))
             rows.append({'case_id': case.name, 'path': str(case), 'width': 8, 'ratio': ratio,
                          'counts': {'selected_rows': 12, 'optimizer_updates': 24,
@@ -162,6 +163,11 @@ def test_stable_subset_singleton_own_task_pairs(graph_job, selection, evaluation
     assert preview['scientific_totals']['optimizer_updates'] == 24*len(indices)
     assert preview['scientific_totals']['selected_rows'] == 12*len(indices)
     assert preview['resources_per_task'] == b['resources']
+    for case in preview['cases']:
+        assert case['effective_config']['training']['lr'] == .001
+        assert case['locations'] == ['dec_l3', 'enc_l2', 'enc_emb']
+        assert case['updates_per_location'] == 8
+        assert case['selected_rows_request']['num_train'] == 12
     if eval_indices:
         assert b['groups'][1]['indices'] == eval_indices
         assert b['groups'][1]['aftercorr'] == 0
@@ -352,5 +358,31 @@ def test_unknown_acceptance_cannot_escape_hold_with_new_output_attempt(graph_job
         submission.submit_job(other, other['output'],
             scheduler=lambda args: pytest.fail('unknown acceptance escaped into a retry'))
     assert read(Path(other['output'])/'SUBMISSION.json')['jobs'] == []
+    with pytest.raises(ValueError, match='held'):
+        submission.source_consumers(b).require_released(b['source']['path'])
+
+
+def test_frozen_effective_preview_ignores_later_authored_yaml(graph_job):
+    b = prepare_graph(graph_job, cases=['width-8-ratio-50'])
+    Path(graph_job[2]['recipe']).write_text('later author changed YAML: [')
+    preview = submission.preview_job(b, b['output']+'/bundle.json')
+    assert len(preview['cases']) == 1
+    assert preview['cases'][0]['effective_config']['training']['lr'] == .001
+    assert preview['cases'][0]['updates_per_location'] == 8
+
+
+def test_failed_durable_case_fence_write_cannot_reach_scheduler(graph_job, monkeypatch):
+    b = prepare_graph(graph_job)
+    original = submission.write_json
+    def fail_reservation(path, value):
+        if Path(path).name == 'training.json' and Path(path).parent.name == 'scheduler-reservations':
+            raise OSError('fixture durable fence write failed')
+        return original(path, value)
+    monkeypatch.setattr(submission, 'write_json', fail_reservation)
+    with pytest.raises(OSError, match='durable fence'):
+        submission.submit_job(b, b['output'], scheduler=lambda args: pytest.fail('undurable fence submitted'))
+    receipt = read(Path(b['output'])/'SUBMISSION.json')
+    assert receipt['jobs'] == [] and receipt['status'] == 'stopped-no-retry'
+    assert (Path(b['cases'][0]['path'])/'scheduler-reservations/training.json').exists()
     with pytest.raises(ValueError, match='held'):
         submission.source_consumers(b).require_released(b['source']['path'])

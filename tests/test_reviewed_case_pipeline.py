@@ -50,7 +50,7 @@ def test_real_public_combined_case_exact_terminal(joined_assets, tmp_path, monke
     assert [row['status'] for row in outcome['commands']] == ['completed', 'completed']
     checkpoint = outcome['commands'][1]['eligibility']['checkpoint']
     assert checkpoint['role'] == 'terminal' and checkpoint['step'] == 24
-    assert checkpoint['sha256'] == file_digest(checkpoint['path'])
+    assert checkpoint['sha256'] == file_digest(Path(checkpoint['path']))
     assert checkpoint['training_attempt'].endswith('/training-pipeline-g0-i0')
     gate = output/'evaluations/evaluation-pipeline-g0-i0/gate.json'
     assert json.loads(gate.read_text())['final_eligible'] is True

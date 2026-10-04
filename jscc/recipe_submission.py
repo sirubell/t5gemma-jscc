@@ -208,6 +208,14 @@ def validate_bundle(bundle):
     return bundle
 
 
+def _sync_directory(path):
+    directory = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def write_json(path, value):
     """Atomically replace our receipt, retaining the reservation on any failure."""
     path = Path(path)
@@ -219,11 +227,7 @@ def write_json(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _sync_directory(path.parent)
     finally:
         if Path(temporary).exists():
             Path(temporary).unlink()
@@ -533,8 +537,12 @@ def prepare_case_job(job_path, limits_path):
             case['commands']['evaluation'] = [python, source['path']+'/evaluate.py', '--run', run_output,
                 '--case', row['case_id'], '--attempt', job['attempt']+'-g'+str(eval_group)+'-i'+str(index),
                 '--timeout-seconds', str(resources['walltime_minutes']*60-300)]
-        case['effective_config_sha256'] = canonical_digest(
-            json.loads((Path(row['path'])/'recipe.json').read_text())['config'])
+        description = json.loads((Path(row['path'])/'recipe.json').read_text())
+        case['effective_config_sha256'] = canonical_digest(description['config'])
+        if index in indices:
+            case.update(effective_config=description['config'], locations=description['locations'],
+                        selected_rows_request=description['config']['data'],
+                        updates_per_location=description['updates_per_location'])
         cases.append(case)
     bundle = {'schema': CASE_SCHEMA, 'root': root, 'source': source, 'source_binding': binding,
               'python': python, 'cache': normalize_path(job['cache'], root), 'output': output,
@@ -556,6 +564,15 @@ def _validate_case_root(bundle):
     require(len(record['cases']) == len(bundle['cases']), 'bound case count differs')
     for row, frozen in zip(record['cases'], bundle['cases']):
         require(all(frozen[k] == v for k, v in row.items()), 'bound case differs')
+        description = json.loads((Path(row['path'])/'recipe.json').read_text())
+        require(frozen['effective_config_sha256'] == canonical_digest(description['config']),
+                'bound effective config digest differs')
+        if frozen['commands']:
+            expected = {'effective_config': description['config'], 'locations': description['locations'],
+                        'selected_rows_request': description['config']['data'],
+                        'updates_per_location': description['updates_per_location']}
+            require(all(frozen[key] == value for key, value in expected.items()),
+                    'frozen scientific case description differs')
 
 
 def _preview_case_job(bundle, bundle_path):
@@ -598,6 +615,7 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
             and authorization['user_authorization_reference'].strip(), 'explicit exact live submission approval required')
         scheduler = _slurm_submit
     directory.mkdir(exist_ok=False)
+    _sync_directory(directory.parent)
     receipt = {'schema': CASE_SCHEMA, 'bundle_identity': bundle['identity'],
         'source_commit': bundle['source']['commit'], 'status': 'reserved', 'jobs': [], 'mocked': mocked}
     receipt_path = directory/'SUBMISSION.json'
@@ -605,7 +623,11 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
         (directory/'logs').mkdir()
         (directory/'tasks').mkdir()
         write_json(directory/'bundle.json', bundle)
-        (directory/'job.sbatch').write_text(render_payload(bundle, directory/'bundle.json'))
+        with (directory/'job.sbatch').open('x') as stream:
+            stream.write(render_payload(bundle, directory/'bundle.json'))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _sync_directory(directory)
         receipt.update(payload_sha256=file_digest(directory/'job.sbatch'),
                        bundle_sha256=file_digest(directory/'bundle.json'))
         write_json(receipt_path, receipt)
@@ -625,18 +647,22 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
                 stage_names = ['training', 'evaluation'] if group['stage'] == 'combined' else [group['stage']]
                 case_reservations = Path(case['path'])/'scheduler-reservations'
                 case_reservations.mkdir(exist_ok=True)
+                _sync_directory(case_reservations.parent)
                 for stage in stage_names:
                     if stage not in case['commands']:
                         continue
                     arguments = case['commands'][stage]
                     attempt = arguments[arguments.index('--attempt')+1]
-                    with (case_reservations/(stage+'.json')).open('x') as stream:
-                        json.dump({'identity': bundle['identity'], 'group': i, 'index': index,
-                                   'stage': stage, 'attempt': attempt, 'submission': bundle['output']}, stream)
+                    stage_reservation = case_reservations/(stage+'.json')
+                    with stage_reservation.open('x'):
+                        pass
+                    write_json(stage_reservation, {'identity': bundle['identity'], 'group': i, 'index': index,
+                               'stage': stage, 'attempt': attempt, 'submission': bundle['output']})
                 reservation = directory/'tasks'/f'g{i}-i{index}.reservation.json'
-                with reservation.open('x') as stream:
-                    json.dump({'identity': bundle['identity'], 'group': i, 'index': index,
-                               'case_id': bundle['cases'][index]['case_id'], 'status': 'reserved'}, stream)
+                with reservation.open('x'):
+                    pass
+                write_json(reservation, {'identity': bundle['identity'], 'group': i, 'index': index,
+                           'case_id': bundle['cases'][index]['case_id'], 'status': 'reserved'})
         write_json(receipt_path, receipt)
         for i, group in enumerate(bundle['groups']):
             dependency = None if group['aftercorr'] is None else receipt['jobs'][group['aftercorr']]['job_id']
@@ -687,8 +713,9 @@ def _run_case_job(bundle, identity, group_index, *, runner=None):
     marker = Path(bundle['output'])/'tasks'/f'g{group_index}-i{index}.launch.json'
     outcome = {'identity': identity, 'group': group_index, 'index': index, 'case_id': case['case_id'],
                'job_id': os.environ['SLURM_JOB_ID'], 'status': 'checking', 'commands': []}
-    with marker.open('x') as stream:
-        json.dump(outcome, stream)
+    with marker.open('x'):
+        pass
+    write_json(marker, outcome)
     try:
         submission_preflight(bundle)
         source = local_path(bundle['source']['path'], bundle['root'])

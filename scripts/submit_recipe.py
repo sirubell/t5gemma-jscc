@@ -85,7 +85,11 @@ def main(argv=None):
                 task = os.environ.get('SLURM_ARRAY_TASK_ID', 'unknown')
                 task = task if task.isdigit() else 'unknown'
                 group = str(args.group) if args.group is not None and args.group >= 0 else 'unknown'
-                name = f'group-{group}-task-{task}.bundle-failure.json' if args.mode == 'run' else 'submission.bundle-failure.json'
+                if args.mode == 'run':
+                    name = (f'group-{group}-task-{task}.bundle-failure.json' if args.group is not None
+                            else f'trajectory-{task}.bundle-failure.json')
+                else:
+                    name = 'submission.bundle-failure.json'
                 marker = Path(args.bundle).parent/name
                 with marker.open('x'):
                     pass
@@ -104,8 +108,13 @@ def main(argv=None):
                 stream.write(render_payload(bundle, args.bundle))
             result = {'payload': args.output, 'bundle_identity': bundle['identity'], 'launch_authorized': False}
         elif args.mode == 'check':
-            result = {'bundle_identity': bundle['identity'], 'selected_cases': len(bundle['cases']) if bundle['schema'] == 'recipe-case-submission-v1' else len(bundle['resolved']['trajectories']),
-                      'launch_authorized': False, 'runtime_acceptance': 'requires authorized runtime check'}
+            result = {'bundle_identity': bundle['identity'], 'launch_authorized': False,
+                      'runtime_acceptance': 'requires authorized runtime check'}
+            if bundle['schema'] == 'recipe-case-submission-v1':
+                result.update(selected_cases=sum('training' in case['commands'] for case in bundle['cases']),
+                              declared_cases=len(bundle['cases']))
+            else:
+                result['trajectories'] = len(bundle['resolved']['trajectories'])
         elif args.mode == 'submit':
             result = _submit(bundle, args)
         else:

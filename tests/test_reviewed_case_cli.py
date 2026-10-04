@@ -65,3 +65,19 @@ def test_wrong_bundle_records_group_specific_failures_before_runner(tmp_path, mo
         assert receipt['status'] == 'failed' and receipt['stage'] == 'bundle-preflight'
         assert receipt['bundle_path'] == str(path)
     assert len(list(tmp_path.glob('*.bundle-failure.json'))) == 2
+
+
+@pytest.mark.parametrize('case_schema', [True, False])
+def test_check_preserves_legacy_count_and_selected_subset(tmp_path, monkeypatch, case_schema):
+    bundle = {'schema': 'recipe-case-submission-v1' if case_schema else 'shared-codec-submission-v1',
+              'identity': 'fixed', 'cases': [{'commands': {}}, {'commands': {'training': []}}],
+              'resolved': {'trajectories': [1, 2, 3]}}
+    path = tmp_path/'bundle.json'
+    path.write_text(json.dumps(bundle))
+    monkeypatch.setattr(cli, 'validate_bundle', lambda value: value)
+    monkeypatch.setattr(cli, 'submission_preflight', lambda value: None)
+    result = cli.main(['check', '--bundle', str(path)])
+    if case_schema:
+        assert result['selected_cases'] == 1 and result['declared_cases'] == 2
+    else:
+        assert result['trajectories'] == 3
