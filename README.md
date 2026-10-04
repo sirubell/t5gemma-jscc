@@ -26,9 +26,9 @@ uv run --locked python train.py --config configs/tasks/coco.yaml --check
 uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
 ```
 
-The check commands parse and print the configuration without loading weights or data. Model weights and datasets are downloaded on first use when online, then reused from the local cache. See [running on other machines](docs/running.md) for environment setup and Slurm.
+The check commands parse and print the configuration without loading weights or data. Ordinary task loading uses its configured local/Hub cache behavior. Recipe execution requires explicitly acquired pinned registrations and never downloads missing assets implicitly. See [running on other machines](docs/running.md) for environment setup and Slurm.
 
-The primary workflow is one task configuration per training run: `train.py` creates a run under the configured output directory, and `evaluate.py --run` evaluates that specific run. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
+The supported recorded workflow selects an exact logical root with `train.py --config ... --output ...`, then evaluates that root with `evaluate.py --run ...`. See [operations commands and resumable examples](docs/operations-workflow.md). Calls without `--output` retain the historical timestamped route. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
 
 ## Train an experiment
 
@@ -47,8 +47,8 @@ The configuration files have distinct responsibilities:
 Both task files contain `model_config: ../model.yaml`. The reference resolves relative to the task YAML, so copying a task into another directory requires adjusting that reference. There is one model/task composition level, not a recursive inheritance chain. Run either task with the same entry point:
 
 ```bash
-uv run --locked python train.py --config configs/tasks/coco.yaml
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml
+uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case
+uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
 ```
 
 Edit model.yaml to change the common design for both tasks. For a separate model experiment, copy it to a named model file and point that experiment's task YAML at the copy. Keep model/split/codec/channel sections in the model file rather than overriding them inside a task file.
@@ -108,7 +108,7 @@ W&B is optional: set `run.wandb_project` and add `--extra wandb` to `uv run --lo
 
 ## Read results and evaluate
 
-Each training invocation prints its new run directory:
+The historical timestamped route prints the following layout. The supported `--output` route saves authoritative training files under `attempts/training-0001/` and binds complete settings/checkpoint ancestry at the exact root; see [ordinary run records](docs/ordinary-runs.md):
 
 ```text
 runs/<time>-<name>-<id>/
@@ -130,7 +130,7 @@ uv run --locked python evaluate.py --run runs/<coco-run>
 uv run --locked python evaluate.py --run runs/<hellaswag-run>
 ```
 
-The checkpoint identifies the task. Both commands default to `best.pt`; use `--checkpoint last.pt` to select another saved checkpoint.
+The checkpoint identifies the task. Recorded ordinary runs default to their uniquely recorded eligible best checkpoint, with exact role/step/hash/size and attempt ancestry. Explicit `--checkpoint last.pt` selects a supplemental saved target. Recipe runs instead require their recorded frozen terminal. No route selects the newest file.
 
 COCO writes captions, CIDEr and EOS/empty/truncation rates. HellaSwag uses lm-eval to report accuracy and normalized accuracy. Default evaluations cover no-noise, -6, +6 and +18 dB with the codec active; the adopted historical recipes evaluated vanilla separately. No-noise retains the codec; vanilla bypasses both codec and channel.
 
@@ -144,14 +144,7 @@ mode: all
 vanilla: true
 ```
 
-To resume a saved experiment when needed:
-
-```bash
-uv run --locked python train.py --config configs/tasks/coco.yaml --resume runs/<coco-run>/last.pt
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --resume runs/<hellaswag-run>/last.pt
-```
-
-Resume creates a new run using the saved training recipe; the supplied YAML selects the new run name, destination and device. The data iterator restarts, so batch order is not guaranteed to reproduce an uninterrupted run. A forced Slurm timeout does not save the current step: only the most recently written checkpoint is recoverable.
+Exact ordinary continuation requires `data.num_workers: 0` **before binding** the run, a finalized parent attempt and a valid durable checkpoint. Use the [resumable YAML examples and explicit continuation commands](docs/operations-workflow.md#ordinary-training-evaluation-and-continuation). The supported `--output` route restores optimizer, schedule, scaler, RNG, data cursor and checkpoint-time selection state. A checkpoint after update 1000 resumes with update 1001; unsaved work is repeated. Unsupported loaders or incompatible state fail explicitly. Historical calls without `--output` retain iterator restart behavior and cannot consume new exact state. A forced timeout does not save the unsaved current step.
 
 ## Development and tests
 
@@ -192,6 +185,7 @@ Earlier full-weight checks completed HellaSwag training/evaluation and COCO smal
 
 For local research, start with `docs/local/research/HANDOFF.md` when present. It records current session state and points to the local Markdown Wayfinder tracker at `docs/local/research/wayfinder/codec-research/map.md`. For one task in a fresh session, follow that tracker’s `SESSION-GUIDE.md` and the assigned ticket. The tracker owns research decisions; experiment reports own evidence. These local files are ignored by Git and are not required for a fresh clone.
 
+- [Current operations commands and experiment-ticket guidance](docs/operations-workflow.md)
 - [Current defaults and historical recipe lineage](docs/current-defaults.md)
 - [COCO query-image and endpoint diagnostic](docs/coco-query-endpoint-diagnostic.md)
 - [COCO visited-generation trajectory diagnostic](docs/coco-trajectory-diagnostic.md)

@@ -30,7 +30,7 @@ presentation budgets. `selected_rows_request` is a selection request, not an
 observed eligible-row count. No scheduler is invoked. The payload equals the one
 used by `submit`; dependency ID `1` in command templates is a labeled placeholder
 for an earlier group's actual receipt. This preview covers existing recipe job
-inputs; general task/case arrays and evaluation pairing are downstream.
+inputs; the [released public recipe case arrays](#reviewed-public-recipe-case-arrays) below provide stable selected cases and own-training evaluation pairing. Ordinary-task submission arrays are not provided by this recipe interface.
 
 Bound effective settings come from `bundle.json`, so later authored YAML edits
 cannot change a queued case. Editing the bundle or prepared/config bytes fails
@@ -114,8 +114,7 @@ Terminal states are `completed`, `failed`, `cancelled`, `rejected`,
 For a grouped consumer, a terminal state asserts **all** its tasks are terminal.
 Active state updates cannot regress running/uncertain state to queued/reserved.
 A lookup failure, missing response or ambiguous scheduler match stays unresolved.
-Scheduler reconciliation, terminal receipt aggregation and general arrays belong
-to the downstream submission owner. That owner must explicitly record terminal
+The [released scheduler reconciliation](#explicit-scheduler-reconciliation-and-recovery) below consumes retained authoritative evidence and aggregates terminal task receipts. The owning operator must explicitly record terminal
 state and release; this module never infers completion from age, source checks,
 output existence or one accepted/rejected job. Crashes between receipt/registry
 writes require inspecting both durable records; default to retaining the hold.
