@@ -17,7 +17,7 @@ import yaml
 from jscc.activation_replay import canonical_digest, file_digest
 from jscc.baseline_protocol import batch_identity, read_prepared_batch
 from jscc.config import load_config
-from jscc.data.hellaswag import selection_ids
+from jscc.data.hellaswag import recipe_selection_ids
 from jscc.data.hellaswag_prompts import PromptBuilder
 from jscc.encoder_stages_preparation import _native_batch, bind_recipe_data_cache
 from jscc.experiment_recipe import resolve_recipe
@@ -87,13 +87,13 @@ def assert_batch_equal(actual, expected):
 
 
 # Generated at exact accepted foundation 1306a72fe606a9b9045513c6998f82745c545a02.
-RETAINED_VIEW_DIGESTS = ['f1426f1a8a14112fa15b5015fac6214e3dbcc98de91bf1056ce8b16ca52c619b', 'd15453dd56c425a696144013e3b1d6d601fb76dd925671d7453ff440e276d25d', '8f5efa9e457cffa23fde6e122be7ca4fbf6c7f6e7ca9f3f1d8325d479c45d8f4', '04fd1ee48d477324e0c9098a7f78c9d255ac809f3e43be679d710f61e60a45ab']
+RETAINED_VIEW_DIGESTS = ['1976451e0991a30bd88d16b3849c90aa228b24edb77fbdf1801d0f963d2fe587', '65b2b58ba15fc153bd92e512dc5ea430c3d6062221fbd8d78e24e5de96c5a16b', '08b91e4b606ea871371dd5ce573235d06a5b1668bb86b329f36021a01b7550fc', '2709234e78b7edbb5069d068d792ace77b3c96a7c8dbc510f652757259d2cc2e']
 
 
 def test_retained_batches_all_metadata_and_noise_equivalent(tmp_path):
     raw, tokenizer, model_config, config, path, fixed = fixture_cache(tmp_path)
     stream = load(description(config), path)
-    ids = selection_ids(len(raw), 4, None, 0)
+    ids = recipe_selection_ids(raw, config['data'], fixed)
     builder = PromptBuilder(raw, ids, config['data']['prompt_policy'])
     sampler = PresentationSampler(ids['train_rows'], 64, seed=20260920)
     expected = []
@@ -183,8 +183,8 @@ def test_yaml_subset_budget_seed_and_irrelevant_settings(tmp_path):
 
 
 def test_explicit_rows_and_incompatible_inputs(tmp_path):
-    _, _, _, config, path, _ = fixture_cache(tmp_path)
-    selection = selection_ids(40, 4, None, 0)
+    raw, _, _, config, path, fixed = fixture_cache(tmp_path)
+    selection = recipe_selection_ids(raw, config['data'], fixed)
     rows = selection['train_rows'][:12]
     good = load(description(config, row_ids=rows), path)
     assert good.data_ids['train_rows'] == rows
@@ -243,11 +243,36 @@ def test_tokenization_once_per_selected_row_not_per_update(tmp_path, monkeypatch
     monkeypatch.setattr(preparation, '_native_rows', record)
     stream = load(description(config, q=40), path)
     assert seen == stream.data_ids['train_rows']
-    assert len(seen) == len(set(seen)) == 36
+    count = len(stream.data_ids['train_rows'])
+    assert len(seen) == len(set(seen)) == count
     stream.views
     for index in (0, 39, 0, 20):
         stream[index]
-    assert len(seen) == 36
+    assert len(seen) == count
     for subset in (-1, 0, True):
         with pytest.raises(ValueError, match='recipe selection'):
             load(description(config, num_train=subset), path)
+
+
+def test_retained_membership_and_family_exclusions_before_subset_limit(tmp_path):
+    raw, _, _, config, _, fixed = fixture_cache(tmp_path)
+    base = recipe_selection_ids(raw, config['data'], fixed)
+    retained = {**fixed, **base}
+    retained['development']['source_family_ids'] = [raw[base['train_rows'][0]]['source_id']]
+    # Remove that fixed development family from the acquired eligible pool.
+    retained['train_rows'] = [row for row in base['train_rows']
+        if raw[row]['source_id'] not in retained['development']['source_family_ids']]
+    for seed in (0, 23):
+        data = {**config['data'], 'selection_seed': seed, 'num_train': 12}
+        ids = recipe_selection_ids(raw, data, retained)
+        assert ids['validation_rows'] == base['validation_rows']
+        assert len(ids['train_rows']) == 12
+        assert set(ids['train_rows']) <= set(retained['train_rows'])
+        forbidden = {raw[row]['source_id'] for row in ids['validation_rows']}
+        forbidden.update(retained['development']['source_family_ids'])
+        assert not {raw[row]['source_id'] for row in ids['train_rows']} & forbidden
+    excluded_family_row = base['train_rows'][0]
+    with pytest.raises(ValueError, match='explicit recipe rows'):
+        recipe_selection_ids(raw, {**config['data'], 'row_ids': [excluded_family_row]}, retained)
+    with pytest.raises(ValueError, match='retained recipe training pool'):
+        recipe_selection_ids(raw, config['data'], {**retained, 'train_rows': base['train_rows']})

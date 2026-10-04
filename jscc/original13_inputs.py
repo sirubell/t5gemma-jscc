@@ -126,7 +126,7 @@ class RecipeCachedData:
     State/scoring consumers own checkpoint and observation restoration.
     """
     def __init__(self, description, *, raw, tokenizer, model_config, cache_identity, fixed_data_ids):
-        from .data.hellaswag import selection_ids
+        from .data.hellaswag import recipe_selection_ids
         from .data.hellaswag_prompts import PromptBuilder, validate_policy
         from .encoder_stages_preparation import _native_rows
 
@@ -144,20 +144,12 @@ class RecipeCachedData:
                 or stream['total_presentations'] != self._q * 16
                 or stream.get('start_presentation', 0) != 0):
             raise ValueError('recipe stream requires exact Q native16 views starting at zero; seek by view index')
-        if (type(data['num_validation']) is not int or not 0 < data['num_validation'] < len(raw)
-                or type(data.get('selection_seed', 0)) is not int
-                or (data.get('num_train') is not None
-                    and (type(data['num_train']) is not int or data['num_train'] <= 0))):
-            raise ValueError('recipe selection requires integer seed and positive subset/holdout sizes')
-        ids = selection_ids(len(raw), data['num_validation'], data.get('num_train'), data.get('selection_seed', 0))
-        if 'row_ids' in data:
-            rows = data['row_ids']
-            if (data.get('num_train') is not None or not isinstance(rows, list) or not rows
-                    or any(type(row) is not int or not 0 <= row < len(raw) for row in rows)
-                    or len(set(rows)) != len(rows) or not set(rows).isdisjoint(ids['validation_rows'])):
-                raise ValueError('explicit recipe rows must be unique, in range and exclude selection holdout')
-            ids['train_rows'] = list(rows)
+        ids = recipe_selection_ids(raw, data, fixed_data_ids)
         self._data_ids = {**copy.deepcopy(fixed_data_ids), **ids}
+        for partition in ('train', 'validation'):
+            key = f'{partition}_source_family_ids'
+            if key in self._data_ids:
+                self._data_ids[key] = [raw[row]['source_id'] for row in ids[f'{partition}_rows']]
         self._policy = copy.deepcopy(data['prompt_policy'])
         validate_policy(self._policy, data['max_length'])
         if not tokenizer.is_fast:

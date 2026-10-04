@@ -114,3 +114,54 @@ def load_data(config, tokenizer, saved_ids=None, *, for_training=True):
     if prompt_evidence is not None:
         setattr(result, "prompt_evidence", prompt_evidence)
     return result
+
+
+def recipe_selection_ids(raw, data, fixed_ids):
+    """Select within retained eligible rows and exclude held-out source families.
+
+    A cached membership receipt keeps its selection/development holdouts fixed.
+    The YAML selection seed orders the eligible training pool; a subset limit is
+    applied after exclusions. Without saved membership, use the existing train
+    selection policy, then remove selection/development families.
+    """
+    size, seed, limit = data['num_validation'], data.get('selection_seed', 0), data.get('num_train')
+    if (type(size) is not int or not 0 < size < len(raw) or type(seed) is not int
+            or (limit is not None and (type(limit) is not int or limit <= 0))):
+        raise ValueError('recipe selection requires integer seed and positive subset/holdout sizes')
+    ids = selection_ids(len(raw), size, None, seed)
+    families = list(raw['source_id'])
+    saved_selection = fixed_ids.get('validation_rows')
+    if saved_selection is not None:
+        if (fixed_ids.get('validation_split', 'train') != 'train' or len(saved_selection) != size
+                or len(set(saved_selection)) != len(saved_selection)
+                or any(type(row) is not int or not 0 <= row < len(raw) for row in saved_selection)):
+            raise ValueError('fixed recipe selection holdout differs from requested local train split')
+        ids['validation_rows'] = list(saved_selection)
+        # Keep saved holdouts while allowing the seed to change training order.
+        ordered = list(range(len(raw)))
+        random.Random(seed).shuffle(ordered)
+    else:
+        ordered = ids['train_rows']
+    forbidden = set(families[row] for row in ids['validation_rows'])
+    forbidden.update(fixed_ids.get('development', {}).get('source_family_ids', []))
+    eligible = {row for row in ordered if families[row] not in forbidden}
+    if 'train_rows' in fixed_ids:
+        retained = fixed_ids['train_rows']
+        if (not retained or len(set(retained)) != len(retained)
+                or any(type(row) is not int or row not in eligible for row in retained)):
+            raise ValueError('retained recipe training pool violates held-out row/family exclusions')
+        eligible &= set(retained)
+    rows = [row for row in ordered if row in eligible]
+    if 'row_ids' in data:
+        explicit = data['row_ids']
+        if (limit is not None or not isinstance(explicit, list) or not explicit
+                or len(set(explicit)) != len(explicit)
+                or any(type(row) is not int or row not in eligible for row in explicit)):
+            raise ValueError('explicit recipe rows must be unique, in range and exclude selection holdout/families')
+        rows = list(explicit)
+    elif limit is not None:
+        rows = rows[:limit]
+    if not rows:
+        raise ValueError('recipe training subset is empty after held-out family exclusions')
+    ids['train_rows'] = rows
+    return ids
