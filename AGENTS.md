@@ -19,6 +19,8 @@ For research planning, implementation or experiments, read the [current handoff]
 
 ## Working conventions
 
+Use `gpt-6.1-sol` for delegated work and reviews; use `gpt-5.6-sol` when a different model is needed. This supersedes older Astra preferences.
+
 This project primarily supports the owner's research workflow. Keep the README centered on features and experiments. Put collaboration details in the channel guide and personal infrastructure details in docs/local/.
 
 Use uv. Both COCO and HellaSwag must remain visible in command documentation and task tests. Task YAMLs reference one shared model_config file; the loader saves a complete resolved configuration in every run. Put architectural variations in a named model design file rather than duplicating them inside task YAMLs.
