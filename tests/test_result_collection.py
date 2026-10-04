@@ -264,3 +264,109 @@ def test_mutated_snapshot_export_cannot_be_verified(tmp_path):
     assert result["status"] == "incomplete"
     assert result["counts"]["failed"]["count"] == 1
     assert not (destination / "exports/status.json").exists()
+
+
+def test_receipt_directory_symlink_rejects_before_copy_or_publication(tmp_path):
+    root = tmp_path / "run"
+    singleton(root)
+    snapshot, destination, external = tmp_path / "snapshot", tmp_path / "destination", tmp_path / "external"
+    prepare_snapshot(root, snapshot)
+    destination.mkdir()
+    external.mkdir()
+    (destination / "receipts").symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError):
+        collect_snapshot(snapshot, destination)
+    assert list(external.iterdir()) == []
+    assert not (destination / "files").exists()
+    assert not (destination / "collection.json").exists()
+
+
+def test_missing_referenced_companion_unknown_size_restores_exact_hash(tmp_path):
+    root = tmp_path / "run"
+    singleton(root)
+    expected = b'{"frozen":"identity"}'
+    freeze = root / "freeze.json"
+    write(root / "training.json", {"freeze": {"path": str(freeze), "sha256": hashlib.sha256(expected).hexdigest()}})
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    manifest = prepare_snapshot(root, snapshot)
+    entry = next(row for row in manifest["artifacts"] if row["path"] == "files/freeze.json")
+    assert entry["bytes"] is None and entry["sha256"] == hashlib.sha256(expected).hexdigest()
+    missing = collect_snapshot(snapshot, destination)
+    assert missing["counts"]["missing"]["unknown_bytes"] == 1
+    freeze.write_bytes(expected)
+    retry = collect_snapshot(snapshot, destination)
+    assert retry["status"] == "complete"
+    assert retry["counts"]["selected"]["unknown_bytes"] == 1
+    assert retry["counts"]["copied"]["bytes"] == len(expected)
+    assert (destination / "files/freeze.json").read_bytes() == expected
+
+
+def test_checkpoint_and_reconciliation_metadata_are_default_companions(tmp_path):
+    root = tmp_path / "run"
+    attempt = singleton(root)
+    names = ("checkpoint_000002.pt.json", "last.pt.json", "best.pt.json", "reconciliation.json")
+    for name in names:
+        write(attempt / name, {"status": "partial", "identity": name})
+    manifest = prepare_snapshot(root, tmp_path / "snapshot")
+    paths = {row["path"] for row in manifest["artifacts"]}
+    assert all("files/attempts/training-0001/" + name in paths for name in names)
+
+
+def test_failed_copy_counts_actual_staged_bytes_and_expected_failure_bytes(tmp_path):
+    root = tmp_path / "run"
+    attempt = singleton(root)
+    source = attempt / "best.pt"
+    source.write_bytes(b"original")
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    prepare_snapshot(root, snapshot, selected=["attempts/training-0001/best.pt"])
+    changed = b"changed-longer"
+    source.write_bytes(changed)
+    receipt = collect_snapshot(snapshot, destination)
+    assert receipt["status"] == "incomplete"
+    assert receipt["counts"]["failed"]["bytes"] == len(b"original")
+    assert receipt["counts"]["copied"]["bytes"] >= len(changed)
+    failed = next(row for row in receipt["artifacts"] if row["status"] == "failed")
+    assert failed["transferred_bytes"] == len(changed)
+    assert not (destination / "files/attempts/training-0001/best.pt").exists()
+
+
+def test_manifest_mutation_rejects_before_destination_creation(tmp_path):
+    root = tmp_path / "run"
+    singleton(root)
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    prepare_snapshot(root, snapshot)
+    path = snapshot / "manifest.json"
+    manifest = read(path)
+    manifest["artifacts"][0]["sha256"] = "0" * 64
+    write(path, manifest)
+    with pytest.raises(ValueError):
+        collect_snapshot(snapshot, destination)
+    assert not destination.exists()
+
+
+def test_source_growth_during_copy_rejects_atomic_publication(tmp_path, monkeypatch):
+    """Inject growth at the streaming boundary; no thread timing assumptions."""
+    from pathlib import Path
+
+    root = tmp_path / "run"
+    attempt = singleton(root)
+    source = attempt / "best.pt"
+    source.write_bytes(b"initial")
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    prepare_snapshot(root, snapshot, selected=["attempts/training-0001/best.pt"])
+    original = Path.open
+
+    def grow(path, mode="r", *args, **kwargs):
+        opened = original(path, mode, *args, **kwargs)
+        if path == source and mode == "rb":
+            with original(source, "ab") as writer:
+                writer.write(b"growth")
+        return opened
+
+    monkeypatch.setattr(Path, "open", grow)
+    receipt = collect_snapshot(snapshot, destination)
+    assert receipt["status"] == "incomplete"
+    assert receipt["counts"]["failed"]["count"] == 1
+    assert not (destination / "files/attempts/training-0001/best.pt").exists()
+    monkeypatch.setattr(Path, "open", original)
+    assert source.read_bytes() == b"initialgrowth"

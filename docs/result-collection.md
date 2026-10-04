@@ -33,7 +33,8 @@ compact recorded content, including failure events. Bulk per-item and sparse
 full-batch audit fields stay in the referenced raw file.
 
 Small frozen configs and existing source/runtime/input/checkpoint identity,
-status, timing, attempt, campaign and result/request records are copied under
+status, timing, attempt, campaign, durable checkpoint receipts, reconciliation
+and result/request records are copied under
 `files/<source-relative-path>`. Input ID lists stay at source with exact hash,
 size and retrieval reference in `inputs.json`. Recorded tensor hashes are
 metadata and do not mean copied tensor verification or backup. Ordinary current
@@ -69,7 +70,10 @@ Final frozen raw metrics must match their recorded digest.
 `collection.json` and immutable `receipts/<pass-id>.json` record selected,
 copied, verified, reused, missing and failed counts/bytes, unknown byte counts,
 snapshot/destination identity, exact error paths and elapsed seconds. Known
-source byte totals survive failures. Unchanged verified destination copies are
+source byte totals survive failures. Copied byte counts include bytes staged even
+when snapshot verification fails; verified/reused byte counts are actual readback
+sizes. A recorded hash with unknown size can recover, while its selected byte
+count remains explicitly unknown. Unchanged verified destination copies are
 reused only after hashing them again; damaged copies are recopied. Publication
 uses temporary files, expected source-byte checks and destination readback
 verification. Partial passes retain all earlier receipts and successful copies.

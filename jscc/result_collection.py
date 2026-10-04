@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import tempfile
 import time
 from typing import Any, Iterable
@@ -25,7 +24,7 @@ COMPANIONS = {
     'counts.json', 'training.json', 'checkpoint.json', 'attempt.json', 'completion.json',
     'run.json', 'campaign.json', 'freeze.json', 'checkpoints.json', 'publication.json',
     'eligibility.json', 'gate.json', 'request.json', 'result.json', 'results.json',
-    'overrides.yaml', 'checkpoint_timing.jsonl',
+    'overrides.yaml', 'checkpoint_timing.jsonl', 'reconciliation.json',
 }
 # These bulk fields have exact original-file references, never an inferred value.
 REMOTE_DIRECTORIES = {'cache', 'data', 'model', 'models', 'assets', 'debug'}
@@ -122,7 +121,7 @@ def prepare_snapshot(root: Path, snapshot: Path, *, selected: Iterable[str] = ()
         for path in files:
             relative = path.relative_to(root).as_posix()
             ref = _reference(path, root, source_uri)
-            default_companion = path.name in COMPANIONS and not REMOTE_DIRECTORIES.intersection(path.relative_to(root).parts[:-1])
+            default_companion = (path.name in COMPANIONS or path.name.endswith('.pt.json')) and not REMOTE_DIRECTORIES.intersection(path.relative_to(root).parts[:-1])
             if default_companion or relative in choices:
                 _inside(path, root)
                 before = _stamp(path)
@@ -132,7 +131,7 @@ def prepare_snapshot(root: Path, snapshot: Path, *, selected: Iterable[str] = ()
                 artifacts.append({'path': 'files/' + relative, 'source': str(path),
                                   'sha256': sha, 'bytes': size, 'kind': 'companion' if default_companion else 'explicit',
                                   'retrieval_ref': ref})
-                if path.suffix == '.json' and path.name in COMPANIONS:
+                if path.suffix == '.json' and default_companion:
                     value, identity = _read_stable(path)
                     if identity['sha256'] != sha:
                         raise ValueError(f'source changed during snapshot: {path}')
@@ -301,22 +300,33 @@ def prepare_snapshot(root: Path, snapshot: Path, *, selected: Iterable[str] = ()
         raise
 
 
-def _copy_verified(source: Path, target: Path, expected: dict) -> None:
-    """One descriptor, expected snapshot hash, atomic publication, readback hash."""
+def _matches(identity: tuple[str, int], expected: dict) -> bool:
+    return identity[0] == expected['sha256'] and (expected['bytes'] is None or identity[1] == expected['bytes'])
+
+
+def _copy_verified(source: Path, target: Path, expected: dict, row: dict) -> None:
+    """One descriptor, optional known size, atomic publication and readback hash."""
     before = _stamp(source)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.copy-', dir=target.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, 'wb') as out, source.open('rb') as incoming:
-            shutil.copyfileobj(incoming, out, 1024 * 1024)
+            digest = hashlib.sha256()
+            row['copied'] = True
+            for block in iter(lambda: incoming.read(1024 * 1024), b''):
+                out.write(block)
+                digest.update(block)
+                row['transferred_bytes'] += len(block)
             out.flush()
             os.fsync(out.fileno())
-        if before != _stamp(source) or _digest(temporary) != (expected['sha256'], expected['bytes']):
+        if before != _stamp(source) or not _matches((digest.hexdigest(), row['transferred_bytes']), expected):
             raise ValueError(f'selected source differs from snapshot: {source}')
         os.replace(temporary, target)
-        if _digest(target) != (expected['sha256'], expected['bytes']):
+        identity = _digest(target)
+        if not _matches(identity, expected):
             raise ValueError(f'destination verification failed: {target}')
+        row['verified_bytes'] = identity[1]
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -334,6 +344,9 @@ def collect_snapshot(snapshot: Path, destination: Path) -> dict:
     if destination.is_relative_to(Path(manifest['root'])) or destination.is_relative_to(snapshot) or snapshot.is_relative_to(destination):
         raise ValueError('destination must be separate from source and snapshot')
     destination.mkdir(parents=True, exist_ok=True)
+    # Receipt parents are also write boundaries; reject escapes before copying.
+    _inside(destination / 'receipts', destination)
+    _inside(destination / 'collection.json', destination)
     lock = destination / '.collection-lock'
     lock.mkdir()
     receipt: dict[str, Any] = {'schema': 'result-collection-receipt-v1', 'snapshot_id': manifest['snapshot_id'],
@@ -342,18 +355,17 @@ def collect_snapshot(snapshot: Path, destination: Path) -> dict:
         'limits': 'Collection is separate from training/evaluation/scientific success; unselected tensor hashes are metadata only.'}
     try:
         for entry in manifest['artifacts']:
-            row = {**entry, 'status': 'failed', 'copied': False, 'reused': False}
+            row = {**entry, 'status': 'failed', 'copied': False, 'reused': False, 'transferred_bytes': 0, 'verified_bytes': None}
             receipt['artifacts'].append(row)
             try:
                 relative = _relative(entry['path'])
                 target = _inside(destination / relative, destination)
-                expected = entry['sha256'], entry['bytes']
                 if entry['sha256'] is None:
                     row.update(status='missing', error='No selected snapshot bytes available; bind a new snapshot after acquisition')
-                elif target.is_file() and _digest(target) == expected:
-                    row.update(status='verified', reused=True)
+                elif target.is_file() and _matches(identity := _digest(target), entry):
+                    row.update(status='verified', reused=True, verified_bytes=identity[1])
                 else:
-                    _copy_verified(Path(entry['source']), target, entry)
+                    _copy_verified(Path(entry['source']), target, entry, row)
                     row.update(status='verified', copied=True)
             except FileNotFoundError as error:
                 row.update(status='missing', error=str(error))
@@ -362,14 +374,15 @@ def collect_snapshot(snapshot: Path, destination: Path) -> dict:
         for category in ('selected', 'copied', 'verified', 'reused', 'missing', 'failed'):
             rows = [r for r in receipt['artifacts'] if category == 'selected' or
                     (r['status'] == category if category in ('verified', 'missing', 'failed') else r[category])]
-            receipt['counts'][category] = {'count': len(rows), 'bytes': sum(r['bytes'] or 0 for r in rows),
-                                           'unknown_bytes': sum(r['bytes'] is None for r in rows)}
+            field = 'transferred_bytes' if category == 'copied' else 'verified_bytes' if category in ('verified', 'reused') else 'bytes'
+            receipt['counts'][category] = {'count': len(rows), 'bytes': sum(r[field] or 0 for r in rows),
+                                           'unknown_bytes': sum(r[field] is None for r in rows)}
         receipt['status'] = 'complete' if not any(r['status'] != 'verified' for r in receipt['artifacts']) else 'incomplete'
         receipt['elapsed_seconds'] = time.perf_counter() - begun
-        receipt_path = destination / 'receipts' / f"{receipt['pass_id']}.json"
+        receipt_path = _inside(destination / 'receipts' / f"{receipt['pass_id']}.json", destination)
         receipt['receipt'] = str(receipt_path)
         write_json_atomic(receipt_path, receipt)
-        write_json_atomic(destination / 'collection.json', receipt)
+        write_json_atomic(_inside(destination / 'collection.json', destination), receipt)
         return receipt
     finally:
         lock.rmdir()
