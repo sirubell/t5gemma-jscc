@@ -34,7 +34,15 @@ def main(argv=None):
     parser.add_argument('--resume-sha256')
     parser.add_argument('--resume-size', type=int)
     parser.add_argument('--recipe', help='Optional YAML contract; must match the retained prepared execution')
+    parser.add_argument('--resolved', help='Bound submission bundle; complete resolved recipe is checked')
+    parser.add_argument('--resolved-identity')
+    parser.add_argument('--trajectory', type=int)
     args = parser.parse_args(argv)
+    if args.resolved:
+        if args.recipe or not args.resolved_identity or args.trajectory is None or args.mode == 'bind':
+            parser.error('--resolved requires identity/trajectory and cannot combine with YAML or bind')
+    elif args.resolved_identity is not None or args.trajectory is not None:
+        parser.error('resolved identity/trajectory require --resolved')
     if args.mode == 'bind':
         if not args.inputs or not args.inputs_sha256:
             parser.error('bind requires --inputs and --inputs-sha256')
@@ -64,6 +72,28 @@ def main(argv=None):
             if len(matches) != 1:
                 raise ValueError('recipe must declare the exact retained width and ratio')
             validate_retained_recipe(matches[0], plan, config, manifest['observation_request'])
+        if args.resolved:
+            from jscc.recipe_submission import validate_bundle
+            from jscc.experiment_recipe import validate_retained_recipe
+            from copy import deepcopy
+            bundle = validate_bundle(json.loads(Path(args.resolved).read_text()))
+            if bundle['identity'] != args.resolved_identity:
+                raise ValueError('explicit resolved identity differs')
+            if not 0 <= args.trajectory < len(bundle['resolved']['trajectories']):
+                raise ValueError('resolved trajectory index differs')
+            description = deepcopy(bundle['resolved']['trajectories'][args.trajectory])
+            if (description['width'], description['ratio']) != (plan.width, plan.ratio):
+                raise ValueError('resolved trajectory differs')
+            if bundle['prepared']['sha256'] != args.prepared_sha256:
+                raise ValueError('resolved prepared digest differs')
+            if args.mode != 'check' and bundle['source']['commit'] != args.approved_source:
+                raise ValueError('resolved runtime source differs')
+            # Login/compute aliases name the same model; compare canonical paths.
+            from jscc.recipe_submission import normalize_path
+            if normalize_path(bundle['model']['path']) != normalize_path(config['model']['name']):
+                raise ValueError('resolved model differs')
+            description['config']['model']['name'] = config['model']['name']
+            validate_retained_recipe(description, plan, config, manifest['observation_request'])
         if args.mode != 'check':
             if not args.output or not args.approved_source:
                 parser.error('execution requires --output and --approved-source')
