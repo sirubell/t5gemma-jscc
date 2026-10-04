@@ -2,9 +2,18 @@
 
 Run commands from the project root after `uv sync --locked`. Training, evaluation and live submission require their applicable scope and budget; these examples are not launch receipts. [Running](running.md) covers local/Colab/CUDA setup. Local research starts at `docs/local/research/HANDOFF.md`, then the session guide and assigned ticket; those ignored files are optional for a fresh clone.
 
+Acquire any missing pinned model/tokenizer/data bytes in a separately scoped setup step using [the existing cache/setup guide](running.md). Then keep these normal operations cache-only:
+
+```bash
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+```
+
+The existing ordinary loaders honor this environment; missing cached inputs fail instead of starting an implicit acquisition. Recipe commands also require their acquired registration receipts. `--check` resolves settings without loading model/data, and neither setup nor these examples grants training/submission authority.
+
 ## Ordinary training, evaluation and continuation
 
-Use explicit fresh roots for the supported recorded COCO and HellaSwag route. The complete [resumable examples](../configs/operations/README.md) use the shared model design, with `data.num_workers: 0` set **before** binding. COCO retains supplied scientific settings. The named HellaSwag variant additionally sets `training.presentation_stream: null`, replacing the default fixed-presentation stream with the ordinary map loader; this changes sampling/presentation policy and requires a fresh scientific identity. Prompts/objectives/update budgets and paired randomness are preserved. Supplied `configs/tasks/coco.yaml` remains valid fresh training with four workers, but cannot exactly continue. The standard HellaSwag default also remains supported fresh training, but its fixed-presentation loader cannot exactly continue. A later YAML edit cannot add a cursor to an existing run.
+Use explicit fresh roots for the supported recorded COCO and HellaSwag route. The complete [resumable examples](../configs/operations/README.md) use the shared model design, with `data.num_workers: 0` set **before** binding. The named COCO example adds a nonterminal save at100 while retaining selection at500 and the500-update budget; this extra save is an explicit example policy. COCO retains supplied scientific settings. The named HellaSwag variant additionally sets `training.presentation_stream: null`, replacing the default fixed-presentation stream with the ordinary map loader; this changes sampling/presentation policy and requires a fresh scientific identity. Prompts/objectives/update budgets and paired randomness are preserved. Supplied `configs/tasks/coco.yaml` remains valid fresh training with four workers, but cannot exactly continue. The standard HellaSwag default also remains supported fresh training, but its fixed-presentation loader cannot exactly continue. A later YAML edit cannot add a cursor to an existing run.
 
 ```bash
 uv run --locked python train.py --config configs/operations/coco-resumable.yaml --check
@@ -21,7 +30,7 @@ Continuation is a separate operation after the parent is finalized, using a chec
 
 ```bash
 uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case \
-  --resume runs/coco-case/attempts/training-0001/last.pt
+  --resume runs/coco-case/attempts/training-0001/step_000100.pt
 uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case \
   --resume runs/hellaswag-case/attempts/training-0001/step_001000.pt
 ```

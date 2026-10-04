@@ -1,11 +1,13 @@
 # Ordinary tasks at explicit experiment roots
 
+Populate pinned caches in a separately authorized setup step, then set `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1` for the recorded commands below. This uses the existing ordinary loader's cache-only environment support; missing bytes fail rather than trigger acquisition. [Operations setup and commands](operations-workflow.md) describe the same shell configuration.
+
 Both supported tasks accept an exact fresh output root:
 
 ```bash
 uv run --locked python train.py --config configs/tasks/coco.yaml --output runs/coco-case
 uv run --locked python evaluate.py --run runs/coco-case
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --output runs/hellaswag-case
+uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
 uv run --locked python evaluate.py --run runs/hellaswag-case
 ```
 
@@ -65,16 +67,16 @@ Downstream owners consume these commits before editing shared CLI/engine files. 
 
 ## Exact ordinary continuation
 
-Set `data.num_workers: 0` in the task YAML **before starting** a resumable ordinary run. HellaSwag's supplied ordinary task already uses zero workers; the supplied COCO task uses four workers and needs this YAML change for exact continuation. Normal fresh training remains supported with multiple workers, fixed-presentation studies and other custom channels, but their metadata states the concrete unsupported-continuation reason. Their checkpoints do not qualify for this exact route. A previously created unsupported run cannot acquire a cursor by changing its YAML later.
+Use the [named resumable examples](../configs/operations/README.md) **before binding a fresh root**. COCO sets `data.num_workers: 0` and adds an explicit nonterminal save at100, preserving selection and the500-update budget. HellaSwag's supplied default already uses zero workers but its fixed-presentation loader is fresh-only; the named example sets `training.presentation_stream: null`, declaring an ordinary map-loader sampling policy and fresh scientific identity while preserving prompts/objective/budget. Supplied task defaults remain unchanged. Normal fresh training remains supported with multiple workers, fixed-presentation studies and other custom channels, but their metadata states the concrete unsupported-continuation reason. Their checkpoints do not qualify for this exact route. A previously created unsupported run cannot acquire a cursor by changing its YAML later.
 
 ```bash
-# COCO or HellaSwag, using an unchanged complete effective task YAML:
-uv run --locked python train.py --config my-coco.yaml --output runs/coco-case
-uv run --locked python train.py --config my-coco.yaml --output runs/coco-case \
-  --resume runs/coco-case/attempts/training-0001/last.pt
+# Bind each complete named YAML, then separately continue its durable nonterminal save:
+uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case
+uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case \
+  --resume runs/coco-case/attempts/training-0001/step_000100.pt
 
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --output runs/hellaswag-case
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --output runs/hellaswag-case \
+uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
+uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case \
   --resume runs/hellaswag-case/attempts/training-0001/step_001000.pt
 ```
 

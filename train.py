@@ -66,11 +66,12 @@ def main(argv=None):
                 raise ValueError('unknown recipe case')
             print(yaml.safe_dump(resolved, sort_keys=False))
             return resolved
+        if args.run_path_file:
+            Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
         run = train_recipe(args.config, args.output, registrations=args.registrations, selected=args.case,
             attempt_id=args.attempt, resume=args.resume, prepare_only=args.prepare_only,
             timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid, finalize_terminal=args.finalize_terminal)
         if args.run_path_file:
-            Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
             Path(args.run_path_file).write_text(str(run)+"\n")
         return recipe_run_record(run)
     if (args.case or args.attempt != "0001" or args.registrations or args.prepare_only or args.device_uuid

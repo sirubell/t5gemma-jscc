@@ -44,6 +44,7 @@ training:
   min_delta: 0.005
   log_every: 50
   save_steps:
+  - 100
   - 500
   schedule_steps: 500
   selection_steps:

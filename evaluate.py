@@ -26,6 +26,8 @@ def main(argv=None):
             parser.error("evaluation output link already exists")
     if args.expected_step is not None and not args.checkpoint:
         parser.error("expected-step requires an explicit checkpoint")
+    if args.output_path_file:
+        Path(args.output_path_file).parent.mkdir(parents=True, exist_ok=True)
     from jscc.evaluation import evaluate
     from jscc.ordinary_runs import evaluate_run, is_recorded_root
     from jscc.recipe_evaluation import evaluate_recipe_run, is_recipe_run
@@ -42,7 +44,6 @@ def main(argv=None):
     else:
         output = evaluate(args.run, args.checkpoint, args.config, expected_step=args.expected_step)
     if args.output_path_file:
-        Path(args.output_path_file).parent.mkdir(parents=True, exist_ok=True)
         with Path(args.output_path_file).open("x") as handle:
             handle.write(str(output) + "\n")
     if recipe:
