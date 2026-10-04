@@ -47,6 +47,17 @@ literals. The integrated learner honors the resolved coefficients.
 
 ## Acquire and prepare
 
+Acquire the existing model once, after obtaining any required target authority:
+
+```bash
+uv run --locked python scripts/experiment_recipe.py --acquire-model \
+  --model-path /existing/pinned/backbone --model-revision EXACT_MODEL_REVISION \
+  --output /fresh/model-binding.json
+```
+
+This is the full-byte acquisition boundary. Reuse its checksum-bound JSON for
+new source/recipe prepared receipts. Replacement, transfer or explicit byte audit
+requires new acquisition evidence; a source receipt never repeats weight hashing.
 Acquire immutable dataset/tokenizer assets once with
 `bind_recipe_data_cache`; bind existing initializer tensor references and fixed
 scoring templates. These are Python acquisition APIs for new assets, not edits
@@ -55,6 +66,7 @@ required between recipes. A small `assets.json` supplies:
 ```json
 {
   "model_path": "/existing/pinned/backbone",
+  "model_binding": {"path": "/existing/model-binding.json", "sha256": "EXACT_SHA256"},
   "cache_manifest": "/existing/cache.json",
   "cache_sha256": "EXACT_SHA256",
   "initializations": {
@@ -88,8 +100,8 @@ cache checksum, initializers, templates and complete effective YAML resolution.
 Operational model paths and acquired asset bindings are saved in the effective
 config and included in its identity. A new source needs a fresh small prepared
 receipt; it reuses unchanged model/cache/initializer bytes. Frozen source and
-historical receipts are never relabeled. Check is a small receipt/presence/size
-preflight; it does not load weights or assert target runtime acceptance.
+historical receipts are never relabeled. Check validates small receipts, required asset presence/sizes and initializer
+bytes. It does not load backbone weights or assert target runtime acceptance.
 
 ## Train, resume and evaluate
 

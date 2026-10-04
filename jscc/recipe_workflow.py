@@ -13,7 +13,7 @@ import torch
 from .activation_replay import canonical_digest, file_digest
 from .experiment_recipe import resolve_recipe, resolve_locations
 from .original13_inputs import load_recipe_cached_data
-from .original13_provenance import (stages_source_inventory, bind_model_assets,
+from .original13_provenance import (stages_source_inventory,
                                     verify_model_assets, verify_original13_execution_source)
 from .recipe_observation_policy import recipe_observation_identity, scoring_template
 from .recipe_plan import RecipePlan
@@ -50,6 +50,8 @@ def workflow_resolution(resolved, manifest):
     """Bind operational asset paths into the persisted complete recipe config."""
     result = deepcopy(resolved)
     assets = manifest['model_assets']
+    if json.loads(_read_reference(manifest['model_binding']).read_text()) != assets:
+        raise ValueError('recipe acquired model binding reference differs')
     metadata = json.loads(_read_reference(manifest['model_config']).read_text())
     for item in result['trajectories']:
         config = item['config']
@@ -117,7 +119,7 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
     return bound
 
 
-def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, cache_manifest, cache_sha256,
+def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_binding, cache_manifest, cache_sha256,
                          initializations, observation_template, terminal_template, study_pairing_id,
                          output, synthetic=False):
     """Acquire a new source receipt reusing already acquired immutable assets."""
@@ -129,13 +131,14 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, cache_ma
     resolved = resolve_recipe(recipe_path, model_config_path=config_path)
     revision = resolved['trajectories'][0]['config']['model']['revision']
     cache_ref = {'path': str(Path(cache_manifest).resolve()), 'sha256': cache_sha256}
-    cache = json.loads(_read_reference(cache_ref).read_text())
-    assets = bind_model_assets(model_path, revision, tokenizer_files=cache['tokenizer']['files'], production=not synthetic)
+    assets = json.loads(_read_reference(model_binding).read_text())
+    if assets['path'] != str(model_path) or assets['revision'] != revision:
+        raise ValueError('recipe acquired model binding path/revision differs')
     inventory = recipe_source_inventory()
     manifest = {'schema': SCHEMA, 'source_commit': source_state()['revision'],
         'source_inventory': inventory, 'source_identity': canonical_digest(inventory),
         'synthetic_cpu': synthetic, 'study_pairing_id': study_pairing_id,
-        'model_assets': assets, 'model_config': {'path': str(config_path), 'sha256': file_digest(config_path)},
+        'model_assets': assets, 'model_binding': deepcopy(model_binding), 'model_config': {'path': str(config_path), 'sha256': file_digest(config_path)},
         'cache': cache_ref, 'initializations': deepcopy(initializations),
         'observation_template': deepcopy(observation_template), 'terminal_template': deepcopy(terminal_template),
         'resolved': resolved, 'launch_authorized': False}

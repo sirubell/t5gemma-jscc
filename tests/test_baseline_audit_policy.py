@@ -126,7 +126,7 @@ def test_sparse_captures_final_and_rejects_invalid_tokens_before_attempt():
         make_learner(toy_model(where="after_final_norm"), "silent")
 
 
-def test_default_keeps_original_identity_hashing_and_full_capture(monkeypatch):
+def test_default_hashes_identity_once_and_keeps_full_capture(monkeypatch):
     learner = make_learner(toy_model(where="after_final_norm"))
     original_identity = baseline_protocol.batch_identity
     calls = []
@@ -137,6 +137,6 @@ def test_default_keeps_original_identity_hashing_and_full_capture(monkeypatch):
     monkeypatch.setattr(baseline_protocol, "bind_batch_identity",
                         lambda *_: pytest.fail("default must not opt into prepared identity binding"))
     event = learner.update([batch()])
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert learner.last_draws[0]["draws"]
     assert "audit" not in event["payload"]

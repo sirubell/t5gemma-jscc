@@ -52,6 +52,23 @@ def joined_assets(tmp_path, monkeypatch):
     cache = bind_recipe_data_cache(dataset_path=arrow, assets=assets,
         dataset_name=config['data']['name'], dataset_revision=config['data']['revision'],
         model_revision='tiny-workflow', fixed_data_ids=fixed, output=tmp_path/'short-cache.json')
+    from jscc import original13_provenance as provenance
+    from scripts.experiment_recipe import main as acquire_cli
+    original_digest = provenance.file_digest
+    weight_hashes = []
+    def measured_digest(path):
+        path = Path(path)
+        if path.suffix in ('.safetensors', '.bin') and path.parent == assets:
+            weight_hashes.append(path.name)
+        return original_digest(path)
+    monkeypatch.setattr(provenance, 'file_digest', measured_digest)
+    model_binding_path = tmp_path/'model-binding.json'
+    started = perf_counter()
+    acquire_cli(['--acquire-model', '--model-path', str(assets), '--model-revision', 'tiny-workflow',
+                 '--synthetic-cpu', '--output', str(model_binding_path)])
+    (tmp_path/'model-acquisition-cost.json').write_text(json.dumps({
+        'seconds': perf_counter()-started, 'weight_files_hashed': list(weight_hashes)}))
+    model_binding = {'path': str(model_binding_path), 'sha256': file_digest(model_binding_path)}
     from jscc.models.codec import Codec
     codec_config = deepcopy(config['codec'])
     codec_config['bottleneck_dim'] = 8
@@ -72,7 +89,7 @@ def joined_assets(tmp_path, monkeypatch):
     manager = TaskManager()
     monkeypatch.setattr('lm_eval.tasks.TaskManager', lambda: manager)
     return dict(root=tmp_path, task=task, model=assets, cache=cache, initializer=initializer,
-                tokenizer=tokenizer, fixed=fixed)
+                tokenizer=tokenizer, fixed=fixed, model_binding=model_binding, weight_hashes=weight_hashes)
 
 
 def workflow(assets, name, *, retained=False, reverse=False, subset=12, seed=23, optimizer=False):
@@ -120,7 +137,7 @@ def workflow(assets, name, *, retained=False, reverse=False, subset=12, seed=23,
     prepared = root/'prepared.json'
     started = perf_counter()
     manifest = bind_recipe_workflow(recipe_path, model_config_path=assets['model']/'config.json',
-        model_path=assets['model'], cache_manifest=cache, cache_sha256=file_digest(cache),
+        model_path=assets['model'], model_binding=assets['model_binding'], cache_manifest=cache, cache_sha256=file_digest(cache),
         initializations=assets['initializer'],
         observation_template={'path': str(root/'observation.json'), 'sha256': file_digest(root/'observation.json')},
         terminal_template={'path': str(root/'terminal.json'), 'sha256': file_digest(root/'terminal.json')},
@@ -356,9 +373,23 @@ def test_acquired_observation_binding_rejects_self_checksummed_wrong_template(jo
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match='fixed template/cache membership'):
         bind_recipe_workflow(recipe_path, model_config_path=joined_assets['model']/'config.json',
-            model_path=joined_assets['model'], cache_manifest=manifest['cache']['path'],
+            model_path=joined_assets['model'], model_binding=joined_assets['model_binding'], cache_manifest=manifest['cache']['path'],
             cache_sha256=manifest['cache']['sha256'], initializations=manifest['initializations'],
             observation_template={'path': str(path), 'sha256': file_digest(path)},
             terminal_template=manifest['terminal_template'], study_pairing_id='joined-tiny',
             output=root/'bad-prepared.json', synthetic=True)
     assert not (root/'bad-prepared.json').exists()
+
+
+
+def test_one_time_model_acquisition_cli_and_repeated_prepare_never_rehash_weights(joined_assets):
+    assert joined_assets['weight_hashes'] == ['model.safetensors']
+    joined_assets['weight_hashes'].clear()
+    first = workflow(joined_assets, 'prepare-one')
+    second = workflow(joined_assets, 'prepare-two', reverse=True, subset=20, seed=2, optimizer=True)
+    assert first[4]['model_binding'] == second[4]['model_binding'] == joined_assets['model_binding']
+    assert first[4]['model_assets'] == second[4]['model_assets']
+    assert joined_assets['weight_hashes'] == []
+    (joined_assets['root']/'repeated-prepare-cost.json').write_text(json.dumps({
+        'fresh_preparations': 2, 'weight_files_hashed': list(joined_assets['weight_hashes']),
+        'bindings': [str(first[3]), str(second[3])]}))

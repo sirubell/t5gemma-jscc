@@ -55,6 +55,18 @@ Edit model.yaml to change the common design for both tasks. For a separate model
 
 CPU smoke files use `runtime: {device: cpu, dtype: float32}` to override only execution settings. After loading, the run receives a complete resolved configuration with no dependency on the source YAML files. Legacy flat configurations remain readable.
 
+## Train shared codec recipes
+
+The [YAML recipe workflow](docs/experiment-recipes.md) trains one direct-affine
+codec across an ordered list of HellaSwag encoder/decoder locations. YAML controls
+per-location update budgets, cached-row subsets, optimizer phases, saves and fixed
+observation/terminal requests. The same source-bound prepared receipt supports
+training, exact continuation, reporting and mocked submission. Start with
+[the retained original13 example](configs/recipes/original13.yaml) or
+[the changed recipe example](configs/recipes/changed.yaml); acquired model/data
+assets and explicit execution authority are required. COCO keeps the task workflow
+above.
+
 ## Optionally plan multiple experiments
 
 Studies list task recipes, seeds and named model overrides. Both tasks use the same variation list. Previewing is the default and does not load a model or submit jobs:
