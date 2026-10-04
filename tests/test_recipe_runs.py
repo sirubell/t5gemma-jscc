@@ -75,7 +75,7 @@ def test_public_retained_recipe_counts_and_terminal(joined_assets, monkeypatch):
     assert counts['processed_presentations'] == 8320
     terminal = read(root/'cases/width-8-ratio-50/checkpoint.json')
     assert terminal['role'] == 'terminal' and terminal['step'] == 520
-    assert terminal['sha256'] == file_digest(terminal['path'])
+    assert terminal['sha256'] == file_digest(Path(terminal['path']))
     assert terminal['training_attempt'] == str(path)
     assert terminal_payload(campaign)['metadata']['completed_updates'] == 520
     (root/'test-cost.json').write_text(json.dumps({'seconds': perf_counter()-started,
@@ -173,6 +173,13 @@ main(argv)
         public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50',
                '--resume', saved['path'], '--attempt', '0002', *reconciliation)
         assert read(attempt/'attempt.json')['status'] == 'interrupted'
+        if hard_death:
+            from jscc.recipe_runs import reconcile_recipe_attempt
+            receipt = (attempt/'reconciliation.json').read_bytes()
+            with pytest.raises(ValueError, match='unresolved running attempt'):
+                reconcile_recipe_attempt(interrupted, 'width-8-ratio-50', '0001')
+            assert (attempt/'reconciliation.json').read_bytes() == receipt
+            assert not (interrupted/'cases/width-8-ratio-50/.reconcile-active').exists()
         _, resumed = result(interrupted, attempt='0002')
         terminal = terminal_payload(resumed)
         for field in ('model', 'optimizer', 'scheduler', 'scaler', 'rng', 'stream'):
@@ -295,7 +302,8 @@ def test_prepared_distinct_case_reservations_can_overlap(joined_assets, monkeypa
     rows = read(root/'cases/width-8-ratio-50/data_selection.json')
     config = yaml.safe_load((root/'cases/width-8-ratio-50/config.yaml').read_text())
     monkeypatch.setattr(recipe_runs, 'load_recipe_workflow',
-        lambda *a, **k: (None, config, object(), object(), {}, {}, rows))
+        lambda *a, **k: (None, config, SimpleNamespace(trained_sites=tuple(authored['locations'])),
+                        object(), {}, {}, rows))
     monkeypatch.setattr(recipe_runs, 'initialize_recipe', lambda *a, **k: (object(), object()))
     barrier = threading.Barrier(2)
     def engine(*args, output, on_checkpoint, **kwargs):
@@ -362,4 +370,4 @@ def test_terminal_after_save_interruption_explicit_finalization(joined_assets, m
     state, _ = open_recipe_terminal(attempt/'engine')
     assert state.reference.path == campaign['checkpoints'][0]['path']
     assert state.payload['metadata']['completed_updates'] == 24
-    assert file_digest(saved['path']) == saved['sha256']
+    assert file_digest(Path(saved['path'])) == saved['sha256']

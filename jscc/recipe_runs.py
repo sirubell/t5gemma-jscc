@@ -156,13 +156,13 @@ def reconcile_recipe_attempt(root, selected, attempt_id):
         raise ValueError('attempt identifier must be a plain nonempty name')
     case = root/'cases'/selected
     attempt = case/'attempts'/f'training-{attempt_id}'
-    previous = _read(attempt/'attempt.json')
-    if previous['status'] != 'running' or previous['case'] != str(case):
-        raise ValueError("reconciliation requires this case's unresolved running attempt")
     # Serialize reconcilers, without acquiring/stealing the active worker lock.
     lock = case/'.reconcile-active'
     lock.mkdir(exist_ok=False)
     try:
+        previous = _read(attempt/'attempt.json')
+        if previous['status'] != 'running' or previous['case'] != str(case):
+            raise ValueError("reconciliation requires this case's unresolved running attempt")
         write_json_atomic(attempt/'reconciliation.json', {
             'schema': SCHEMA, 'assertion': 'prior worker stopped; no further writes',
             'previous_attempt': previous, 'time_unix': time.time()})
