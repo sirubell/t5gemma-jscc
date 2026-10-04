@@ -1,27 +1,8 @@
 # Project guide
 
-## Communication and delivery
-
-- Explain research work to the user in Traditional Chinese unless requested otherwise. Write documentation, agent instructions, technical artifacts and worker prompts in English.
-- PRs: implement, validate and independently review; explain the proposal in its task and obtain publication approval. Then handle CI and review comments autonomously. Tim merges manually.
-- Reviews: rely on repository-triggered initial reviews and retain automatic reviewer assignments. Request re-review only when changes warrant it; report meaningful developments rather than repeatedly polling unchanged status.
-- Commits: include a concise body covering motivation, key changes and actual validation.
-- Tools: prefer `rg` and `rg --files` for searches and structured parsers for JSON/YAML. Use available modern CLI tools when useful; do not install tools solely to satisfy this preference.
-
-## Lean engineering
-
-- Implement the simplest solution that meets the current task and its operational requirements. Add frameworks, wrappers or fallback paths only for a concrete need.
-- Reuse existing functions and tools. Introduce abstractions for actual repetition or a materially simpler flow.
-- Validate stable invariants at setup or trust boundaries, and revalidate when relevant state changes. Avoid redundant hot-path checks; retain validation of untrusted inputs, changing runtime state and security-sensitive operations.
-- Preserve checks that prevent silent incorrect results, data loss or security failures. Surface exceptions and make configuration changes explicit; never silently swallow failures or substitute settings.
-- Run the smallest sufficient relevant tests. Reuse valid evidence when code, data and environment are unchanged; broaden checks for changed risks, failures or unresolved concerns, and satisfy required project checks.
-- Keep small changes lightweight. Update existing documentation when behavior or usage changes; add process documents or repeat reviews only for a concrete need or applicable requirement. Report the change, actual validation and remaining limits concisely.
-
-These principles preserve project-specific safety, security, correctness and production requirements.
-
 ## Research session quick start
 
-For research, experiment or Colab sessions, start with the concise [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02), then the current local HANDOFF and assigned ticket. Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
+For research planning, implementation or experiments, read the [current handoff](docs/local/research/HANDOFF.md), [session procedure](docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md), and the explicitly assigned named ticket first. They identify the current scope, checkout role, dependencies and next action. Read the [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02) for shared conventions; Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
 
 ## Read the relevant documents
 
