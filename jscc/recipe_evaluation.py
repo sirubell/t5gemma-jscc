@@ -158,11 +158,19 @@ def recipe_evaluation_target(root, selected, *, checkpoint=None, expected_step=N
         template = _read(_read_reference(manifest['terminal_template']))
         request = engine.terminal_recipe_request(target['engine_path'], template, scope=scope)
     campaign = _read(attempt/'engine/campaign.json')
+    owned = [item for item in campaign['checkpoints'] if item['path'] == reference.path]
+    if (campaign['schema'] != 'recipe-training-v1' or campaign['plan_identity'] != plan.identity
+            or campaign['status'] not in ('incomplete', 'training_frozen') or len(owned) != 1
+            or {key: owned[0][key] for key in ('path', 'sha256', 'size', 'role')} !=
+               {key: target[key] for key in ('path', 'sha256', 'size', 'role')}):
+        raise ValueError('recipe campaign does not own the selected checkpoint')
     eligibility = {'schema': SCHEMA, 'case_id': row['case_id'], 'eligible': True,
         'final_eligible': scope == 'initial', 'scope': scope, 'checkpoint': target,
         'request_identity': canonical_digest(request), 'source': training_attempt['source'],
         'runtime': training_attempt['runtime'], 'prepared': record['prepared'],
-        'observations_status': campaign['observations_status'], 'observations': campaign['observations']}
+        'observations_status': campaign.get('observations_status'),
+        'observations_status_recorded': 'observations_status' in campaign,
+        'observations': campaign['observations']}
     return eligibility, request, state, config, initial, manifest
 
 

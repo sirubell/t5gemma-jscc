@@ -181,6 +181,7 @@ def test_development_explicit_durable_pre_reset_real_scorer(joined_assets, monke
     checkpoint = read(attempt/'checkpoints.json')['checkpoints'][-1]
     assert checkpoint['role'] == 'pre_reset'
     before = file_digest(Path(checkpoint['path']))
+    campaign_bytes = (attempt/'engine/campaign.json').read_bytes()
     inventory = attempt/'checkpoints.json'
     original_bytes = inventory.read_bytes()
     changed = read(inventory)
@@ -198,10 +199,15 @@ def test_development_explicit_durable_pre_reset_real_scorer(joined_assets, monke
     assert read(aggregate/'results.json')['status'] == 'complete'
     assert read(aggregate/'gate.json')['final_eligible'] is False
     receipt = panels(root, aggregate)[0]
+    eligibility = read(aggregate/'results.json')['cases'][0]['eligibility']
+    assert eligibility['observations_status'] is None
+    assert eligibility['observations_status_recorded'] is False
+    assert all(row['status'] == 'pending' for row in eligibility['observations'])
     assert receipt['request']['state_role'] == 'pre_reset'
     assert len(receipt['panels']) == 2
     assert all(row['completed_items'] == 2 for row in receipt['panels'])
     assert file_digest(Path(checkpoint['path'])) == before
+    assert (attempt/'engine/campaign.json').read_bytes() == campaign_bytes
     assert torch.equal(torch.get_rng_state(), rng)
     assert not (root/'cases'/CASE/'checkpoint.json').exists()
 
