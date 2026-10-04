@@ -11,6 +11,12 @@ This project studies how the location of a model partition affects task quality 
 **Split location**: The boundary between the model computation assigned to the transmitter and receiver.
 _Avoid_: Noise injection point, when referring to a complete communication boundary.
 
+**Optimizer update**: One completed adjustment of the learned parameters. An update may combine multiple microbatches; it is not a dataset row.
+
+**Updates per split location**: The number of optimizer updates assigned to each selected split location. With an equal quota, total optimizer updates equal this quota multiplied by the number of selected locations.
+
+**Dataset row**: One example in the source dataset. Selecting a row once does not limit how often it can be presented during training.
+
 **Decoder memory**: Encoder representations used by decoder cross-attention. When the encoder remains on the transmitter, receiver access to this memory requires transmission too.
 
 **Clean-memory bypass**: Receiver access to encoder representations that have not passed through the communication path. It violates the intended system model, even if the decoder hidden-state stream is noisy.
