@@ -37,7 +37,8 @@ def _merge(base, changes):
 
 def resolve_locations(locations, model_metadata, config):
     """Validate canonical names against local HF backbone metadata, not a cohort."""
-    if not isinstance(locations, list) or not locations or len(set(locations)) != len(locations):
+    if (not isinstance(locations, list) or not locations or any(not isinstance(s, str) for s in locations)
+            or len(set(locations)) != len(locations)):
         raise ValueError('locations must be a nonempty ordered list without duplicates')
     revision = model_metadata.get('_commit_hash')
     if revision is not None and revision != config['model']['revision']:
@@ -87,6 +88,22 @@ def resolve_recipe(path, *, model_config_path):
     if conflicts & set(overrides.get('training', {})):
         raise ValueError('conflicting independently declared budget, save or objective settings')
     _merge(config, overrides)
+    channel = config['channel']
+    if channel['type'] not in ('awgn', 'identity'):
+        raise ValueError('recipe channel currently supports awgn or identity')
+    if not isinstance(channel.get('kwargs', {}), dict) or channel.get('kwargs', {}):
+        raise ValueError('awgn/identity channel kwargs must be empty')
+    for key in ('train_noise', 'normalize_power'):
+        if type(channel[key]) is not bool:
+            raise ValueError(f'channel.{key} requires a boolean')
+    snrs = channel['train_snr_range']
+    if not isinstance(snrs, list) or len(snrs) != 2:
+        raise ValueError('channel.train_snr_range requires two finite ordered endpoints')
+    for snr in snrs:
+        _number(snr, 'channel SNR', minimum=-1000, maximum=1000)
+    if snrs[0] > snrs[1]:
+        raise ValueError('channel.train_snr_range must be ordered')
+    _number(channel['clean_film_snr'], 'channel clean SNR', minimum=-1000, maximum=1000)
     q = _positive_int(recipe['updates_per_location'], 'updates_per_location')
     if config['training']['batch_size'] != 16 or config['training']['gradient_accumulation'] != 1:
         raise ValueError('shared-codec recipes support native16/accumulation1 only')
@@ -208,15 +225,18 @@ def validate_retained_recipe(description, plan, config, observation_request):
             or description['checkpoint_states'] != [list(s) for s in plan.checkpoint_states]
             or [(o['step'], o['state']) for o in description['observations']] != list(plan.observations)):
         raise ValueError('recipe differs from retained execution; requires generalized workflow integration')
-    resolved = description['config']
-    for section in ('model', 'codec', 'channel', 'data'):
-        if resolved[section] != config[section]:
-            raise ValueError(f'recipe {section} differs from retained prepared execution')
-    defaults = {'optimizer': 'adamw', 'betas': [0.9, 0.999], 'eps': 1e-8}
-    for key in ('batch_size', 'gradient_accumulation', 'lr', 'weight_decay', 'warmup_ratio',
-                'min_lr_ratio', 'grad_clip', 'temperature', 'optimizer', 'betas', 'eps'):
-        if resolved['training'][key] != config['training'].get(key, defaults.get(key)):
-            raise ValueError(f'recipe training.{key} differs from retained execution')
+    expected_config = deepcopy(config)
+    expected_config['protocol'] = RECIPE_SCHEMA
+    expected_training = expected_config['training']
+    for key, value in {'optimizer': 'adamw', 'betas': [0.9, 0.999], 'eps': 1e-8}.items():
+        expected_training.setdefault(key, value)
+    expected_training.update(max_steps=plan.horizon, schedule_steps=plan.horizon,
+                             kl_weight=expected['functional_kl'], mse_weight=expected['encoder']['hidden'])
+    expected_training['presentation_stream'] = {
+        **config['training'].get('presentation_stream', {}), 'total_presentations': plan.q * 16}
+    expected_training.pop('save_steps', None)
+    if description['config'] != expected_config:
+        raise ValueError('recipe complete config differs from retained prepared execution')
     for request in description['observations']:
         if (request['items'] != observation_request['panel']['expected_items']
                 or request['sites'] != observation_request['sites']

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from jscc.experiment_recipe import resolve_recipe
+from jscc.experiment_recipe import resolve_recipe, validate_retained_recipe
 from jscc.recipe_plan import RecipePlan
 from jscc.encoder_stages_plan import Original13Plan, ORIGINAL13_SITES
 from test_original13_joined import cli, prepared as prepared, execution_args, offline_dataset
@@ -74,6 +74,13 @@ def test_yaml_changes_resolve_to_complete_settings_and_order(recipe_files):
     assert plan.progress(240, 120)['next_site'] is None
     with pytest.raises(ValueError, match='unrecorded reset'):
         plan.progress(121, 0)
+    original = plan.update_at(0)
+    item['locations'][0] = 'dec_l999'
+    exposed = plan.description
+    exposed['locations'][0] = 'dec_l999'
+    exposed['config']['training']['lr'] = .1
+    assert plan.update_at(0) == original
+    assert plan.description['config']['training']['lr'] == .001
 
 
 @pytest.mark.parametrize('change,match', [
@@ -104,6 +111,10 @@ def test_invalid_recipe_fields(recipe_files, change, match):
     ('training', {'gradient_accumulation': 2}, 'native16'),
     ('training', {'lr': float('nan')}, 'finite'),
     ('training', {'betas': [1, .9]}, 'betas'),
+    ('channel', {'train_snr_range': [float('nan'), 18]}, 'finite'),
+    ('channel', {'train_snr_range': [18, -6]}, 'ordered'),
+    ('channel', {'clean_film_snr': float('inf')}, 'finite'),
+    ('channel', {'train_noise': 'true'}, 'boolean'),
 ])
 def test_invalid_settings(recipe_files, section, change, match):
     path, metadata, recipe = recipe_files
@@ -128,6 +139,16 @@ def test_resolution_uses_real_tiny_config_and_retained_entrypoint(prepared, tmp_
     assert item['locations'] == list(ORIGINAL13_SITES)
     assert item['counts']['optimizer_updates'] == 5200
     assert item['checkpoint_states'] == manifest['plans'][0]['checkpoint_states']
+    retained_plan = Original13Plan.from_resolved(manifest['plans'][0])
+    validate_retained_recipe(item, retained_plan, config, manifest['observation_request'])
+    for field in ('seed', 'deterministic_algorithms'):
+        changed = deepcopy(item)
+        if field == 'seed':
+            changed['config']['seed'] = 999
+        else:
+            changed['config']['training'][field] = False
+        with pytest.raises(ValueError, match='complete config'):
+            validate_retained_recipe(changed, retained_plan, config, manifest['observation_request'])
     offline_dataset(monkeypatch)
     # This ticket retains the production CLI; generalized recipe consumption
     # by the learner belongs to the downstream training/state owners.
