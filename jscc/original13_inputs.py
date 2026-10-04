@@ -115,3 +115,152 @@ def initialize_original13(config, initial, *, evaluation=False, synthetic=False)
         original13_routing.load_codec(model, initial)
     return processor, model
 
+
+
+class RecipeCachedData:
+    """Seekable native16 views from locally cached HellaSwag rows.
+
+    Tokenization occurs once per selected row at setup, not once per update.
+    Access returns fresh tensors/metadata and consumes no stream cursor or RNG.
+    ``views`` binds all Q lightweight BatchViews for RecipePlan on first use.
+    State/scoring consumers own checkpoint and observation restoration.
+    """
+    def __init__(self, description, *, raw, tokenizer, model_config, cache_identity, fixed_data_ids):
+        from .data.hellaswag import selection_ids
+        from .data.hellaswag_prompts import PromptBuilder, validate_policy
+        from .encoder_stages_preparation import _native_rows
+
+        if description.get('identity') != canonical_digest(
+                {k: v for k, v in description.items() if k != 'identity'}):
+            raise ValueError('changed resolved trajectory identity')
+        config = description['config']
+        training, data = config['training'], config['data']
+        self._q = description['updates_per_location']
+        if (config['task'] != 'hellaswag' or type(self._q) is not int or self._q <= 0
+                or training['batch_size'] != 16 or training['gradient_accumulation'] != 1):
+            raise ValueError('cached recipe data requires HellaSwag native16/accumulation1')
+        stream = training['presentation_stream']
+        if (stream['policy'] != 'epoch-permutations-v1' or type(stream['seed']) is not int
+                or stream['total_presentations'] != self._q * 16
+                or stream.get('start_presentation', 0) != 0):
+            raise ValueError('recipe stream requires exact Q native16 views starting at zero; seek by view index')
+        if (type(data['num_validation']) is not int or not 0 < data['num_validation'] < len(raw)
+                or type(data.get('selection_seed', 0)) is not int
+                or (data.get('num_train') is not None
+                    and (type(data['num_train']) is not int or data['num_train'] <= 0))):
+            raise ValueError('recipe selection requires integer seed and positive subset/holdout sizes')
+        ids = selection_ids(len(raw), data['num_validation'], data.get('num_train'), data.get('selection_seed', 0))
+        if 'row_ids' in data:
+            rows = data['row_ids']
+            if (data.get('num_train') is not None or not isinstance(rows, list) or not rows
+                    or any(type(row) is not int or not 0 <= row < len(raw) for row in rows)
+                    or len(set(rows)) != len(rows) or not set(rows).isdisjoint(ids['validation_rows'])):
+                raise ValueError('explicit recipe rows must be unique, in range and exclude selection holdout')
+            ids['train_rows'] = list(rows)
+        self._data_ids = {**copy.deepcopy(fixed_data_ids), **ids}
+        self._policy = copy.deepcopy(data['prompt_policy'])
+        validate_policy(self._policy, data['max_length'])
+        if not tokenizer.is_fast:
+            raise ValueError('cached recipe data requires actual fast-tokenizer offsets')
+        builder = PromptBuilder(raw, ids, self._policy)
+        self._sampler = PresentationSampler(ids['train_rows'], self._q * 16, seed=stream['seed'])
+        self._rows = {}
+        for offset in range(0, len(ids['train_rows']), 16):
+            selected = ids['train_rows'][offset:offset + 16]
+            self._rows.update(zip(selected, _native_rows(selected, raw, builder, tokenizer)))
+        self._tokenizer = tokenizer
+        self._model_config = copy.deepcopy(model_config)
+        self._views = None
+        settings = {'schema': 'recipe-native16-data-v1', 'cache_identity': cache_identity,
+            'data': {key: data.get(key) for key in ('name', 'revision', 'max_length', 'prompt_policy')},
+            'data_ids': self._data_ids, 'stream_seed': stream['seed'],
+            'decoder': {'bos_token_id': model_config.decoder.bos_token_id,
+                        'pad_token_id': model_config.decoder.pad_token_id},
+            'batch_size': 16, 'preprocess_digest': builder.helper_digest}
+        self._compatibility_identity = canonical_digest(settings)
+        self._identity = canonical_digest({'compatibility': self.compatibility_identity, 'q': self._q})
+
+    @property
+    def compatibility_identity(self):
+        return self._compatibility_identity
+
+    @property
+    def identity(self):
+        return self._identity
+
+    @property
+    def data_ids(self):
+        return copy.deepcopy(self._data_ids)
+
+    def __len__(self):
+        return self._q
+
+    def __getitem__(self, index):
+        from .encoder_stages_preparation import _collate_native_rows
+        if type(index) is not int or not 0 <= index < self._q:
+            raise IndexError('recipe view index outside stream')
+        rows = self._sampler.actual_ids[index * 16:(index + 1) * 16].tolist()
+        return _collate_native_rows([self._rows[row] for row in rows], index,
+                                   self._tokenizer, self._model_config, self._policy)
+
+    @property
+    def views(self):
+        if self._views is None:
+            self._views = tuple(batch_view(self[index]) for index in range(self._q))
+        return self._views
+
+    def position(self, completed_updates, locations):
+        """Describe a continuation position without advancing the stream."""
+        if (type(completed_updates) is not int or type(locations) is not int or locations <= 0
+                or not 0 <= completed_updates <= locations * self._q):
+            raise ValueError('recipe continuation position outside stream')
+        view, location = divmod(completed_updates, locations)
+        return {'view_index': view, 'location_index': location,
+                'complete': view == self._q, 'stream_identity': self.identity}
+
+
+def load_recipe_cached_data(description, *, cache_manifest, checksum):
+    """Load a small acquisition receipt and immutable local Arrow/tokenizer assets.
+
+    No hub resolution, model weights, cache transfer or per-update files. Byte
+    integrity belongs to acquisition/transfer (bind_recipe_data_cache); startup
+    validates the receipt, pinned revisions, paths and sizes. Same-size external
+    edits violate the immutable-cache contract and require acquisition rebind.
+    """
+    from datasets import Dataset
+    from transformers import AutoConfig, AutoTokenizer
+
+    path = Path(cache_manifest).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f'recipe data cache receipt missing: {path}')
+    if file_digest(path) != checksum:
+        raise ValueError('recipe data cache receipt checksum differs')
+    receipt = json.loads(path.read_text())
+    if (receipt.get('schema') != 'recipe-data-cache-v1' or receipt.get('identity') != canonical_digest(
+            {k: v for k, v in receipt.items() if k != 'identity'})):
+        raise ValueError('recipe data cache receipt identity differs')
+    config = description['config']
+    dataset, tokenizer = receipt['dataset'], receipt['tokenizer']
+    if (dataset['name'] != config['data']['name'] or dataset['revision'] != config['data']['revision']
+            or tokenizer['revision'] != config['model']['revision']):
+        raise ValueError('recipe dataset/tokenizer revisions differ from local cache')
+    arrow, assets = Path(dataset['path']), Path(tokenizer['path'])
+    if not arrow.is_absolute() or not assets.is_absolute():
+        raise ValueError('recipe cache acquisition receipt requires absolute local paths')
+    required = [(arrow, dataset)]
+    if 'config.json' not in tokenizer['files'] or not any(n.startswith('tokenizer') for n in tokenizer['files']):
+        raise ValueError('recipe cache receipt requires tokenizer and model config assets')
+    for name, record in tokenizer['files'].items():
+        if Path(name).name != name:
+            raise ValueError('recipe tokenizer asset must be a local filename')
+        required.append((assets / name, record))
+    for asset_path, record in required:
+        if not asset_path.is_file():
+            raise FileNotFoundError(f'recipe cached asset missing: {asset_path}')
+        if asset_path.stat().st_size != record['bytes']:
+            raise ValueError(f'recipe cached asset size differs: {asset_path}')
+    raw = Dataset.from_file(str(arrow))
+    processor = AutoTokenizer.from_pretrained(assets, local_files_only=True)
+    model_config = AutoConfig.from_pretrained(assets, local_files_only=True)
+    return RecipeCachedData(description, raw=raw, tokenizer=processor, model_config=model_config,
+                            cache_identity=receipt['identity'], fixed_data_ids=receipt['fixed_data_ids'])

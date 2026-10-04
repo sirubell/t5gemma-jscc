@@ -98,22 +98,14 @@ def _lengths(index, batch):
             'target_valid_max': int(batch['labels'].ne(-100).sum(1).max())}
 
 
-def _native_batch(rows, index, raw, builder, tokenizer, config):
-    """Use the established native prompt, target, offset and padding contract."""
-    from transformers import T5Gemma2ForConditionalGeneration
-
+def _native_rows(rows, raw, builder, tokenizer):
+    """Tokenize each source row independently of its eventual padded batch."""
     docs = [raw[row] for row in rows]
     prompts = [builder.build(doc, row) for doc, row in zip(docs, rows)]
     tokens = tokenizer([text for text, _ in prompts], truncation=False, return_offsets_mapping=True)
     labels = tokenizer([doc['endings'][int(doc['label'])] for doc in docs],
                        truncation=True, max_length=512)
-    batch: dict = Collator(tokenizer.pad_token_id)([
-        {'input_ids': token_ids[-2048:], 'attention_mask': mask[-2048:],
-         'label_ids': target, 'row_id': row}
-        for row, token_ids, mask, target in zip(
-            rows, tokens['input_ids'], tokens['attention_mask'], labels['input_ids'])])
-    width = batch['input_ids'].shape[1]
-    roles, positions, source_views, view_ids = [], [], [], []
+    result = []
     for i, (row, doc, (text, demos)) in enumerate(zip(rows, docs, prompts)):
         full_ids = tokens['input_ids'][i]
         kept = full_ids[-2048:]
@@ -130,22 +122,44 @@ def _native_batch(rows, index, raw, builder, tokenizer, config):
         meta = dict(demo_ids=demos, source_id=doc['source_id'], demo_source_ids=demo_families,
                     source_length=len(full_ids), input_length=len(kept), source_hash=digest(doc),
                     text_hash=digest(text), input_hash=digest(kept), target_hash=digest(labels['input_ids'][i]))
-        roles.append(full_roles[-2048:] + ['padding'] * (width - len(kept)))
-        positions.append(list(range(len(full_ids) - len(kept), len(full_ids) - len(kept) + width)))
-        view_ids.append(canonical_digest({'row_id': row, 'native_view': meta}))
-        source_views.append({'row_id': row, 'native_prefix': 'reference',
-                             'demo_source_family_ids': demo_families,
-                             'query_character_start': query_start, 'native_view': meta})
+        result.append({'input_ids': kept, 'attention_mask': tokens['attention_mask'][i][-2048:],
+            'label_ids': labels['input_ids'][i], 'row_id': row,
+            'token_roles': full_roles[-2048:], 'position_start': len(full_ids) - len(kept),
+            'view_id': canonical_digest({'row_id': row, 'native_view': meta}),
+            'source_family_id': doc['source_id'], 'demo_ids': demos,
+            'source_view': {'row_id': row, 'native_prefix': 'reference',
+                'demo_source_family_ids': demo_families, 'query_character_start': query_start,
+                'native_view': meta}})
+    return result
+
+
+def _collate_native_rows(items, index, tokenizer, config, policy):
+    """Retain native padding, metadata and decoder construction for any view."""
+    from transformers import T5Gemma2ForConditionalGeneration
+
+    batch: dict = Collator(tokenizer.pad_token_id)(items)
+    width = batch['input_ids'].shape[1]
+    rows = [item['row_id'] for item in items]
+    roles = [item['token_roles'] + ['padding'] * (width - len(item['input_ids'])) for item in items]
+    positions = [list(range(item['position_start'], item['position_start'] + width)) for item in items]
+    view_ids = [item['view_id'] for item in items]
     batch.update(query_ids=[f'hellaswag/train/{row}' for row in rows], view_ids=view_ids,
-                 source_family_ids=[doc['source_id'] for doc in docs],
-                 demo_ids=[demos for _, demos in prompts], token_positions=torch.tensor(positions),
-                 token_roles=roles, position_roles=roles, source_views=source_views,
-                 prompt_policy=copy.deepcopy(builder.policy),
+                 source_family_ids=[item['source_family_id'] for item in items],
+                 demo_ids=[copy.deepcopy(item['demo_ids']) for item in items], token_positions=torch.tensor(positions),
+                 token_roles=roles, position_roles=roles,
+                 source_views=[copy.deepcopy(item['source_view']) for item in items],
+                 prompt_policy=copy.deepcopy(policy),
                  batch_view_id=canonical_digest({'rows': rows, 'view_ids': view_ids, 'native16_index': index}))
     batch['decoder_input_ids'] = T5Gemma2ForConditionalGeneration.prepare_decoder_input_ids_from_labels(
         SimpleNamespace(config=config), labels=batch['labels'])  # pyright: ignore[reportArgumentType]
     batch['decoder_attention_mask'] = batch['labels'].ne(-100)
     return batch
+
+
+def _native_batch(rows, index, raw, builder, tokenizer, config):
+    """Use the established native prompt, target, offset and padding contract."""
+    return _collate_native_rows(_native_rows(rows, raw, builder, tokenizer), index,
+                               tokenizer, config, builder.policy)
 
 
 def prepare_inputs(*, prefix_prepared, prefix_sha256, pool_manifest, pool_sha256,
@@ -379,3 +393,31 @@ def validate_original13_config(config, width):
             or channel['type'] != 'awgn' or not channel['normalize_power'] or not channel['train_noise']
             or channel['train_snr_range'] != [-6.0, 18.0]):
         raise ValueError('inherited original13 configuration differs')
+
+
+def bind_recipe_data_cache(*, dataset_path, assets, dataset_name, dataset_revision,
+                           model_revision, fixed_data_ids, output):
+    """Hash local cache bytes once at acquisition, without weights or downloads.
+
+    The resulting small receipt can be reused across widths, sites and budgets.
+    Keep the referenced files immutable; ordinary loading checks presence/size,
+    not a repeated full-cache audit. Rebind after replacing cached assets.
+    """
+    dataset_path, assets, output = map(lambda p: Path(p).resolve(), (dataset_path, assets, output))
+    names = sorted({p.name for pattern in ('config.json', 'tokenizer*', '*token*.json', '*.model')
+                    for p in assets.glob(pattern) if p.is_file()})
+    if not dataset_path.is_file() or 'config.json' not in names or not any(n.startswith('tokenizer') for n in names):
+        raise FileNotFoundError('existing Arrow dataset and local tokenizer/config cache required')
+    receipt = {'schema': 'recipe-data-cache-v1',
+        'dataset': {'name': dataset_name, 'revision': dataset_revision,
+                    'path': str(dataset_path), 'bytes': dataset_path.stat().st_size,
+                    'sha256': file_digest(dataset_path)},
+        'tokenizer': {'path': str(assets), 'revision': model_revision,
+                      'files': {name: {'bytes': (assets / name).stat().st_size,
+                                       'sha256': file_digest(assets / name)} for name in names}},
+        'fixed_data_ids': copy.deepcopy(fixed_data_ids)}
+    receipt['identity'] = canonical_digest(receipt)
+    with output.open('x') as handle:
+        json.dump(receipt, handle, indent=2, allow_nan=False)
+        handle.write('\n')
+    return output
