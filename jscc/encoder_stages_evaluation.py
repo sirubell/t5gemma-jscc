@@ -233,7 +233,9 @@ def _validate_request(state, request, *, observation):
 
 
 def _run_original13_panels(model, processor, *, state, request, output, guard, observation):
-    state, plan = _validate_request(state, request, observation=observation)
+    recipe = state.payload['kind'] == 'recipe_v1'
+    validator = _validate_recipe_request if recipe else _validate_request
+    state, plan = validator(state, request, observation=observation)
     output = Path(output).resolve()
     # Destination and initial receipt failures are fatal: no durable failure record
     # exists yet. Never overwrite or resume an existing panel destination.
@@ -241,7 +243,7 @@ def _run_original13_panels(model, processor, *, state, request, output, guard, o
     panels = [{'site': site, 'condition': condition, 'status': 'pending',
                'requested_items': request['expected_items'], 'completed_items': 0}
               for condition in request['conditions'] for site in request['sites']]
-    result = {'schema': 'original13-evaluation-receipt-v1', 'request': copy.deepcopy(request),
+    result = {'schema': 'recipe-evaluation-receipt-v1' if recipe else 'original13-evaluation-receipt-v1', 'request': copy.deepcopy(request),
               'request_identity': canonical_digest(request), 'status': 'incomplete',
               'checkpoint': asdict(state.reference), 'plan_identity': plan.identity,
               'panels': panels, 'elapsed_seconds': 0.0}
@@ -255,7 +257,7 @@ def _run_original13_panels(model, processor, *, state, request, output, guard, o
                 guard()  # Resource/stop guard is fatal, never a scoring failure.
                 path = output / f"{row['site']}_{row['condition']}"
                 path.mkdir(exist_ok=False)
-                panel_request = {**request, 'schema': 'original13-panel-request-v1',
+                panel_request = {**request, 'schema': 'recipe-panel-request-v1' if recipe else 'original13-panel-request-v1',
                                  'target_site': row['site'], 'conditions': [row['condition']]}
                 write_manifest(path / 'request.json', panel_request)
                 started = time.monotonic()
@@ -439,10 +441,18 @@ def _panel_counts(receipt):
 
 def _verify_original13_result(receipt, state, *, observation):
     _validate_request(state, receipt['request'], observation=observation)
-    if (receipt['schema'] != 'original13-evaluation-receipt-v1'
-            or receipt['request_identity'] != canonical_digest(receipt['request'])
-            or receipt['checkpoint'] != asdict(state.reference)):
+    if receipt['schema'] != 'original13-evaluation-receipt-v1':
+        raise ValueError('original13 result schema differs')
+    _verify_panel_result(receipt, state)
+
+
+def _verify_panel_result(receipt, state):
+    if (receipt['request_identity'] != canonical_digest(receipt['request'])
+            or receipt['checkpoint'] != asdict(state.reference)
+            or receipt['plan_identity'] != state.payload['metadata']['plan_identity']):
         raise ValueError('original13 result identity differs')
+    if receipt['status'] not in ('complete', 'failed', 'incomplete'):
+        raise ValueError('unsupported evaluation receipt status')
     expected = [(site, condition) for condition in receipt['request']['conditions']
                 for site in receipt['request']['sites']]
     if [(p['site'], p['condition']) for p in receipt['panels']] != expected:
@@ -450,10 +460,15 @@ def _verify_original13_result(receipt, state, *, observation):
     for panel in receipt['panels']:
         if panel['status'] not in ('complete', 'pending', 'failed'):
             raise ValueError('original13 unsupported panel status')
-        if panel['requested_items'] != receipt['request']['expected_items']:
-            raise ValueError('original13 panel requested denominator differs')
+        if (type(panel['requested_items']) is not int
+                or panel['requested_items'] != receipt['request']['expected_items']
+                or type(panel['completed_items']) is not int
+                or not 0 <= panel['completed_items'] <= panel['requested_items']
+                or (panel['status'] != 'complete' and panel['completed_items'] != 0)):
+            raise ValueError('evaluation panel requested/completed denominator differs')
         if panel['status'] == 'complete':
-            panel_request = {**receipt['request'], 'schema': 'original13-panel-request-v1',
+            panel_request = {**receipt['request'], 'schema': ('recipe-panel-request-v1'
+                if receipt['schema'] == 'recipe-evaluation-receipt-v1' else 'original13-panel-request-v1'),
                              'target_site': panel['site'], 'conditions': [panel['condition']]}
             if (panel['panel_identity'] != canonical_digest(panel_request)
                     or panel['completed_items'] != panel['requested_items']
@@ -470,5 +485,229 @@ def _verify_original13_result(receipt, state, *, observation):
             for name, checksum in saved['output_hashes'].items():
                 if Path(name).name != name or file_digest(path.parent / name) != checksum:
                     raise ValueError('original13 panel artifact bytes differ')
+    if receipt['status'] == 'failed' and not any(p['status'] == 'failed' for p in receipt['panels']):
+        raise ValueError('failed evaluation receipt requires a failed panel')
     if (receipt['status'] == 'complete') != all(p['status'] == 'complete' for p in receipt['panels']):
         raise ValueError('original13 completion differs from actual panel receipts')
+
+
+def _reopen_recipe(state):
+    from .original13_state import _recipe_plan
+    reopened = open_state(state.reference, expected=state.payload['metadata'])
+    if reopened.payload['kind'] != 'recipe_v1' or not state_exact(reopened.payload, state.payload):
+        raise ValueError('recipe validated checkpoint payload differs')
+    return reopened, _recipe_plan(reopened.payload)
+
+
+def open_recipe_terminal(training_run):
+    """Select the one durable terminal; preserve the original state file."""
+    root = Path(training_run).resolve()
+    campaign = json.loads((root/'campaign.json').read_text())
+    freeze_path = root/'freeze.json'
+    reference = {'path': str(freeze_path), 'sha256': file_digest(freeze_path)}
+    if (campaign['schema'] != 'recipe-training-v1' or campaign['status'] != 'training_frozen'
+            or campaign['freeze_reference'] != reference):
+        raise ValueError('own frozen recipe training segment required')
+    freeze = json.loads(freeze_path.read_text())
+    state, plan = _reopen_recipe(_open_bound_reference(CheckpointRef(**freeze['checkpoint'])))
+    terminal = [c for c in campaign['checkpoints'] if c['role'] == 'terminal']
+    if (freeze['schema'] != 'recipe-freeze-v1' or freeze['status'] != 'training_frozen'
+            or campaign['plan_identity'] != plan.identity or freeze['plan_identity'] != plan.identity
+            or campaign['completed_updates'] != plan.horizon
+            or state.payload['metadata']['completed_updates'] != plan.horizon
+            or state.payload['metadata']['phase_start_step'] != plan.stages[1].start
+            or len(terminal) != 1
+            or {k: terminal[0][k] for k in ('path', 'sha256', 'size')} != asdict(state.reference)
+            or Path(state.reference.path).resolve().parent != root
+            or Path(freeze['metrics']['path']).resolve() != root/'metrics.jsonl'
+            or file_digest(root/'metrics.jsonl') != freeze['metrics']['sha256']):
+        raise ValueError('recipe terminal, plan, endpoint or scalar bytes differ')
+    return state, reference
+
+
+def terminal_recipe_request(training_run, template, *, scope='initial'):
+    from .recipe_observation_policy import scoring_template
+    if scope not in ('initial', 'supplemental'):
+        raise ValueError('unknown recipe terminal scope')
+    state, freeze = open_recipe_terminal(training_run)
+    _, plan = _reopen_recipe(state)
+    policy = plan.description['evaluation']
+    conditions = policy['conditions' if scope == 'initial' else 'supplemental_conditions']
+    if not conditions:
+        raise ValueError('empty terminal request is not requested')
+    value = scoring_template(template, policy, policy)
+    details = state.payload['metadata']
+    return {**value, 'schema': 'recipe-terminal-request-v1', 'scope': scope,
+        'training_run': str(Path(training_run).resolve()), 'freeze_reference': freeze,
+        'checkpoint': asdict(state.reference), 'checkpoint_sha256': state.reference.sha256,
+        'kind': 'recipe_v1', 'plan_identity': plan.identity, 'step': plan.horizon,
+        'sites': list(plan.trained_sites), 'conditions': list(conditions),
+        'source': details['source_identity'], 'config': details['config_identity'],
+        'data': details['data_identity'], 'prepared_identity': details['prepared_identity']}
+
+
+def _recipe_observation_request(state, policy_request, template):
+    from .recipe_observation_policy import scoring_template, recipe_observation_identity
+    state, plan = _reopen_recipe(state)
+    policy = next((r for r in plan.description['observations']
+                   if (r['step'], r['state']) == (policy_request['step'], policy_request['state'])), None)
+    if policy is None or policy_request != {**policy, 'plan_identity': plan.identity,
+                                           'checkpoint_sha256': state.reference.sha256}:
+        raise ValueError('recipe observation policy/checkpoint differs')
+    expected_phase = 0 if policy['state'] == 'pre_reset' else plan.stages[1].start
+    if state.payload['metadata']['phase_start_step'] != expected_phase:
+        raise ValueError('recipe observation reset phase differs')
+    value = scoring_template(template, policy, plan.description['evaluation'])
+    if state.payload['metadata']['observation_identity'] != recipe_observation_identity(plan.description, template):
+        raise ValueError('recipe fixed observation template identity differs')
+    return {**value, **copy.deepcopy(policy_request), 'schema': 'recipe-observation-request-v1',
+        'state_role': policy['state'], 'policy_request': copy.deepcopy(policy_request)}
+
+
+def _validate_recipe_request(state, request, *, observation):
+    state, plan = _reopen_recipe(state)
+    if (request['plan_identity'] != plan.identity or request['checkpoint_sha256'] != state.reference.sha256
+            or request['step'] != state.payload['metadata']['completed_updates']):
+        raise ValueError('recipe request checkpoint/plan/step differs')
+    expected = (_recipe_observation_request(state, request['policy_request'], request) if observation else
+                terminal_recipe_request(request['training_run'], request, scope=request['scope']))
+    if request != expected:
+        raise ValueError('recipe request differs from resolved policy')
+    return state, plan
+
+
+def make_recipe_observer(template):
+    """Bind the acquired fixed panel once; use as run_recipe_training.observe."""
+    bound = copy.deepcopy(template)
+    def observe(model, processor, *, state, request, output, guard):
+        full = _recipe_observation_request(state, request, bound)
+        receipt = observe_recipe(model, processor, state=state, request=full, output=output, guard=guard)
+        # Runner binds the policy request; durable result binds the full scorer request.
+        return {**receipt, 'request_identity': canonical_digest(request)}
+    return observe
+
+
+def observe_recipe(model, processor, *, state, request, output, guard):
+    return _run_original13_panels(model, processor, state=state, request=request,
+                                 output=output, guard=guard, observation=True)
+
+
+def run_recipe_evaluation(model, processor, *, request, output, guard):
+    state, _ = open_recipe_terminal(request['training_run'])
+    return _run_original13_panels(model, processor, state=state, request=request,
+                                 output=output, guard=guard, observation=False)
+
+
+def recipe_training_rows(training_run):
+    """Read the recipe event schema without imposing retained loss coefficients."""
+    root = Path(training_run).resolve()
+    state, _ = open_recipe_terminal(root)
+    _, plan = _reopen_recipe(state)
+    campaign = json.loads((root/'campaign.json').read_text())
+    rows = []
+    for line in (root/'metrics.jsonl').read_text().splitlines():
+        event = json.loads(line, parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError('nonfinite recipe scalar')))
+        p = event['payload']
+        if (event['schema'] != 'recipe-training-event-v1' or event['event_type'] != 'update'
+                or p['nonfinite'] or p['skipped']):
+            raise ValueError('recipe report contains unsupported/unsuccessful scalar update')
+        scheduled = plan.update_at(p['completed_step']-1)
+        expected_identity = {'source': state.payload['metadata']['source_identity'],
+            'config': state.payload['metadata']['config_identity'],
+            'data': state.payload['metadata']['data_identity']}
+        if (any(event['identity'][k] != v for k, v in expected_identity.items())
+                or p['recipe_identity'] != plan.identity or p['site_id'] != scheduled.site
+                or p['site_step'] != scheduled.site_local_index+1
+                or p['objective']['resolved_weights'] != plan.objective_at(p['completed_step']-1)
+                or p['lr_used'] != [plan.description['config']['training']['lr']*scheduled.lr_factor]):
+            raise ValueError('recipe scalar identity/order/objective/LR differs')
+        rows.append({'global_update': p['completed_step'], 'phase': event['phase_id'],
+            'site': p['site_id'], 'objective': copy.deepcopy(p['objective']),
+            'exposure': copy.deepcopy(p['exposure']), 'lr_used': p['lr_used'],
+            'cost': {'timing': copy.deepcopy(p.get('timing', {})), 'memory': copy.deepcopy(p.get('memory', {}))}})
+    count = campaign['segment_updates']
+    if [r['global_update'] for r in rows] != list(range(campaign['completed_updates']-count+1,
+                                                       campaign['completed_updates']+1)):
+        raise ValueError('recipe segment scalar cadence differs')
+    return {'rows': rows, 'segment_updates': count,
+        'segment_ancestry': state.payload['metadata']['segment_ancestry'],
+        'cumulative_exposure': state.payload['metadata']['exposure'],
+        'metrics_sha256': file_digest(root/'metrics.jsonl')}
+
+
+def _own_recipe_observation(terminal, campaign, receipt):
+    details = terminal.payload['metadata']
+    owners = [(campaign, details['completed_updates'])]
+    for reference in details['segment_ancestry']:
+        parent, _ = _reopen_recipe(_open_bound_reference(CheckpointRef(**reference)))
+        keys = ('source_identity', 'config_identity', 'data_identity', 'prepared_identity',
+                'plan_identity', 'initialization_identity', 'stream_identity', 'observation_identity')
+        if any(parent.payload['metadata'][k] != details[k] for k in keys):
+            raise ValueError('recipe observation ancestor identity differs')
+        owner = json.loads((Path(reference['path']).parent/'campaign.json').read_text())
+        if not any({k: c[k] for k in ('path', 'sha256', 'size')} == reference for c in owner['checkpoints']):
+            raise ValueError('recipe ancestor does not own carried checkpoint')
+        owners.append((owner, parent.payload['metadata']['completed_updates']))
+    request = receipt['request']['policy_request']
+    for owner, through in owners:
+        if request['step'] > through:
+            continue
+        saved = any(c['role'] == request['state'] and
+                    {k: c[k] for k in ('path', 'sha256', 'size')} == receipt['checkpoint']
+                    for c in owner['checkpoints'])
+        obligation = next((r for r in owner['observations']
+                           if (r['step'], r['state']) == (request['step'], request['state'])), None)
+        if saved and obligation and obligation.get('request_identity') == canonical_digest(request):
+            return True
+    return False
+
+
+def recipe_report(training_run, *, initial=None, supplemental=None, observations=(),
+                  initial_request=None, supplemental_request=None):
+    """Explicit request accounting; never retry, select, or rewrite obligations."""
+    state, _ = open_recipe_terminal(training_run)
+    _, plan = _reopen_recipe(state)
+    campaign = json.loads((Path(training_run)/'campaign.json').read_text())
+    report = {'schema': 'recipe-report-v1', 'checkpoint': asdict(state.reference),
+        'training': campaign['status'], 'terminal': {}, 'observations': copy.deepcopy(campaign['observations']),
+        'observations_status': campaign['observations_status'], 'results': [], 'observation_receipts': [],
+        'training_scalars': recipe_training_rows(training_run)}
+    for scope, root, requested in (('initial', initial, initial_request),
+                                   ('supplemental', supplemental, supplemental_request)):
+        if requested is not None:
+            _validate_recipe_request(state, requested, observation=False)
+            if requested['scope'] != scope:
+                raise ValueError('recipe report explicit scope differs')
+        count = 0 if requested is None else len(requested['sites'])*len(requested['conditions'])
+        if root is None:
+            report['terminal'][scope] = {'status': 'not_requested' if requested is None else 'requested',
+                'requested': count, 'completed': 0, 'failed': 0, 'pending': count}
+            continue
+        receipt = json.loads((Path(root)/'result.json').read_text())
+        _verify_recipe_result(receipt, state, observation=False)
+        if receipt['request']['scope'] != scope or (requested is not None and requested != receipt['request']):
+            raise ValueError('recipe report scope/request differs')
+        report['terminal'][scope] = _panel_counts(receipt)
+        report['results'].extend(copy.deepcopy(receipt['panels']))
+    endpoints = set()
+    for root in observations:
+        receipt = json.loads((Path(root)/'result.json').read_text())
+        observed = _open_bound_reference(CheckpointRef(**receipt['checkpoint']))
+        _verify_recipe_result(receipt, observed, observation=True)
+        endpoint = (receipt['request']['step'], receipt['request']['state_role'])
+        if endpoint in endpoints:
+            raise ValueError('recipe report duplicate observation endpoint')
+        endpoints.add(endpoint)
+        if receipt['plan_identity'] != plan.identity or not _own_recipe_observation(state, campaign, receipt):
+            raise ValueError('recipe report observation trajectory differs')
+        report['observation_receipts'].append(_panel_counts(receipt))
+    return report
+
+
+def _verify_recipe_result(receipt, state, *, observation):
+    _validate_recipe_request(state, receipt['request'], observation=observation)
+    if receipt['schema'] != 'recipe-evaluation-receipt-v1':
+        raise ValueError('recipe result schema differs')
+    # Artifact/denominator validation is identical to the retained receipt format.
+    _verify_panel_result(receipt, state)
