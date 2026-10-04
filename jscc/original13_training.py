@@ -151,7 +151,7 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
 
 
 def run_recipe_training(model, processor, *, plan, batches, metadata, output, guard,
-                        observe=None, resume=None, data_ids=None, synthetic=False, on_checkpoint=None):
+                        observe=None, resume=None, data_ids=None, synthetic=False, on_checkpoint=None, finalize_terminal=False):
     """Run one YAML segment over indexed native16 inputs; no loading or submission.
 
     observe(model, processor, state=ValidatedState, request=dict, output=Path,
@@ -208,12 +208,17 @@ def run_recipe_training(model, processor, *, plan, batches, metadata, output, gu
         restored = None
         if resume is not None:
             candidate = state_machine._open(resume)
-            if candidate.payload['metadata']['completed_updates'] == plan.horizon:
-                raise ValueError('terminal recipe state requires evaluation, not training')
+            terminal = candidate.payload['metadata']['completed_updates'] == plan.horizon
+            if terminal and not finalize_terminal:
+                raise ValueError('terminal recipe state requires evaluation or explicit finalization, not training')
+            if finalize_terminal and not terminal:
+                raise ValueError('recipe finalization requires a full-budget terminal checkpoint')
             restored = state_machine.restore(resume)
             for observation in result['observations']:
                 if observation['step'] <= learner.completed:
                     observation.update(status='pending_prior_segment', requires_explicit_completion=True)
+        if finalize_terminal and resume is None:
+            raise ValueError('recipe finalization requires an exact terminal checkpoint')
         initial_completed = learner.completed
 
         def publish(role):
@@ -225,6 +230,11 @@ def run_recipe_training(model, processor, *, plan, batches, metadata, output, gu
                 on_checkpoint(saved, role)
             return saved
 
+        if finalize_terminal:
+            # Reuse the full state through the same restoration/save boundary;
+            # the loop emits no optimizer update. Earlier observations remain
+            # pending_prior_segment rather than inventing completion.
+            publish('terminal')
         if restored is not None and learner.completed == plan.stages[1].start and learner.phase_start_step == 0:
             state_machine.reset(restored)
             publish('post_reset')

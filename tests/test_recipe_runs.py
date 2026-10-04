@@ -1,6 +1,8 @@
 """Public recipe dispatch with real tiny CPU updates and durable continuation."""
 import json
 from pathlib import Path
+import subprocess
+import sys
 from time import perf_counter
 
 import pytest
@@ -35,7 +37,21 @@ def result(root, case='width-8-ratio-50', attempt='0001'):
 
 def register_retained(assets):
     from scripts.experiment_recipe import main
-    _, _, recipe, prepared, _ = workflow(assets, 'retained', retained=True)
+    from jscc.recipe_workflow import bind_recipe_workflow
+    root, authored, recipe, _, manifest = workflow(assets, 'retained', retained=True)
+    authored['evaluation'].update(fewshot=5, candidate_batch=16)
+    recipe.write_text(yaml.safe_dump(authored))
+    terminal = read(root/'terminal.json')
+    terminal['prompt_policy'] = 'five-shot'
+    terminal['settings'].update(num_fewshot=5, batch_size=16)
+    (root/'terminal.json').write_text(json.dumps(terminal))
+    prepared = root/'matching-prepared.json'
+    bind_recipe_workflow(recipe, model_config_path=assets['model']/'config.json',
+        model_path=assets['model'], model_binding=assets['model_binding'],
+        cache_manifest=manifest['cache']['path'], cache_sha256=manifest['cache']['sha256'],
+        initializations=manifest['initializations'], observation_template=manifest['observation_template'],
+        terminal_template={'path': str(root/'terminal.json'), 'sha256': file_digest(root/'terminal.json')},
+        study_pairing_id='joined-tiny', output=prepared, synthetic=True)
     registrations = assets['root']/'registrations'
     registrations.mkdir()
     main(['--register-from-prepared', str(prepared), '--model-name', str(assets['model']),
@@ -107,22 +123,56 @@ def test_changed_public_recipe_boundary_recovery_exact_state(joined_assets, monk
                     raise KeyboardInterrupt('fixture interruption after durable publication')
             kwargs['on_checkpoint'] = publish
             return original(*args, **kwargs)
-        monkeypatch.setattr(original13_training, 'run_recipe_training', stop_once)
-        with pytest.raises(KeyboardInterrupt):
-            public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50')
+        hard_death = (role, step) == boundaries[0]
+        if hard_death:
+            public(recipe, registrations, interrupted, '--prepare-only')
+            child_code = '''import json, os, sys
+from jscc import original13_training
+from train import main
+original = original13_training.run_recipe_training
+role, step, argv = json.loads(sys.argv[1])
+def kill_after_save(*args, **kwargs):
+    publication = kwargs['on_checkpoint']
+    def publish(saved, actual_role):
+        publication(saved, actual_role)
+        if actual_role == role and saved.payload['metadata']['completed_updates'] == step:
+            os._exit(23)
+    kwargs['on_checkpoint'] = publish
+    return original(*args, **kwargs)
+original13_training.run_recipe_training = kill_after_save
+main(argv)
+'''
+            child = subprocess.run([sys.executable, '-c', child_code, json.dumps([role, step,
+                ['--config', str(recipe), '--output', str(interrupted), '--case', 'width-8-ratio-50',
+                 '--timeout-seconds', '600']])], cwd=Path(__file__).resolve().parents[1],
+                 capture_output=True, text=True, timeout=120)
+            assert child.returncode == 23, child.stderr[-4000:]
+        else:
+            monkeypatch.setattr(original13_training, 'run_recipe_training', stop_once)
+            with pytest.raises(KeyboardInterrupt):
+                public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50')
         attempt = interrupted/'cases/width-8-ratio-50/attempts/training-0001'
-        assert read(attempt/'attempt.json')['status'] == 'interrupted'
+        assert read(attempt/'attempt.json')['status'] == ('running' if hard_death else 'interrupted')
         saved = read(attempt/'checkpoints.json')['checkpoints'][-1]
         assert saved['role'] == role and saved['step'] == step
-        assert not (interrupted/'cases/width-8-ratio-50/.training-active').exists()
-        with pytest.raises(ValueError, match='no implicit retry'):
-            public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50')
+        assert (interrupted/'cases/width-8-ratio-50/.training-active').exists() == hard_death
+        if not hard_death:
+            with pytest.raises(ValueError, match='no implicit retry'):
+                public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50')
         with pytest.raises(ValueError, match='recorded nonterminal checkpoint from this case'):
             public(recipe, registrations, interrupted, '--case', 'width-8-ratio-75',
                    '--resume', saved['path'], '--attempt', '0002')
         monkeypatch.setattr(original13_training, 'run_recipe_training', original)
+        reconciliation = []
+        if hard_death:
+            # subprocess.run has reaped the stopped owner before reconciliation.
+            with pytest.raises(FileExistsError):
+                public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50',
+                       '--resume', saved['path'], '--attempt', '0002')
+            reconciliation = ['--reconcile-interrupted', '0001']
         public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50',
-               '--resume', saved['path'], '--attempt', '0002')
+               '--resume', saved['path'], '--attempt', '0002', *reconciliation)
+        assert read(attempt/'attempt.json')['status'] == 'interrupted'
         _, resumed = result(interrupted, attempt='0002')
         terminal = terminal_payload(resumed)
         for field in ('model', 'optimizer', 'scheduler', 'scaler', 'rng', 'stream'):
@@ -133,7 +183,8 @@ def test_changed_public_recipe_boundary_recovery_exact_state(joined_assets, monk
             public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50',
                    '--resume', saved['path'], '--attempt', '0002')
         assert file_digest(attempt/'checkpoints.json') == before
-        tested.append({'role': role, 'step': step, 'resumed_updates': 24-step})
+        tested.append({'role': role, 'step': step, 'resumed_updates': 24-step,
+                       'reaped_subprocess_exit': 23 if hard_death else None})
     (root/'test-cost.json').write_text(json.dumps({'seconds': perf_counter()-started,
         'reference_updates': 24, 'boundaries': tested, 'selected_rows': 12, 'batch_size': 16}))
 
@@ -142,6 +193,7 @@ def test_multiple_cases_selection_frozen_yaml_and_record_integrity(joined_assets
     recipe, registrations, _ = registered(joined_assets)
     authored = yaml.safe_load(recipe.read_text())
     authored['reconstruction_percentages'] = [50, 75]
+    authored['save'].update(reconstruction_fractions=[.5, 1], functional_fractions=[.5, 1])
     recipe.write_text(yaml.safe_dump(authored))
     selected = joined_assets['root']/'selected'
     record = public(recipe, registrations, selected, '--prepare-only')
@@ -236,6 +288,7 @@ def test_prepared_distinct_case_reservations_can_overlap(joined_assets, monkeypa
     recipe, registrations, _ = registered(joined_assets)
     authored = yaml.safe_load(recipe.read_text())
     authored['reconstruction_percentages'] = [50, 75]
+    authored['save'].update(reconstruction_fractions=[.5, 1], functional_fractions=[.5, 1])
     recipe.write_text(yaml.safe_dump(authored))
     root = joined_assets['root']/'concurrent'
     public(recipe, registrations, root, '--prepare-only')
@@ -268,3 +321,45 @@ def test_prepared_distinct_case_reservations_can_overlap(joined_assets, monkeypa
     assert len(set(attempts)) == 2
     assert all(read(path/'attempt.json')['status'] == 'completed' for path in attempts)
     assert not list(root.glob('cases/*/.training-active'))
+
+
+def test_terminal_after_save_interruption_explicit_finalization(joined_assets, monkeypatch):
+    from jscc import original13_training
+    from jscc.encoder_stages_evaluation import open_recipe_terminal
+    recipe, registrations, _ = registered(joined_assets)
+    root = joined_assets['root']/'terminal-interrupted'
+    original = original13_training.run_recipe_training
+    def stop_after_terminal(*args, **kwargs):
+        publication = kwargs['on_checkpoint']
+        def publish(saved, role):
+            publication(saved, role)
+            if role == 'terminal':
+                raise KeyboardInterrupt('durable terminal precedes freeze publication')
+        kwargs['on_checkpoint'] = publish
+        return original(*args, **kwargs)
+    monkeypatch.setattr(original13_training, 'run_recipe_training', stop_after_terminal)
+    with pytest.raises(KeyboardInterrupt):
+        public(recipe, registrations, root, '--case', 'width-8-ratio-50')
+    prior = root/'cases/width-8-ratio-50/attempts/training-0001'
+    saved = read(prior/'checkpoints.json')['checkpoints'][-1]
+    assert saved['role'] == 'terminal' and saved['step'] == 24
+    assert not (root/'cases/width-8-ratio-50/checkpoint.json').exists()
+    assert not (prior/'engine/freeze.json').exists()
+    before = torch.load(saved['path'], map_location='cpu', weights_only=False)
+    monkeypatch.setattr(original13_training, 'run_recipe_training', original)
+    with pytest.raises(ValueError, match='terminal'):
+        public(recipe, registrations, root, '--case', 'width-8-ratio-50',
+               '--resume', saved['path'], '--attempt', '0002')
+    # Rejection before attempt reservation must preserve the fresh identifier.
+    public(recipe, registrations, root, '--case', 'width-8-ratio-50',
+           '--resume', saved['path'], '--attempt', '0002', '--finalize-terminal')
+    attempt, campaign = result(root, attempt='0002')
+    after = terminal_payload(campaign)
+    assert campaign['segment_updates'] == 0 and campaign['completed_updates'] == 24
+    assert len(campaign['checkpoints']) == 1 and campaign['checkpoints'][0]['role'] == 'terminal'
+    for field in ('model', 'optimizer', 'scheduler', 'scaler', 'rng', 'stream'):
+        assert state_exact(after[field], before[field]), field
+    state, _ = open_recipe_terminal(attempt/'engine')
+    assert state.reference.path == campaign['checkpoints'][0]['path']
+    assert state.payload['metadata']['completed_updates'] == 24
+    assert file_digest(saved['path']) == saved['sha256']

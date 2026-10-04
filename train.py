@@ -24,6 +24,8 @@ def main(argv=None):
     parser.add_argument("--prepare-only", action="store_true", help="bind a fresh recipe root without executing cases")
     parser.add_argument("--timeout-seconds", type=float, default=86400, help="per-case recipe execution deadline")
     parser.add_argument("--device-uuid", help="optional exact CUDA_VISIBLE_DEVICES assignment for a recipe case")
+    parser.add_argument("--finalize-terminal", action="store_true", help="restore and finalize a recorded terminal with zero updates")
+    parser.add_argument("--reconcile-interrupted", help="prior running attempt name; asserts that its worker has stopped")
     args = parser.parse_args(argv)
     bound_recipe = args.output and (Path(args.output)/"recipe-run.json").is_file()
     authored = None if bound_recipe else yaml.safe_load(Path(args.config).read_text())
@@ -31,6 +33,13 @@ def main(argv=None):
         from jscc.recipe_runs import train_recipe, recipe_run_record
         if not args.output and not args.check:
             parser.error("recipe requires --output at an exact logical root")
+        if args.finalize_terminal and not args.resume:
+            parser.error("terminal finalization requires --resume")
+        if args.reconcile_interrupted:
+            if not bound_recipe or not args.case or not args.resume or args.attempt == "0001" or args.check or args.prepare_only:
+                parser.error("reconciliation requires bound root, case, checkpoint and explicit new attempt")
+            from jscc.recipe_runs import reconcile_recipe_attempt
+            reconcile_recipe_attempt(args.output, args.case, args.reconcile_interrupted)
         if args.prepare_only and args.resume:
             parser.error("recipe preparation cannot resume training")
         if args.check and (args.resume or args.prepare_only):
@@ -59,13 +68,13 @@ def main(argv=None):
             return resolved
         run = train_recipe(args.config, args.output, registrations=args.registrations, selected=args.case,
             attempt_id=args.attempt, resume=args.resume, prepare_only=args.prepare_only,
-            timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid)
+            timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid, finalize_terminal=args.finalize_terminal)
         if args.run_path_file:
             Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
             Path(args.run_path_file).write_text(str(run)+"\n")
         return recipe_run_record(run)
     if (args.case or args.attempt != "0001" or args.registrations or args.prepare_only or args.device_uuid
-            or args.timeout_seconds != 86400):
+            or args.timeout_seconds != 86400 or args.finalize_terminal or args.reconcile_interrupted):
         parser.error("recipe execution options require a shared-codec recipe")
     config = load_config(args.config)
     if args.check:

@@ -78,8 +78,12 @@ The bound root uses its saved prepared receipt and complete effective configs;
 subsequent edits to authored YAML have no effect. A changed experiment needs a
 fresh root. Existing roots require one explicit case and cannot repeat all cases
 implicitly. Preparation/attempt failures preserve partial files, other cases and
-prior attempts. A process killed without cleanup can retain its `.training-active`
-reservation; reconcile that process before explicitly releasing the reservation.
+prior attempts. A process killed without cleanup can retain a `running` attempt and its
+`.training-active` reservation. After confirming the prior worker has stopped,
+add `--reconcile-interrupted 0001` to the explicit continuation command below.
+That invocation asserts the prior worker will make no further writes, retains its
+checkpoint inventory and reconciliation receipt, marks it interrupted and releases
+its reservation. It never infers liveness or steals an active worker automatically.
 
 Exact continuation uses a checkpoint path published in that case's attempt
 `checkpoints.json`, with its recorded hash and size. No newest checkpoint is
@@ -89,6 +93,13 @@ than trained again:
 ```bash
 uv run --locked python train.py --config configs/recipes/changed.yaml --output runs/changed --case width-32-ratio-50 --resume runs/changed/cases/width-32-ratio-50/attempts/training-0001/engine/step_000120_pre_reset.pt --attempt 0002
 ```
+
+An interruption after a durable terminal save can be finalized with the same
+explicit checkpoint/attempt syntax plus `--finalize-terminal`. It restores and
+validates the complete full-budget state, publishes a new terminal/freeze record
+with **zero optimizer updates**, and retains prior observation obligations
+separately. Nonterminal checkpoints cannot be finalized; terminal checkpoints
+cannot start additional training. Prior attempts and checkpoint bytes are retained.
 
 This restores the existing recipe engine's optimizer/LR/scaler/RNG and indexed
 row/location/phase state. A pre-reset checkpoint resets before the next update;
