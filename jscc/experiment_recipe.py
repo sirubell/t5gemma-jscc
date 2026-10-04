@@ -27,6 +27,18 @@ def _number(value, name, *, minimum: float = 0, maximum: float | None = None):
     return value
 
 
+def _validate_scoring_conditions(conditions, name, *, allow_empty=False, allow_no_noise=True):
+    if not isinstance(conditions, list) or (not conditions and not allow_empty):
+        requirement = 'a list' if allow_empty else 'a nonempty list'
+        raise ValueError(f'{name} requires {requirement}')
+    for condition in conditions:
+        if allow_no_noise and condition == 'no_noise':
+            continue
+        _number(condition, 'SNR' if allow_no_noise else 'supplemental SNR', minimum=-1000, maximum=1000)
+    if len(set(conditions)) != len(conditions):
+        raise ValueError(f'{name} must not contain duplicates')
+
+
 def _merge(base, changes):
     for key, value in changes.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
@@ -163,12 +175,10 @@ def resolve_recipe(path, *, model_config_path):
         raise ValueError('observation requires items, sites and conditions')
     _positive_int(observation['items'], 'observation items')
     resolve_locations(observation['sites'], model_metadata, config)
-    for request in (observation, recipe['evaluation']):
-        if not isinstance(request, dict) or not request.get('conditions'):
+    for name, request in (('observation', observation), ('evaluation', recipe['evaluation'])):
+        if not isinstance(request, dict):
             raise ValueError('scoring requests require conditions')
-        for condition in request['conditions']:
-            if condition != 'no_noise':
-                _number(condition, 'SNR', minimum=-1000, maximum=1000)
+        _validate_scoring_conditions(request.get('conditions'), f'{name}.conditions')
     evaluation = recipe['evaluation']
     if set(evaluation) != {'items', 'conditions', 'supplemental_conditions', 'candidate_batch', 'fewshot', 'scoring_policy'}:
         raise ValueError('evaluation request fields differ')
@@ -176,8 +186,8 @@ def resolve_recipe(path, *, model_config_path):
     _positive_int(evaluation['candidate_batch'], 'candidate_batch')
     if type(evaluation['fewshot']) is not int or evaluation['fewshot'] < 0 or evaluation['scoring_policy'] != 'fp32-v1':
         raise ValueError('invalid fewshot/scoring policy')
-    for condition in evaluation['supplemental_conditions']:
-        _number(condition, 'supplemental SNR', minimum=-1000, maximum=1000)
+    _validate_scoring_conditions(evaluation['supplemental_conditions'], 'evaluation.supplemental_conditions',
+                                 allow_empty=True, allow_no_noise=False)
     counts = {'locations': n, 'optimizer_updates': n * q,
               'base_stream_presentations': q * 16, 'presentations_per_location': q * 16,
               'site_presentations': n * q * 16}

@@ -128,6 +128,74 @@ def test_invalid_settings(recipe_files, section, change, match):
         resolve_recipe(path, model_config_path=metadata)
 
 
+SCORING_CONDITION_FIELDS = [
+    ('observation', 'conditions'),
+    ('evaluation', 'conditions'),
+    ('evaluation', 'supplemental_conditions'),
+]
+
+
+@pytest.mark.parametrize('section,field', SCORING_CONDITION_FIELDS)
+@pytest.mark.parametrize('conditions', [[6, 6], [6, 6.0]])
+def test_duplicate_scoring_conditions_are_rejected(recipe_files, section, field, conditions):
+    path, metadata, recipe = recipe_files
+    recipe[section][field] = conditions
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ValueError, match=rf'{section}\.{field}.*duplicates'):
+        resolve_recipe(path, model_config_path=metadata)
+
+
+@pytest.mark.parametrize('section', ['observation', 'evaluation'])
+def test_duplicate_no_noise_conditions_are_rejected(recipe_files, section):
+    path, metadata, recipe = recipe_files
+    recipe[section]['conditions'] = ['no_noise', 'no_noise']
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ValueError, match=rf'{section}\.conditions.*duplicates'):
+        resolve_recipe(path, model_config_path=metadata)
+
+
+@pytest.mark.parametrize('section,field', SCORING_CONDITION_FIELDS)
+@pytest.mark.parametrize('conditions', [None, 6, 'no_noise', {6: None}])
+def test_scoring_conditions_require_lists(recipe_files, section, field, conditions):
+    path, metadata, recipe = recipe_files
+    recipe[section][field] = conditions
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ValueError, match=rf'{section}\.{field}.*list'):
+        resolve_recipe(path, model_config_path=metadata)
+
+
+@pytest.mark.parametrize('section', ['observation', 'evaluation'])
+def test_initial_scoring_conditions_must_be_nonempty(recipe_files, section):
+    path, metadata, recipe = recipe_files
+    recipe[section]['conditions'] = []
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ValueError, match=rf'{section}\.conditions.*nonempty'):
+        resolve_recipe(path, model_config_path=metadata)
+
+
+@pytest.mark.parametrize('supplemental', [[], [-6, 0, 6.0]])
+def test_unique_scoring_conditions_preserve_order_and_scope_overlap(recipe_files, supplemental):
+    path, metadata, recipe = recipe_files
+    recipe['observation']['conditions'] = [6.0, 'no_noise', -6]
+    recipe['evaluation']['conditions'] = ['no_noise', -6, 6]
+    recipe['evaluation']['supplemental_conditions'] = supplemental
+    path.write_text(yaml.safe_dump(recipe))
+    resolved = resolve_recipe(path, model_config_path=metadata)
+    for item in resolved['trajectories']:
+        assert all(request['conditions'] == [6.0, 'no_noise', -6] for request in item['observations'])
+        assert item['evaluation']['conditions'] == ['no_noise', -6, 6]
+        assert item['evaluation']['supplemental_conditions'] == supplemental
+
+
+@pytest.mark.parametrize('condition', ['no_noise', True, float('nan'), float('inf'), 1001])
+def test_supplemental_scoring_conditions_retain_numeric_policy(recipe_files, condition):
+    path, metadata, recipe = recipe_files
+    recipe['evaluation']['supplemental_conditions'] = [condition]
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ValueError, match='supplemental SNR.*finite number'):
+        resolve_recipe(path, model_config_path=metadata)
+
+
 def test_resolution_uses_real_tiny_config_and_retained_entrypoint(prepared, tmp_path, monkeypatch):
     path, manifest = prepared
     config = deepcopy(manifest['configs']['8'])
