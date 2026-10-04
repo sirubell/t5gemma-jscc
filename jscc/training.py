@@ -227,8 +227,14 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, config, ids, step
 
 def train(config, resume: str | Path | None = None,
           initial_checkpoint: str | Path | None = None,
-          deadline: float | None = None):
+          deadline: float | None = None, *, run_directory: Path | None = None):
     setup_started = time.monotonic()
+    if run_directory is not None:
+        from .ordinary_runs import validate_reserved_attempt
+        if resume is not None or initial_checkpoint is not None:
+            raise ValueError("reserved ordinary attempts require fresh training")
+        if config != validate_reserved_attempt(run_directory, "training"):
+            raise ValueError("training configuration differs from its bound case")
     if deadline is not None and setup_started >= deadline:
         raise TimeoutError("functional phase wall deadline reached before setup")
     if resume and initial_checkpoint:
@@ -269,7 +275,7 @@ def train(config, resume: str | Path | None = None,
         raise TimeoutError("functional phase wall deadline reached during setup")
     if transfer:
         model.load_communication_state(transfer["state"])
-    run = new_run(config["run"]["output_dir"], config["run"]["name"])
+    run = Path(run_directory) if run_directory is not None else new_run(config["run"]["output_dir"], config["run"]["name"])
     save_config(config, run / "config.yaml")
     (run / "data_ids.json").write_text(json.dumps(data.ids, indent=2) + "\n")
     prompt_evidence = getattr(data, "prompt_evidence", None)
@@ -316,7 +322,25 @@ def train(config, resume: str | Path | None = None,
             torch.save(earlier_best, run / "best.pt")
         else:
             best, bad = float("inf"), 0
+    setup_identity = None
+    if run_directory is not None:
+        setup_identity = {
+            "model_name": getattr(model.base.config, "_name_or_path", None),
+            "model_revision": getattr(model.base.config, "_commit_hash", None),
+            "processor_class": type(processor).__name__,
+            "tokenizer_name": getattr(getattr(processor, "tokenizer", processor), "name_or_path", None),
+            "selected_train_rows": len(data.train.dataset) if hasattr(data.train, "dataset") else None,
+            "initial_communication": {
+                name: {key: {"shape": list(value.shape), "dtype": str(value.dtype),
+                             "sha256": tensor_digest(value.reshape(-1))} if torch.is_tensor(value)
+                       else {"identity_available": False, "reason": "non-tensor module extra state",
+                             "type": type(value).__name__}
+                       for key, value in component.state_dict().items()}
+                for name, component in (("codec", model.codec), ("memory_codec", model.memory_codec),
+                                        ("channel", model.channel)) if component is not None},
+        }
     run_metadata = {
+        "setup_identity": setup_identity,
         "resume_from": str(Path(resume).resolve()) if resume else None,
         "phase_transfer": transfer["metadata"] if transfer else None,
         "torch_version": str(torch.__version__),

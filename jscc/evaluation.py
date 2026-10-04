@@ -2,6 +2,8 @@
 import copy
 from contextlib import nullcontext
 import json
+import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +17,7 @@ from .evaluation_policy import (
     EVALUATION_OPTIONS, evaluation_conditions, evaluation_identity, file_digest,
     record_fewshots, scoring_kwargs, write_compact_evidence,
 )
+from .experiment_records import write_json_atomic
 from .config import save_config
 from .data import load_data
 from .data.coco import caption_prompt
@@ -256,17 +259,41 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
             "num_samples": result.get("n-samples", {}).get("hellaswag", {})}
 
 
-def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=None):
+def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=None, *,
+             run_directory=None, expected_config=None, expected_checkpoint=None):
+    if run_directory is not None:
+        from .ordinary_runs import validate_reserved_attempt
+        reserved_config = validate_reserved_attempt(run_directory, "evaluation")
+        if expected_config != reserved_config:
+            raise ValueError("evaluation configuration differs from its bound case")
     if expected_step is not None and not checkpoint_name:
         raise ValueError("expected-step requires an explicit checkpoint")
     checkpoint_name = checkpoint_name or "best.pt"
     run_path = Path(run_path).resolve()
     checkpoint_path = run_path / checkpoint_name
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint_sha256 = None
+    if expected_checkpoint is None:
+        # Preserve legacy checkpoint-loading/instrumentation callers and early schema gates.
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    else:
+        # Hash and load one open file: a renamed replacement cannot change the loaded target.
+        with checkpoint_path.open("rb") as checkpoint:
+            checkpoint_sha256 = hashlib.file_digest(checkpoint, "sha256").hexdigest()
+            checkpoint_size = os.fstat(checkpoint.fileno()).st_size
+            if (expected_checkpoint["path"] != str(checkpoint_path.resolve())
+                    or expected_checkpoint["sha256"] != checkpoint_sha256
+                    or expected_checkpoint["size_bytes"] != checkpoint_size):
+                raise ValueError("checkpoint bytes differ from the recorded evaluation target")
+            checkpoint.seek(0)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     from .checkpoint_policy import validate_checkpoint_step
     validate_checkpoint_step(state, expected_step)
     if state.get("schema") == "experiment-state-v2" or state.get("kind") in ("single_site_v2", "shared_encoder_v2"):
         raise ValueError("Versioned checkpoints require evaluate_checkpoint and its metadata gate")
+    if expected_config is not None and state["config"] != expected_config:
+        raise ValueError("checkpoint configuration differs from its bound case")
+    if checkpoint_sha256 is None:
+        checkpoint_sha256 = file_digest(checkpoint_path)
     config = copy.deepcopy(state["config"])
     settings = config["evaluation"]
     if overrides_path:
@@ -283,6 +310,8 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
     if settings.get("scoring_policy") == "fp32-v1":
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
+    output = Path(run_directory) if run_directory is not None else new_run(run_path / "evaluations", "eval")
+    save_config(settings, output / "config.yaml")
     processor, model = build_model(config)
     if config["task"] == "coco" or settings.get("scoring_policy") == "fp32-v1":
         prepare_trainable_parameters(model)
@@ -301,10 +330,7 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
             if config["task"] == "coco" else None)
     if data is not None and settings["num_samples"]:
         data.report = data.report.select(range(min(settings["num_samples"], len(data.report))))
-    output = new_run(run_path / "evaluations", "eval")
-    save_config(settings, output / "config.yaml")
     results = []
-    checkpoint_sha256 = file_digest(checkpoint_path)
     settings["run_identity"] = str(run_path)
     if "noise_seed" in settings and not hasattr(model.channel, "replay"):
         raise ValueError("Paired noise requires a replay-capable channel")
@@ -332,13 +358,13 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
                         "elapsed_seconds": time.perf_counter() - started})
         print(results[-1], flush=True)
         # Write after each condition so a later interruption preserves completed points.
-        (output / "results.json").write_text(json.dumps({
+        write_json_atomic(output / "results.json", {
             "checkpoint": str(checkpoint_path), "checkpoint_sha256": checkpoint_sha256,
             "optimizer_step": state["step"], "evaluation_mode": settings.get("mode", "all"),
             "codec_checkpoint_loaded": conditions != ["vanilla"],
             "task": config["task"], "split": config["split"], "source": source_state(),
             "torch_version": str(torch.__version__), "conditions": results,
-        }, indent=2) + "\n")
+        })
     print(f"Evaluation: {output}", flush=True)
     return output
 

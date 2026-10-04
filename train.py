@@ -11,6 +11,7 @@ from jscc.config import load_config
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--output", help="exact fresh logical experiment root for an ordinary task")
     parser.add_argument("--resume", help="last.pt from an interrupted run")
     parser.add_argument("--check", action="store_true", help="print resolved YAML, without loading a model")
     parser.add_argument("--run-path-file", help="write the completed run path for a following evaluation")
@@ -24,7 +25,11 @@ def main():
         from pathlib import Path
         Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
     from jscc.training import train
-    run = train(config, resume=args.resume)
+    if args.output:
+        from jscc.ordinary_runs import train_task
+        run = train_task(config, args.output, authored_config=args.config, resume=args.resume)
+    else:
+        run = train(config, resume=args.resume)
     if args.run_path_file:
         from pathlib import Path
         Path(args.run_path_file).write_text(str(run) + "\n")

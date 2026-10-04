@@ -10,6 +10,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True)
+    parser.add_argument("--attempt", default="0001", help="explicit fresh evaluation attempt ID for a logical root")
     parser.add_argument("--checkpoint", help="checkpoint filename within the run")
     parser.add_argument("--config", help="optional YAML containing evaluation options only")
     parser.add_argument("--expected-step", type=int, help="require this exact saved optimizer step")
@@ -23,7 +24,12 @@ def main():
     if args.output_path_file:
         Path(args.output_path_file).parent.mkdir(parents=True, exist_ok=True)
     from jscc.evaluation import evaluate
-    output = evaluate(args.run, args.checkpoint, args.config, expected_step=args.expected_step)
+    from jscc.ordinary_runs import evaluate_run, is_recorded_root
+    if is_recorded_root(args.run):
+        output = evaluate_run(args.run, args.checkpoint, args.config,
+                              expected_step=args.expected_step, attempt_id=args.attempt)
+    else:
+        output = evaluate(args.run, args.checkpoint, args.config, expected_step=args.expected_step)
     if args.output_path_file:
         Path(args.output_path_file).write_text(str(output) + "\n")
 
