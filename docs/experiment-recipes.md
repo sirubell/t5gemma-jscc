@@ -1,12 +1,10 @@
 # Shared codec recipe contracts
 
-The YAML resolver prepares complete execution descriptions. It does not launch
-training. The retained original13 training/evaluation commands remain callable;
-`original13_training.py --recipe path.yaml` additionally verifies that YAML
-matches the retained prepared execution before training/resume. Changed semantics
-fail with a clear integration requirement;
-general recipe execution is connected by the downstream training, data, state,
-observation and submission deliveries before final integration.
+The YAML resolver and source-bound commands connect cached native HellaSwag rows,
+ordered training, recoverable optimizer state, fixed observations and terminal
+reporting. Preparation creates a small receipt; execution requires an explicit
+source pin and fresh output. Legacy original13 packages and COCO commands remain
+callable with their established contracts.
 
 ```bash
 uv run --locked python scripts/experiment_recipe.py \
@@ -45,82 +43,138 @@ observation give 11 checkpoint states. Pre/post reset remain distinct at one
 update. Two 256-question observations preserve the chosen four sites and NN/−6
 conditions. Encoder hidden nMSE is .1; decoder hidden/memory are .05 each;
 functional training adds KL1.0. These values are example settings, not validator
-literals. Generalized consumers must honor the resolved coefficients.
+literals. The integrated learner honors the resolved coefficients.
 
-## Callable boundaries
+## Acquire and prepare
 
-- `jscc.experiment_recipe.resolve_recipe(path, model_config_path=...)` returns
-  a versioned mapping with `trajectories`, `model_topology`, `matrix_counts`,
-  `identity` and `launch_authorized: false`. Each trajectory binds a complete
-  `config`, ordered `locations`, `updates_per_location`, width/ratio, phases,
-  objectives, counts, checkpoint states, observation and evaluation requests.
-  Its identity covers those settings; routine YAML edits need no schema bump.
-- `jscc.recipe_plan.RecipePlan(description, views, study_pairing_id)` verifies
-  the resolved trajectory identity at setup, copies settings and binds exactly Q
-  immutable `BatchView` records supplied by the input owner. `update_at(index)`
-  returns `ScheduledUpdate` with site, indexed view, phase-local LR and retained
-  `original13-role-awgn-v1` noise key. `objective_at(index)` resolves role weights;
-  `progress(completed, phase_start)` returns next location/view and exposure
-  counters, rejecting progress across an unrecorded reset. This scheduling API
-  does not construct a model, optimizer or checkpoint.
-- Data owner: `jscc.original13_inputs.load_original13_prepared(path, checksum=...,
-  width=..., ratio=..., load_batches=True, allow_pending_assets=False)` retains
-  the existing `(manifest, config, plan, batches, initial, metadata, data_ids)`
-  return. `initialize_original13(config, initial, evaluation=False, synthetic=False)`
-  returns `(processor, model)` using local assets. General data delivery must be
-  indexed/seekable: view index is `completed_updates // N`; consuming an
-  observation must not advance training. `BatchView` carries view/mask/layout
-  identities and sequence/token counts; real batch tensors must match it.
-- Provenance owner: `jscc.original13_provenance` owns `stages_source_inventory`,
-  `model_asset_inventory`, `bind_model_assets`, `verify_model_assets`,
-  `original13_execution_guard` and `verify_original13_execution_source`.
-  Integrity/pinning policies can change here without modifying tensor generation
-  or checkpoint serialization. The current inventory covers every `jscc` module.
-- State owner: `jscc.original13_state.Original13TrainingState(learner, plan=...,
-  metadata=..., routing=...)` supplies `save(path) -> ValidatedState`,
-  `restore(CheckpointRef) -> ValidatedState`, and `reset(pre_reset_state)`.
-  `validate_original13_state(payload)` remains the checkpoint trust-boundary
-  validator. `jscc.experiment_state` owns byte references, serialization, full
-  optimizer/scheduler/scaler/RNG restore. `jscc.original13_training.run_original13_training`
-  retains explicit `routing`, `observe`, `resume`, `config`, `data_ids`, `guard`
-  hooks and campaign/freeze receipts. Observations run only at recorded states;
-  scoring failures continue only after verified restoration. Generalized state
-  validation must be released by this owner before consumers adopt new plans.
-- Observation owner: `jscc.recipe_observation_policy.checkpoint_policy` resolves
-  integral per-location save fractions into physical update/state pairs.
-  `jscc.original13_scoring` owns runtime isolation, scoring policy and panel
-  scoring; `jscc.encoder_stages_evaluation` owns requests, terminal selection,
-  orchestration, receipts and reporting. `_score_original13_panel` is retained as
-  a legacy orchestration injection point; a future API change needs handover.
-- Submission owner: `scripts/experiment_recipe.py.main(argv)` is the preparation
-  entry point; `scripts/original13_training.py.main(argv)` retains explicit
-  bind/check/train/resume operation and exact source/input/checkpoint arguments.
-  Submission must consume the resolved JSON and bind the exact accepted runtime
-  source, input/model assets, approved resource limits and fresh receipt location.
-  This foundation adds no scheduler call, deployment or resubmission behavior.
+Acquire immutable dataset/tokenizer assets once with
+`bind_recipe_data_cache`; bind existing initializer tensor references and fixed
+scoring templates. These are Python acquisition APIs for new assets, not edits
+required between recipes. A small `assets.json` supplies:
 
-## Downstream file ownership
+```json
+{
+  "model_path": "/existing/pinned/backbone",
+  "cache_manifest": "/existing/cache.json",
+  "cache_sha256": "EXACT_SHA256",
+  "initializations": {
+    "512": {"path": "/existing/initial-B512.pt", "sha256": "EXACT_SHA256",
+            "state_identity": "EXACT_STATE_IDENTITY", "seed": 0}
+  },
+  "observation_template": {"path": "/existing/fixed-observation.json", "sha256": "EXACT_SHA256"},
+  "terminal_template": {"path": "/existing/fixed-terminal.json", "sha256": "EXACT_SHA256"},
+  "study_pairing_id": "EXPLICIT_PAIRED_STUDY"
+}
+```
 
-This manifest allocates whole files so dependency-ready workers can proceed in
-isolated checkouts from the reviewed foundation commit. Shared-file changes
-require explicit release. Legacy facade files may only be changed by integration
-unless listed below. Tests follow the same owner as the behavior they check.
+Every requested width requires its own matching initializer. Production assets
+use the pinned HF snapshot path. Templates contain task, ordered validation IDs,
+source families, settings, noise, data settings, scorer, precision, backend,
+reference corpus, prompt policy and layout. Their membership must exactly match
+cache `development` and `final_validation`; changed panel sizes need separately
+acquired templates and cache receipts. No implicit resize occurs.
 
-| Delivery | Owned runtime files | Owned tests |
-|---|---|---|
-| YAML training | `jscc/original13_routing.py`, `jscc/recipe_plan.py`, `jscc/models/split_model.py`, `jscc/encoder_online_reconstruction.py` | `test_original13_routes`, `test_original13_objectives`, new `test_recipe_training` |
-| Cached data | `jscc/original13_inputs.py`, `jscc/encoder_stages_preparation.py`, `jscc/data/hellaswag.py`, `jscc/data/hellaswag_prompts.py`, `jscc/presentation.py` | `test_encoder_stages_preparation`, data/presentation tests, new `test_recipe_data` |
-| Hash costs | `jscc/original13_provenance.py`, `jscc/baseline_protocol.py`, `jscc/sharing_protocol.py` | `test_baseline_protocol`, `test_sharing_protocol`, new `test_recipe_provenance` |
-| Optimizer/resume | `jscc/original13_state.py`, `jscc/original13_training.py`, `jscc/experiment_state.py` | `test_original13_plan_state`, `test_experiment_state`, new `test_recipe_resume` |
-| Checkpoints/observations | `jscc/recipe_observation_policy.py`, `jscc/original13_scoring.py`, `jscc/encoder_stages_evaluation.py` | `test_original13_observations`, `test_original13_evaluation`, new `test_recipe_observations` |
-| Submission | `scripts/experiment_recipe.py`, `scripts/original13_training.py`, `scripts/original13_evaluation.py`, new `jscc/recipe_submission.py`, `scripts/submit_recipe.py` | new `test_recipe_submission` |
-| Final integration | `jscc/experiment_recipe.py`, `jscc/encoder_stages.py`, `jscc/encoder_stages_plan.py`, `jscc/config.py`, `configs/recipes/`, this document | `test_experiment_recipe`, `test_original13_joined` |
+```bash
+uv run --locked python scripts/experiment_recipe.py \
+  --config configs/recipes/changed.yaml \
+  --model-config /existing/pinned/backbone/config.json \
+  --assets /existing/assets.json --output /fresh/prepared.json
+uv run --locked python scripts/original13_training.py check \
+  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256
+```
 
-The state owner releases training runner observation hooks to the observation
-owner only after its own accepted delivery; whole-file ownership otherwise stays
-with state until integration. The recipe resolver/config/legacy plan stay with
-integration; downstream proposals for their changes are recorded in delivery
-receipts, not concurrent edits. Navigation files belong to the navigation ticket.
-No owner changes the frozen original13 experiment branch, packages or campaign.
-Source commit and local evidence locations are recorded in the canonical recipe
-contract ticket; ignored local receipts do not travel in Git.
+`recipe-prepared-v1` binds the integrated source inventory, model acquisition,
+cache checksum, initializers, templates and complete effective YAML resolution.
+Operational model paths and acquired asset bindings are saved in the effective
+config and included in its identity. A new source needs a fresh small prepared
+receipt; it reuses unchanged model/cache/initializer bytes. Frozen source and
+historical receipts are never relabeled. Check is a small receipt/presence/size
+preflight; it does not load weights or assert target runtime acceptance.
+
+## Train, resume and evaluate
+
+```bash
+uv run --locked python scripts/original13_training.py train \
+  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
+  --recipe configs/recipes/changed.yaml --width 32 --ratio 50 \
+  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
+  --device-uuid GPU-ASSIGNED_UUID --output /fresh/training
+uv run --locked python scripts/original13_training.py resume \
+  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
+  --recipe configs/recipes/changed.yaml --width 32 --ratio 50 \
+  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
+  --device-uuid GPU-ASSIGNED_UUID --output /fresh/continued \
+  --resume-checkpoint /existing/state.pt --resume-sha256 EXACT_SHA256 --resume-size EXACT_BYTES
+uv run --locked python scripts/original13_evaluation.py request \
+  --training-run /fresh/training --template /existing/fixed-terminal.json \
+  --template-sha256 EXACT_SHA256 --scope initial --output /fresh/request.json
+uv run --locked python scripts/original13_evaluation.py run \
+  --request /fresh/request.json --request-sha256 EXACT_SHA256 \
+  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
+  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
+  --device-uuid GPU-ASSIGNED_UUID --output /fresh/evaluation
+uv run --locked python scripts/original13_evaluation.py report \
+  --training-run /fresh/training --initial /fresh/evaluation \
+  --observation /fresh/training/EXPLICIT_OBSERVATION_DIRECTORY --output /fresh/report.json
+```
+
+The optional `--recipe` resolves changed settings against the same acquired assets;
+without it, execution uses the prepared resolution. Routine subset/seed/quota,
+location/order, objective, optimizer/save/channel changes require YAML only.
+Resume requires identical source/config/data/initializer/fixed observations and
+full Adam/LR/scaler/RNG/runtime state; a changed recipe is a new run. Both phases,
+partial location cycles and pre/post-reset checkpoints retain their exact cursor.
+The runner binds each fresh cached batch once and reuses it across locations.
+Identity and AWGN idle state adapters are supported. Observation callbacks restore
+training state in finally; only typed scoring failures can continue after verified
+restoration. Save, nonfinite, checkpoint or restoration failures stop the segment.
+
+Terminal requests select this run's one durable terminal, including an explicit
+supplemental request when desired. The generalized report validates
+`recipe-training-event-v1`, actual YAML coefficients/LR/counts and supplied
+observation receipts. Ancestor obligations remain pending until explicitly
+completed; supplied receipts do not silently rewrite them. Legacy events retain
+their separate reader and frozen package validation.
+
+## One submission command
+
+```bash
+uv run --locked python scripts/submit_recipe.py prepare \
+  --job /existing/job.yaml --limits /approved/limits.yaml --output /fresh/bundle.json
+uv run --locked python scripts/submit_recipe.py check --bundle /fresh/bundle.json
+uv run --locked python scripts/submit_recipe.py render \
+  --bundle /fresh/bundle.json --output /fresh/job.sbatch
+uv run --locked python scripts/submit_recipe.py submit \
+  --bundle /fresh/bundle.json --mock-results /existing/mock-results.json
+```
+
+The job schema is `shared-codec-submission-v1`: recipe path, root, full source
+commit/path, model path/config digest, prepared digest/candidate paths, Python,
+cache, fresh output, resources and array groups. Limits separately pin root,
+partition/account/qos/node and bound GPU/CPU/memory/walltime/concurrency/task count.
+Every trajectory occurs once; dependencies refer to earlier groups. `/work`
+canonicalizes to `/raid/work`; lexical escapes and changed host symlinks fail.
+Preparation accepts generalized small receipts and retains legacy exact-compatible
+packages. Launch uses the persisted resolved bundle through `--resolved`, so a
+later YAML edit cannot alter allocated work. Mock and live modes share payload,
+reservation, arguments and durable attempted-command receipts. Uncertain outcomes
+retain the reservation and never retry automatically. Live submit additionally
+requires exact human authorization for bundle/source/target/operation; these
+commands and resource limits provide no such authorization.
+
+## Cost and acceptance limits
+
+Acquisition hashes bytes once. Startup checks checksums for small receipts and
+required asset paths/sizes; replacing an immutable cache or same-size model/data
+file requires rebind or explicit byte audit. New target copies need target
+acquisition evidence. Training tokenizes selected rows once, builds Q actual
+BatchViews once and assembles one fresh padded batch per view/location cycle.
+Q view binding remains a setup cost; no full per-update tensor package is built.
+Evaluation currently repeats selected-row loading/view binding for its source/data
+check. Initializer and checkpoint integrity remain full-byte trust boundaries.
+
+Offline tiny CPU and mocked scheduler evidence establish mechanics, not pretrained
+model quality, target memory fit, GPU/backend equivalence or the ten-minute live
+preparation/submission target. Queue wait and training are outside that target.
+COCO remains on its existing loader and commands. No live deployment, scheduler
+or scientific execution is authorized by preparation or offline acceptance.

@@ -58,6 +58,13 @@ def main(argv=None):
     run.add_argument('--device-uuid')
     run.add_argument('--output', required=True)
     args = parser.parse_args(argv)
+    if args.command in ('request', 'report'):
+        recipe = json.loads((Path(args.training_run)/'campaign.json').read_text()).get('schema') == 'recipe-training-v1'
+    else:
+        recipe = _read(args.request, args.request_sha256).get('schema') == 'recipe-terminal-request-v1'
+    if recipe:
+        from jscc.recipe_workflow import evaluation_cli
+        return evaluation_cli(args)
     if args.command == 'run':
         request = _read(args.request, args.request_sha256)
         state, _ = open_original13_terminal(request['training_run'])

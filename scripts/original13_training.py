@@ -25,7 +25,7 @@ def main(argv=None):
     parser.add_argument('--prepared', required=True)
     parser.add_argument('--prepared-sha256')
     parser.add_argument('--width', type=int)
-    parser.add_argument('--ratio', type=int, choices=(50, 75, 90))
+    parser.add_argument('--ratio', type=int)
     parser.add_argument('--output')
     parser.add_argument('--approved-source')
     parser.add_argument('--timeout-seconds', type=float)
@@ -33,7 +33,7 @@ def main(argv=None):
     parser.add_argument('--resume-checkpoint')
     parser.add_argument('--resume-sha256')
     parser.add_argument('--resume-size', type=int)
-    parser.add_argument('--recipe', help='Optional YAML contract; must match the retained prepared execution')
+    parser.add_argument('--recipe', help='YAML recipe; retained packages require exact compatibility')
     parser.add_argument('--resolved', help='Bound submission bundle; complete resolved recipe is checked')
     parser.add_argument('--resolved-identity')
     parser.add_argument('--trajectory', type=int)
@@ -53,6 +53,12 @@ def main(argv=None):
             parser.error('--model-path is bind-time only; execution uses the recorded model')
         if not args.prepared_sha256:
             parser.error('exact --prepared-sha256 is required')
+        raw_prepared = json.loads(Path(args.prepared).read_text())
+        if raw_prepared.get('schema') == 'recipe-prepared-v1':
+            from jscc.recipe_workflow import training_cli
+            result = training_cli(args)
+            print(json.dumps(result, indent=2))
+            return result
         if args.width is None or args.ratio is None:
             if args.mode != 'check':
                 parser.error('train/resume require exact --width and --ratio')

@@ -150,6 +150,10 @@ def prepare_job(job_path, limits_path):
               'python': normalize_path(job['python'], root), 'cache': normalize_path(job['cache'], root),
               'output': normalize_path(job['output'], root), 'resources': resources, 'groups': groups,
               'resolved': resolved, 'launch_authorized': False}
+    manifest = json.loads(local_path(selected, root).read_text())
+    if manifest.get('schema') == 'recipe-prepared-v1':
+        from .recipe_workflow import validate_recipe_prepared
+        bundle['resolved'] = validate_recipe_prepared(manifest, resolved=resolved)
     # Existing prepared assets are accepted only if their recorded configs/plans
     # match. Tensor/model integrity stays at the runtime loader boundary.
     validate_prepared(bundle)
@@ -166,6 +170,14 @@ def validate_prepared(bundle):
     asset = local_path(bundle['prepared']['path'], bundle['root'])
     require(file_digest(asset) == bundle['prepared']['sha256'], 'prepared digest differs')
     manifest = json.loads(asset.read_text())
+    if manifest.get('schema') == 'recipe-prepared-v1':
+        from .recipe_workflow import validate_recipe_prepared
+        require(manifest['source_commit'] == bundle['source']['commit'], 'prepared source commit differs')
+        require(normalize_path(manifest['model_assets']['path'], bundle['root']) == bundle['model']['path'],
+                'prepared model path differs')
+        bound = validate_recipe_prepared(manifest, resolved=bundle['resolved'])
+        require(bound == bundle['resolved'], 'resolved acquired config differs')
+        return
     require(manifest.get('schema') == 'original13-prepared-v1', 'prepared schema differs')
     require(manifest.get('source_commit') == bundle['source']['commit'], 'prepared source commit differs')
     for item in bundle['resolved']['trajectories']:
