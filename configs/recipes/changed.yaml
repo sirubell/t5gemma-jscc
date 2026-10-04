@@ -1,0 +1,69 @@
+# Resolution example; execution requires the downstream integrated workflow.
+schema: shared-codec-recipe-v1
+task_config: ../tasks/hellaswag.yaml
+locations:
+- dec_l3
+- enc_l2
+- enc_emb
+updates_per_location: 80
+widths:
+- 32
+reconstruction_percentages:
+- 50
+overrides:
+  training:
+    batch_size: 16
+    gradient_accumulation: 1
+    lr: 0.001
+    weight_decay: 0.02
+    warmup_ratio: 0.1
+    min_lr_ratio: 0.2
+    betas:
+    - 0.8
+    - 0.95
+    eps: 1.0e-07
+  data:
+    num_train: 12
+    selection_seed: 23
+objectives:
+  encoder:
+    hidden: 0.1
+    memory: 0.0
+  decoder:
+    hidden: 0.05
+    memory: 0.05
+  functional_kl: 1.0
+save:
+  reconstruction_fractions:
+  - 0.25
+  - 0.5
+  - 0.75
+  - 1
+  functional_fractions:
+  - 0.25
+  - 0.5
+  - 0.75
+  - 1
+  functional_observation_fraction: 0.5
+observation:
+  items: 16
+  sites:
+  - enc_l9
+  - enc_fn
+  - dec_l0
+  - dec_l24
+  conditions:
+  - no_noise
+  - -6
+evaluation:
+  items: 10042
+  conditions:
+  - no_noise
+  - -6
+  supplemental_conditions:
+  - 0
+  - 6
+  - 18
+  candidate_batch: 16
+  fewshot: 5
+  scoring_policy: fp32-v1

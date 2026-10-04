@@ -7,6 +7,7 @@ from .encoder_pilot_plan import SITES, SITE_SPECS
 from .experiment_schedule import NoiseKey
 from .models.split_model import ResolvedSite
 from .sharing_schedule import BatchView, ScheduledUpdate, sharing_lr_factor
+from .original13_state import validate_original13_state, _validate_original13_reference  # noqa: F401
 
 ENCODER_STAGES_PROTOCOL = 'encoder-original6-native16-stages-v1'
 WIDTHS = (512, 1152, 2304)
@@ -375,68 +376,3 @@ def original13_progress(plan, completed, phase_start):
             'offset': completed * 16, 'completed_per_site': counts,
             'phase_id': phase.phase_id, 'phase_start_step': phase.start,
             'phase_local_completed': completed - phase.start, 'reset_count': int(phase.reset_optimizer)}
-
-
-def validate_original13_state(payload):
-    metadata = payload['metadata']
-    plan = Original13Plan.from_resolved(metadata['original13_plan'])
-    progress = original13_progress(plan, metadata['completed_updates'], metadata['phase_start_step'])
-    if (metadata['protocol_identity'] != ORIGINAL13_PROTOCOL or metadata['plan_identity'] != plan.identity
-            or metadata['input_identity'] != plan.input_identity
-            or metadata['observation_identity'] != plan.observation_identity
-            or metadata['phase'] != progress['phase_id'] or payload['stream'] != progress):
-        raise ValueError('original13 state plan, input, phase or stream differs')
-    if bool(metadata['parent_identity']) != bool(progress['reset_count']):
-        raise ValueError('original13 reset parent missing or unexpected')
-    local = progress['phase_local_completed']
-    if bool(payload['optimizer'].get('state')) != bool(local):
-        raise ValueError('original13 optimizer state differs from phase progress')
-    factor = sharing_lr_factor(local, next(s.horizon for s in plan.stages if s.start == metadata['phase_start_step']))
-    if any(group['lr'] != 2e-4 * factor for group in payload['optimizer']['param_groups']):
-        raise ValueError('original13 LR differs from phase-local schedule')
-    groups = payload['optimizer']['param_groups']
-    scheduler = payload['scheduler']
-    if (scheduler.get('base_lrs') != [2e-4] * len(groups)
-            or scheduler.get('_last_lr') != [2e-4 * factor] * len(groups)
-            or scheduler.get('_step_count') != local + 1
-            or any(g.get('initial_lr') != 2e-4 or g.get('weight_decay') != 0.002500001398541448
-                   or g.get('betas') != (.9, .999) or g.get('eps') != 1e-8 or g.get('amsgrad')
-                   or g.get('maximize') or g.get('differentiable') for g in groups)
-            or not isinstance(metadata['route_state'], dict)):
-        raise ValueError('original13 scheduler, Adam recipe or route state differs')
-    counts = progress['completed_per_site']
-    expected_exposure = {site: {'updates': count, 'sequences': 16 * count,
-        **{field: sum(getattr(v, field) for v in plan.views[:count])
-           for field in ('source_tokens', 'target_tokens', 'padded_tokens')}} for site, count in counts.items()}
-    receipts = metadata['exposure_receipts']
-    if (metadata['exposure'] != expected_exposure or metadata['attempted'] != metadata['completed_updates']
-            or metadata['valid_tokens'] != sum(v['source_tokens'] for v in expected_exposure.values())
-            or not isinstance(receipts, list) or len(receipts) != metadata['completed_updates']
-            or any(not isinstance(r, str) or not r for r in receipts) or len(set(receipts)) != len(receipts)
-            or not isinstance(metadata['segment_ancestry'], list)
-            or metadata['model_state_contract'] != 'original13-canonical-codec-v1'):
-        raise ValueError('original13 complete exposure, ancestry or body contract differs')
-    if progress['reset_count']:
-        entry = metadata['lineage'][-1]
-        if (len(metadata['lineage']) != 1 or set(entry) != {
-                'parent_sha256', 'parent_checkpoint', 'completed_updates', 'transfer'}
-                or entry['completed_updates'] != plan.reconstruction_stop
-                or entry['transfer'] != 'weights_only_reset_adam_lr'
-                or entry['parent_checkpoint']['sha256'] != metadata['parent_identity']):
-            raise ValueError('original13 reset lineage differs')
-        _validate_original13_reference(entry['parent_checkpoint'])
-    elif metadata['lineage'] != []:
-        raise ValueError('original13 reconstruction state cannot have reset lineage')
-    for reference in metadata['segment_ancestry']:
-        _validate_original13_reference(reference)
-    if len({r['sha256'] for r in metadata['segment_ancestry']}) != len(metadata['segment_ancestry']):
-        raise ValueError('original13 segment ancestry repeats a checkpoint')
-
-
-def _validate_original13_reference(reference):
-    if (not isinstance(reference, dict) or set(reference) != {'path', 'sha256', 'size'}
-            or not isinstance(reference['path'], str) or not reference['path'].strip()
-            or not isinstance(reference['sha256'], str) or len(reference['sha256']) != 64
-            or any(c not in '0123456789abcdef' for c in reference['sha256'])
-            or type(reference['size']) is not int or reference['size'] <= 0):
-        raise ValueError('original13 ancestry requires complete checkpoint references')

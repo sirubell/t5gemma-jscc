@@ -33,6 +33,7 @@ def main(argv=None):
     parser.add_argument('--resume-checkpoint')
     parser.add_argument('--resume-sha256')
     parser.add_argument('--resume-size', type=int)
+    parser.add_argument('--recipe', help='Optional YAML contract; must match the retained prepared execution')
     args = parser.parse_args(argv)
     if args.mode == 'bind':
         if not args.inputs or not args.inputs_sha256:
@@ -55,6 +56,14 @@ def main(argv=None):
         manifest, config, plan, batches, initial, metadata, data_ids = load_original13_prepared(
             args.prepared, checksum=args.prepared_sha256, width=args.width, ratio=args.ratio,
             load_batches=args.mode != 'check', allow_pending_assets=args.mode == 'check')
+        if args.recipe:
+            from jscc.experiment_recipe import resolve_recipe, validate_retained_recipe
+            resolved = resolve_recipe(args.recipe, model_config_path=Path(config['model']['name'])/'config.json')
+            matches = [item for item in resolved['trajectories']
+                       if item['width'] == plan.width and item['ratio'] == plan.ratio]
+            if len(matches) != 1:
+                raise ValueError('recipe must declare the exact retained width and ratio')
+            validate_retained_recipe(matches[0], plan, config, manifest['observation_request'])
         if args.mode != 'check':
             if not args.output or not args.approved_source:
                 parser.error('execution requires --output and --approved-source')
