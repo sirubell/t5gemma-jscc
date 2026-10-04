@@ -208,3 +208,99 @@ receipts retain public-command outcomes; none automatically releases the shared
 source consumer. Reconciliation must establish durable terminal evidence for
 **every** task before explicit registry terminal state/release. Queue age, an
 output directory or one failed case does not establish this predicate.
+
+## Explicit scheduler reconciliation and recovery
+
+A stopped or lost submission response retains `SUBMISSION.json`, the exact
+`bundle.json` and `job.sbatch` bytes, case stage fences and task reservations.
+New intents include a unique `attempt_identity`, UTC `attempted_at`, exact
+arguments and payload digest, persisted before the scheduler adapter runs.
+Accepted IDs remain accepted. The reconciler performs no scheduler query or
+submission; an operator supplies recorded scheduler evidence for the exact
+intent. A similarly named job or a nearby timestamp alone is insufficient.
+
+```bash
+python scripts/submit_recipe.py intents --bundle submission/bundle.json
+python scripts/submit_recipe.py reconcile --bundle submission/bundle.json --evidence scheduler-evidence.json
+```
+
+`reconcile_job(bundle, receipt_dir, *, evidence)` supports both released bundle
+schemas. `reconciliation_intents` returns the exact anchors to copy into the
+evidence. Legacy intents with missing identity/time retain those missing values
+and include the original submission SHA256; they require an exact authoritative
+record and never invent a timestamp. Evidence has this shape (IDs here are fake):
+
+```json
+{
+  "schema": "scheduler-reconciliation-evidence-v1",
+  "bundle_identity": "exact bundle identity",
+  "reference": "retained scheduler query/accounting receipt",
+  "groups": [{
+    "group": 0,
+    "intent": {"attempt_identity": "exact retained value", "attempted_at": "exact retained value", "arguments": ["exact", "arguments"], "bundle_identity": "exact bundle identity", "group": 0, "payload_sha256": "exact payload digest", "submission_sha256": "exact original receipt digest"},
+    "authoritative": true,
+    "query_status": "complete",
+    "matches": [{"job_id": "123", "intent": {"copy": "the complete exact intent above"}}]
+  }],
+  "tasks": [{"group": 0, "index": 0, "job_id": "123", "scheduler_task_id": "123_0", "authoritative": true, "query_status": "complete", "status": "completed", "reference": "retained task accounting evidence"}]
+}
+```
+
+One authoritative exact match establishes acceptance. Multiple matches, failed
+queries, delayed accounting and incomplete coverage remain `unknown`. Empty
+matches establish `not-accepted` only with
+`"nonacceptance":{"exhaustive":true,"final":true,"acceptance_window_closed":true}`:
+the recorded evidence must prove the entire acceptance window closed, rather
+than merely show the job absent from the current queue. An old rejection status
+alone does not override this requirement. Groups with no persisted invocation
+intent are `not-attempted` only when the submission is durably stopped. Every
+accepted array index needs its own exact authoritative terminal accounting
+record; a completed array parent or one task cannot establish completion of all
+bound tasks. Scheduler terminal state establishes lifetime safety, not model or
+scientific success.
+
+Snapshots under `reconciliation/00000001.json`, etc., retain supplied evidence,
+original receipt digest, all group/task dispositions and a digest link to the
+previous snapshot. A file lock serializes actions and atomic synced writes keep
+incomplete snapshots out of history. Repeating the latest exact evidence returns
+the same snapshot. Acceptance and supported task terminal evidence persist across
+later delayed queries. Original receipts and reservations are not overwritten.
+
+Retry eligibility and operational authority are distinct. An unknown group blocks
+all fresh retry preparation. Accepted groups are never selected again. Prepare a
+reviewable subset of only eligible groups, retaining accepted predecessor IDs:
+
+```bash
+python scripts/submit_recipe.py prepare-retry --bundle submission/bundle.json --output retry-bundle.json --retry-output /absolute/approved/root/retry-submission --attempt 0002
+python scripts/submit_recipe.py authorize-retry --bundle submission/bundle.json --new-bundle retry-bundle.json --authorization retry-approval.json
+```
+
+`prepare_retry_bundle` changes only the operational output, attempt and selected
+unaccepted groups. Evaluation-only retries retain the original training attempt
+and recorded checkpoint policy. `authorize_retry_job` requires an approval with
+`approved:true`, `operation:"authorize-recipe-retry"`, exact old `bundle_identity`,
+`new_bundle_identity`, `source_commit`, new `output` and a nonempty
+`user_authorization_reference`. It checks unchanged source/runtime, effective
+science, resources, concurrency and dependencies. The action records approval
+before retiring only eligible case stage fences into retained
+`<stage>.retired-<old identity>.json` archives; task reservations remain intact.
+Legacy retry subsets have no case fences to retire. A new submission still uses
+the existing explicit exact `submit-recipe` approval. None of these recovery
+commands submits automatically. Changed science/source/budgets use the existing
+revision/case rules. Completed or accepted training is never automatically rerun.
+
+When every bound task has durable terminal evidence, explicitly record the
+consumer terminal state and optionally release it:
+
+```bash
+python scripts/submit_recipe.py terminal --bundle submission/bundle.json
+python scripts/submit_recipe.py release --bundle submission/bundle.json
+```
+
+`finalize_source_consumer(..., release=False)` reuses `SourceConsumers` and retains
+its registry history. `release=True` is the explicit release action; repeating it
+is safe after interruption. Accepted tasks keep the source held until each task
+has terminal accounting evidence. Definitively unaccepted or stopped unattempted
+groups need no fabricated launch result, including groups after partial acceptance
+and a reservation write failure before scheduler invocation. Reservations and
+scientific output stay retained; no automatic cancellation or release is added.

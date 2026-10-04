@@ -15,11 +15,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jscc.recipe_submission import (prepare_job, preview_job, render_payload, run_job, submit_job,
-                                    submission_preflight,
+                                    submission_preflight, reconcile_job,
                                     validate_bundle, write_json)
 
 
@@ -40,9 +41,9 @@ def _submit(bundle, args):
     raise ValueError('submission requires --mock-results or --live --authorization')
 
 
-def main(argv=None):
+def main(argv=None) -> Any:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('action', 'prepare', 'preview', 'check', 'render', 'submit', 'run'))
+    parser.add_argument('mode', choices=('action', 'prepare', 'preview', 'check', 'render', 'submit', 'run', 'reconcile', 'intents', 'prepare-retry', 'authorize-retry', 'terminal', 'release'))
     parser.add_argument('--job')
     parser.add_argument('--limits')
     parser.add_argument('--bundle')
@@ -53,8 +54,13 @@ def main(argv=None):
     submission.add_argument('--mock-results')
     submission.add_argument('--live', action='store_true')
     parser.add_argument('--authorization')
+    parser.add_argument('--evidence', help='recorded scheduler evidence JSON for reconcile')
+    parser.add_argument('--attempt', help='fresh operational retry attempt')
+    parser.add_argument('--retry-output', help='fresh scheduler receipt directory')
+    parser.add_argument('--retry-groups', type=int, nargs='+', help='original eligible group indices')
+    parser.add_argument('--new-bundle', help='exact fresh bundle for authorize-retry')
     args = parser.parse_args(argv)
-    if args.mode not in ('action', 'submit') and (args.live or args.mock_results or args.authorization):
+    if args.mode not in ('action', 'submit', 'authorize-retry') and (args.live or args.mock_results or args.authorization):
         parser.error('scheduler options require action or submit mode')
     if args.mode in ('prepare', 'action'):
         if not args.job or not args.limits or not args.output:
@@ -117,6 +123,32 @@ def main(argv=None):
                 result['trajectories'] = len(bundle['resolved']['trajectories'])
         elif args.mode == 'submit':
             result = _submit(bundle, args)
+        elif args.mode == 'reconcile':
+            if not args.evidence:
+                parser.error('reconcile requires --evidence')
+            result = reconcile_job(bundle, bundle['output'], evidence=json.loads(Path(args.evidence).read_text()))
+        elif args.mode == 'intents':
+            from jscc.submission_reconciliation import reconciliation_intents
+            result = reconciliation_intents(bundle, bundle['output'])
+        elif args.mode in ('terminal', 'release'):
+            from jscc.submission_reconciliation import finalize_source_consumer
+            result = finalize_source_consumer(bundle, bundle['output'], release=args.mode == 'release')
+        elif args.mode == 'prepare-retry':
+            if not args.output or not args.retry_output or not args.attempt:
+                parser.error('prepare-retry requires --output --retry-output --attempt')
+            from jscc.submission_reconciliation import prepare_retry_bundle
+            result = prepare_retry_bundle(bundle, bundle['output'], output=args.retry_output,
+                                          attempt=args.attempt, groups=args.retry_groups)
+            with Path(args.output).open('x') as stream:
+                json.dump(result, stream, indent=2)
+                stream.write('\n')
+        elif args.mode == 'authorize-retry':
+            if not args.authorization or not args.new_bundle or args.live or args.mock_results:
+                parser.error('authorize-retry requires --authorization --new-bundle and performs no submission')
+            from jscc.submission_reconciliation import authorize_retry_job
+            result = authorize_retry_job(bundle, bundle['output'],
+                new_bundle=json.loads(Path(args.new_bundle).read_text()),
+                authorization=json.loads(Path(args.authorization).read_text()))
         else:
             if not args.identity:
                 parser.error('run requires explicit --identity')

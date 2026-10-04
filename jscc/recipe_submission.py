@@ -4,6 +4,8 @@ Preparation reads small manifests/configs and selects an existing exact asset.
 It never transfers data, loads model weights, or invokes a scheduler.
 """
 from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -311,7 +313,8 @@ def scheduler_command(bundle, payload_path, group_index, dependency=None):
                '--output='+bundle['output']+'/logs/%A_%a.stdout',
                '--error='+bundle['output']+'/logs/%A_%a.stderr']
     dependency_key = 'aftercorr' if bundle['schema'] == CASE_SCHEMA else 'afterok'
-    if group[dependency_key] is not None:
+    dependency = dependency or group.get('accepted_dependency_job_id')
+    if group[dependency_key] is not None or group.get('accepted_dependency_job_id'):
         require(isinstance(dependency, str) and re.fullmatch('[1-9][0-9]*', dependency), 'job ID required')
         command += ['--dependency='+dependency_key+':'+str(dependency), '--kill-on-invalid-dep=yes']
     return command+[normalize_path(str(payload_path), bundle['root'])]+(
@@ -322,12 +325,27 @@ def _slurm_submit(args):
     return subprocess.run(args, text=True, capture_output=True, check=False)
 
 
+def _submission_intent(bundle, receipt, group, command) -> dict[str, Any]:
+    intent = {'bundle_identity': bundle['identity'], 'group': group,
+              'arguments': command, 'payload_sha256': receipt['payload_sha256'],
+              'attempted_at': datetime.now(timezone.utc).isoformat()}
+    return dict(intent, attempt_identity=canonical_digest(intent), status='attempting')
+
+
+def reconcile_job(bundle, receipt_dir, *, evidence):
+    """Record scheduler evidence without submitting, retrying or releasing."""
+    from .submission_reconciliation import reconcile_job as reconcile
+    return reconcile(bundle, receipt_dir, evidence=evidence)
+
+
 def submit_job(bundle, receipt_dir, *, scheduler=None, authorization=None):
     """Reserve first, persist each attempt before calling, never retry.
 
     Inject scheduler for offline tests. The real adapter requires explicit
     recorded human authority for the exact bundle, target and operation.
     """
+    from .submission_reconciliation import require_retry_authorization
+    require_retry_authorization(bundle)
     if bundle['schema'] == CASE_SCHEMA:
         return _submit_case_job(bundle, receipt_dir, scheduler=scheduler, authorization=authorization)
     validate_bundle(bundle)
@@ -363,9 +381,9 @@ def submit_job(bundle, receipt_dir, *, scheduler=None, authorization=None):
         receipt['source_consumer_reserved'] = True
         write_json(receipt_path, receipt)
         for index, group in enumerate(bundle['groups']):
-            dependency = None if group['afterok'] is None else receipt['jobs'][group['afterok']]['job_id']
+            dependency = group.get('accepted_dependency_job_id') or (None if group['afterok'] is None else receipt['jobs'][group['afterok']]['job_id'])
             command = scheduler_command(bundle, directory/'job.sbatch', index, dependency)
-            job = {'group': index, 'arguments': command, 'status': 'attempting'}
+            job = _submission_intent(bundle, receipt, index, command)
             receipt['jobs'].append(job)
             write_json(receipt_path, receipt)
             result = scheduler(command)
@@ -635,8 +653,9 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
         source_consumers(bundle).reserve(bundle['source_binding'], bundle['identity'],
             owner=bundle['output'], reference=str(receipt_path))
         receipt['source_consumer_reserved'] = True
-        for case in bundle['cases']:
-            if 'training' in case['commands']:
+        training_indices = {i for g in bundle['groups'] if g['stage'] in ('training', 'combined') for i in g['indices']}
+        for index, case in enumerate(bundle['cases']):
+            if index in training_indices and 'training' in case['commands']:
                 case_path = Path(case['path'])
                 require(not list((case_path/'attempts').glob('training-*'))
                     and not (case_path/'training.json').exists() and not (case_path/'checkpoint.json').exists(),
@@ -665,9 +684,9 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
                            'case_id': bundle['cases'][index]['case_id'], 'status': 'reserved'})
         write_json(receipt_path, receipt)
         for i, group in enumerate(bundle['groups']):
-            dependency = None if group['aftercorr'] is None else receipt['jobs'][group['aftercorr']]['job_id']
+            dependency = group.get('accepted_dependency_job_id') or (None if group['aftercorr'] is None else receipt['jobs'][group['aftercorr']]['job_id'])
             command = scheduler_command(bundle, directory/'job.sbatch', i, dependency)
-            job = {'group': i, 'arguments': command, 'status': 'attempting'}
+            job = _submission_intent(bundle, receipt, i, command)
             receipt['jobs'].append(job)
             write_json(receipt_path, receipt)
             try:
