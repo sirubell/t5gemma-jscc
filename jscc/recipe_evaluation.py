@@ -177,19 +177,16 @@ def _counts(request, receipt=None):
             'observed_items': sum(panel['completed_items'] for panel in panels)}
 
 
-def _case_evaluation(case, eligibility, request, state, config, initial, manifest, *,
-                     attempt_id, timeout_seconds, device_uuid):
-    attempt = reserve_attempt(case, 'evaluation', attempt_id=attempt_id,
-        request={'scope': eligibility['scope'], 'checkpoint': eligibility['checkpoint'],
-                 'request_identity': canonical_digest(request)})
+def _case_evaluation(attempt, eligibility, request, state, config, initial, manifest, *,
+                     timeout_seconds, device_uuid):
     started = time.perf_counter()
     result = {'schema': SCHEMA, 'case_id': eligibility['case_id'], 'scope': eligibility['scope'],
               'status': 'incomplete', 'eligibility': eligibility,
               'request': request, 'panels': _counts(request), 'panel_receipt': None}
-    write_json_atomic(attempt/'eligibility.json', eligibility)
-    write_json_atomic(attempt/'request.json', request)
-    write_json_atomic(attempt/'result.json', result)
     try:
+        write_json_atomic(attempt/'eligibility.json', eligibility)
+        write_json_atomic(attempt/'request.json', request)
+        write_json_atomic(attempt/'result.json', result)
         validate_reserved_attempt(attempt, 'evaluation')
         # Recheck the selected bytes after reservation and before model load.
         engine._reopen_recipe(state)
@@ -229,6 +226,22 @@ def _case_evaluation(case, eligibility, request, state, config, initial, manifes
     return attempt
 
 
+def _planned_counts(description, scope, expected_step):
+    if scope == 'development':
+        policies = [p for p in description['observations'] if p['step'] == expected_step]
+        if len(policies) != 1:
+            # An unsupported endpoint has no resolved scientific denominator.
+            return False, {key: 0 for key in ('requested', 'completed', 'failed', 'pending',
+                                             'requested_items', 'observed_items')}
+        policy = policies[0]
+        sites, conditions = policy['sites'], policy['conditions']
+    else:
+        policy = description['evaluation']
+        sites = description['locations']
+        conditions = policy['conditions' if scope == 'initial' else 'supplemental_conditions']
+    return True, _counts({'sites': sites, 'conditions': conditions, 'expected_items': policy['items']})
+
+
 def evaluate_recipe_run(root, *, selected=None, attempt_id='0001', checkpoint=None,
                         expected_step=None, scope='initial', timeout_seconds=86400,
                         device_uuid=None, overrides_path=None):
@@ -255,34 +268,39 @@ def evaluate_recipe_run(root, *, selected=None, attempt_id='0001', checkpoint=No
     started = time.perf_counter()
     for row in rows:
         description = descriptions[row['case_id']]
-        policy = description['evaluation']
-        conditions = policy['conditions' if scope != 'supplemental' else 'supplemental_conditions']
-        requested = len(description['locations'])*len(conditions)
+        resolved, counts = _planned_counts(description, scope, expected_step)
         results['cases'].append({'case_id': row['case_id'], 'status': 'pending', 'eligible': False,
-            'evaluation': None, 'panels': {'requested': requested, 'completed': 0,
-                'failed': 0, 'pending': requested, 'requested_items': requested*policy['items'], 'observed_items': 0}})
+            'request_resolved': resolved, 'evaluation': None, 'panels': counts})
     write_json_atomic(output/'results.json', results)
     try:
         for row, summary in zip(rows, results['cases']):
-            attempt = Path(row['path'])/'evaluations'/f'evaluation-{attempt_id}'
+            owned_attempt = None
             try:
-                eligibility, request, state, config, initial, manifest = recipe_evaluation_target(
-                    root, row['case_id'], checkpoint=checkpoint, expected_step=expected_step, scope=scope)
+                try:
+                    eligibility, request, state, config, initial, manifest = recipe_evaluation_target(
+                        root, row['case_id'], checkpoint=checkpoint, expected_step=expected_step, scope=scope)
+                except (ValueError, FileNotFoundError) as error:
+                    summary.update(status='missing' if isinstance(error, FileNotFoundError) else 'failed',
+                                   error={'type': type(error).__name__, 'message': str(error)})
+                    continue
                 summary.update(eligible=True, eligibility=eligibility, panels=_counts(request))
-                attempt = _case_evaluation(Path(row['path']), eligibility, request, state, config, initial,
-                    manifest, attempt_id=attempt_id, timeout_seconds=timeout_seconds, device_uuid=device_uuid)
+                owned_attempt = reserve_attempt(Path(row['path']), 'evaluation', attempt_id=attempt_id,
+                    request={'scope': scope, 'checkpoint': eligibility['checkpoint'],
+                             'request_identity': canonical_digest(request)})
+                _case_evaluation(owned_attempt, eligibility, request, state, config, initial,
+                                 manifest, timeout_seconds=timeout_seconds, device_uuid=device_uuid)
                 summary['status'] = 'complete'
-            except Exception as error:
-                summary.update(status=('missing' if isinstance(error, FileNotFoundError) else 'failed'),
-                               error={'type': type(error).__name__, 'message': str(error)})
+            except engine.ObservationScoringError as error:
+                summary.update(status='failed', error={'type': type(error).__name__, 'message': str(error)})
             except BaseException as error:
-                summary.update(status='interrupted', error={'type': type(error).__name__, 'message': str(error)})
+                summary.update(status='interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed',
+                               error={'type': type(error).__name__, 'message': str(error)})
                 raise
             finally:
-                if attempt.is_dir() and (attempt/'result.json').is_file():
-                    saved = _read(attempt/'result.json')
-                    summary.update(evaluation={'path': str(attempt/'result.json'),
-                                              'sha256': file_digest(attempt/'result.json')},
+                if owned_attempt is not None and (owned_attempt/'result.json').is_file():
+                    saved = _read(owned_attempt/'result.json')
+                    summary.update(evaluation={'path': str(owned_attempt/'result.json'),
+                                              'sha256': file_digest(owned_attempt/'result.json')},
                                    panels=saved['panels'])
                 write_json_atomic(output/'results.json', results)
         results['status'] = 'complete' if all(row['status'] == 'complete' for row in results['cases']) else 'incomplete'
@@ -294,6 +312,7 @@ def evaluate_recipe_run(root, *, selected=None, attempt_id='0001', checkpoint=No
                for status in ('complete', 'failed', 'missing', 'pending', 'interrupted')}},
             'panels': {key: sum(row['panels'][key] for row in results['cases']) for key in
                        ('requested', 'completed', 'failed', 'pending', 'requested_items', 'observed_items')}}
+        results['unresolved_requests'] = sum(not row['request_resolved'] for row in results['cases'])
         write_json_atomic(output/'results.json', results)
         write_json_atomic(output/'eligibility.json', {'schema': SCHEMA, 'scope': scope,
             'cases': [{key: row[key] for key in ('case_id', 'eligible', 'status')} |

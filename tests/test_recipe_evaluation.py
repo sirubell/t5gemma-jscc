@@ -101,9 +101,14 @@ def test_real_multiple_cases_complete_and_explicit_case_path(joined_assets):
 
 
 def test_whole_root_missing_case_keeps_denominator_and_never_falls_back(joined_assets):
+    from evaluate import main
     recipe, registrations, root = prepared(joined_assets, multiple=True, train=False)
     public(recipe, registrations, root, '--case', CASE)
-    aggregate = evaluate(root)
+    link = joined_assets['root']/'incomplete-evaluation-path.txt'
+    with pytest.raises(SystemExit) as stopped:
+        main(['--run', str(root), '--output-path-file', str(link)])
+    assert stopped.value.code == 1
+    aggregate = Path(link.read_text().strip())
     report = read(aggregate/'results.json')
     assert report['status'] != 'complete'
     assert len(report['cases']) == 2
@@ -175,7 +180,18 @@ def test_development_explicit_durable_pre_reset_real_scorer(joined_assets, monke
     attempt = root/'cases'/CASE/'attempts/training-0001'
     checkpoint = read(attempt/'checkpoints.json')['checkpoints'][-1]
     assert checkpoint['role'] == 'pre_reset'
-    before = file_digest(checkpoint['path'])
+    before = file_digest(Path(checkpoint['path']))
+    inventory = attempt/'checkpoints.json'
+    original_bytes = inventory.read_bytes()
+    changed = read(inventory)
+    changed['checkpoints'][-1]['size'] += 1
+    inventory.write_text(json.dumps(changed))
+    rejected = evaluate(root, selected=CASE, scope='development', attempt_id='bad-development',
+                        checkpoint=checkpoint['path'], expected_step=checkpoint['step'])
+    assert read(rejected/'results.json')['counts']['panels'] == dict(
+        requested=2, completed=0, failed=0, pending=2, requested_items=4, observed_items=0)
+    assert read(rejected/'results.json')['status'] == 'incomplete'
+    inventory.write_bytes(original_bytes)
     rng = torch.get_rng_state().clone()
     aggregate = evaluate(root, selected=CASE, scope='development',
                          checkpoint=checkpoint['path'], expected_step=checkpoint['step'])
@@ -185,9 +201,50 @@ def test_development_explicit_durable_pre_reset_real_scorer(joined_assets, monke
     assert receipt['request']['state_role'] == 'pre_reset'
     assert len(receipt['panels']) == 2
     assert all(row['completed_items'] == 2 for row in receipt['panels'])
-    assert file_digest(checkpoint['path']) == before
+    assert file_digest(Path(checkpoint['path'])) == before
     assert torch.equal(torch.get_rng_state(), rng)
     assert not (root/'cases'/CASE/'checkpoint.json').exists()
+
+
+@pytest.mark.parametrize('error', [ValueError('fixture fatal restoration error'), KeyboardInterrupt('fixture evaluation interruption')])
+def test_fatal_evaluation_stops_later_cases_and_retains_pending(joined_assets, monkeypatch, error):
+    from jscc import encoder_stages_evaluation as engine
+    _, _, root = prepared(joined_assets, multiple=True)
+    calls = []
+    def stop(*args, **kwargs):
+        # A labeled boundary injection, not a real restoration failure.
+        calls.append(kwargs['request']['training_run'])
+        raise error
+    monkeypatch.setattr(engine, 'run_recipe_evaluation', stop)
+    with pytest.raises(type(error), match='fixture'):
+        evaluate(root)
+    aggregate = root/'evaluations/evaluation-0001'
+    report = read(aggregate/'results.json')
+    assert len(calls) == 1
+    assert [row['status'] for row in report['cases']] == [
+        'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed', 'pending']
+    assert report['counts']['panels'] == dict(requested=6, completed=0, failed=0,
+                                            pending=6, requested_items=18, observed_items=0)
+    assert read(aggregate/'gate.json')['final_eligible'] is False
+    assert not (root/'cases/width-8-ratio-75/evaluations').exists()
+
+
+def test_existing_case_child_is_never_attached_to_new_aggregate(joined_assets):
+    from jscc.ordinary_runs import reserve_attempt, finish_attempt
+    from jscc.experiment_records import write_json_atomic
+    _, _, root = prepared(joined_assets)
+    # Labeled orphan-output boundary fixture; no model scoring is claimed here.
+    old = reserve_attempt(root/'cases'/CASE, 'evaluation', attempt_id='orphan')
+    write_json_atomic(old/'result.json', {'panels': dict(requested=3, completed=3,
+        failed=0, pending=0, requested_items=9, observed_items=9), 'fixture': 'historical child'})
+    finish_attempt(old, 'completed')
+    before = {path.name: path.read_bytes() for path in old.iterdir() if path.is_file()}
+    with pytest.raises(FileExistsError):
+        evaluate(root, attempt_id='orphan')
+    report = read(root/'evaluations/evaluation-orphan/results.json')
+    assert report['cases'][0]['evaluation'] is None
+    assert report['counts']['panels']['completed'] == report['counts']['panels']['observed_items'] == 0
+    assert all((old/name).read_bytes() == data for name, data in before.items())
 
 
 def test_panel_failure_retains_completed_pending_and_rerun_is_fresh(joined_assets, monkeypatch):
@@ -237,7 +294,7 @@ def test_duplicate_evaluation_override_and_changed_policy_reject_before_outputs(
     assert not list(root.glob('cases/*/evaluations/*'))
 
 
-def test_duplicate_numeric_conditions_reject_before_prepared_outputs(joined_assets):
+def test_duplicate_author_conditions_reject_without_evaluation_outputs(joined_assets):
     recipe, registrations, _ = registered(joined_assets)
     authored = yaml.safe_load(recipe.read_text())
     authored['evaluation']['conditions'] = [-6, -6.0]
@@ -245,4 +302,7 @@ def test_duplicate_numeric_conditions_reject_before_prepared_outputs(joined_asse
     root = joined_assets['root']/'duplicate-condition'
     with pytest.raises(ValueError, match='duplicate'):
         public(recipe, registrations, root, '--prepare-only')
-    assert not root.exists()
+    # The released training provider reserves its logical root before setup.
+    # This failure must not create any evaluation output or execute a case.
+    assert not list(root.glob('evaluations/*'))
+    assert not list(root.glob('cases/*'))
