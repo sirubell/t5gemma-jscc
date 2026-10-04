@@ -148,3 +148,159 @@ def run_original13_training(model, processor, *, plan, batches, metadata, observ
         write_manifest(output / 'campaign.json', result)
         raise
 
+
+
+def run_recipe_training(model, processor, *, plan, batches, metadata, output, guard,
+                        observe=None, resume=None, data_ids=None, synthetic=False, on_checkpoint=None):
+    """Run one YAML segment over indexed native16 inputs; no loading or submission.
+
+    observe(model, processor, state=ValidatedState, request=dict, output=Path,
+    guard=callable) is a released consumer seam. Required requests without a
+    consumer fail at setup. on_checkpoint is an optional durable-save notification.
+    """
+    from .original13_routing import create_recipe_learner
+    from .original13_state import (RecipeTrainingState, recipe_observation_snapshot,
+                                  restore_recipe_observation, _recipe_progress)
+    from .recipe_plan import RecipePlan
+    from .config import save_config
+    from .baseline_protocol import bind_batch_identity
+    from .encoder_stages_evaluation import ObservationScoringError
+    if not isinstance(plan, RecipePlan):
+        raise TypeError('recipe runner requires RecipePlan')
+    description = plan.description
+    if (metadata['config_identity'] != canonical_digest(description['config'])
+            or (data_ids is not None and canonical_digest(data_ids) != metadata['data_identity'])
+            or (not synthetic and data_ids is None)):
+        raise ValueError('recipe run config/data identities differ')
+    if len(batches) != plan.q:
+        raise ValueError('recipe runner requires Q indexed batches')
+    if description['observations'] and observe is None:
+        raise ValueError('recipe observations require an explicit released consumer')
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    result = {'schema': 'recipe-training-v1', 'status': 'incomplete', 'plan_identity': plan.identity,
+        'completed_updates': 0, 'checkpoints': [], 'observations': [
+            {**r, 'status': 'pending', 'requires_explicit_completion': False} for r in description['observations']],
+        'segment_parent': None if resume is None else asdict(resume)}
+    write_manifest(output/'campaign.json', result)
+    learner = None
+    metrics = None
+    try:
+        import os
+        import json
+        metrics = (output/'metrics.jsonl').open('xb')
+        def append_recipe_event(event):
+            # The retained writer validates fixed original13 objectives. Recipe
+            # events carry generalized weights and progress in their own schema.
+            event['schema'] = 'recipe-training-event-v1'
+            encoded = json.dumps(event, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+            if metrics.write(encoded) != len(encoded):
+                raise OSError('partial recipe event append')
+            metrics.flush()
+            os.fsync(metrics.fileno())
+        save_config(description['config'], output/'config.yaml')
+        write_manifest(output/'recipe.json', description)
+        if data_ids is not None:
+            write_manifest(output/'data_ids.json', data_ids)
+        learner = create_recipe_learner(model, plan=plan, metadata=metadata,
+            event_sink=append_recipe_event, synthetic=synthetic)
+        state_machine = RecipeTrainingState(learner, plan=plan, metadata=metadata)
+        restored = None
+        if resume is not None:
+            candidate = state_machine._open(resume)
+            if candidate.payload['metadata']['completed_updates'] == plan.horizon:
+                raise ValueError('terminal recipe state requires evaluation, not training')
+            restored = state_machine.restore(resume)
+            for observation in result['observations']:
+                if observation['step'] <= learner.completed:
+                    observation.update(status='pending_prior_segment', requires_explicit_completion=True)
+        initial_completed = learner.completed
+
+        def publish(role):
+            saved = state_machine.save(output/f'step_{learner.completed:06d}_{role}.pt')
+            result['checkpoints'].append({'role': role, **asdict(saved.reference)})
+            result['completed_updates'] = learner.completed
+            write_manifest(output/'campaign.json', result)
+            if on_checkpoint is not None:
+                on_checkpoint(saved, role)
+            return saved
+
+        if restored is not None and learner.completed == plan.stages[1].start and learner.phase_start_step == 0:
+            state_machine.reset(restored)
+            publish('post_reset')
+        view_index, batch, binding = None, None, None
+        while True:
+            guard()
+            step = learner.completed
+            for save_step, role in description['checkpoint_states']:
+                if save_step != step or role == 'post_reset' or (resume is not None and step == initial_completed):
+                    continue
+                saved = publish(role)
+                for row in result['observations']:
+                    if row['step'] != step or row['state'] != role:
+                        continue
+                    request = {**{k: v for k, v in row.items() if k not in {
+                        'status', 'requires_explicit_completion'}}, 'plan_identity': plan.identity,
+                        'checkpoint_sha256': saved.reference.sha256}
+                    if observe is None:
+                        raise ValueError('missing recipe observation consumer')
+                    snapshot = recipe_observation_snapshot(state_machine)
+                    error = None
+                    try:
+                        receipt = observe(model, processor, state=saved, request=request,
+                            output=output/f'observation_{step:06d}_{role}', guard=guard)
+                        if (receipt.get('status') != 'complete'
+                                or receipt.get('request_identity') != canonical_digest(request)):
+                            raise ValueError('recipe observation receipt identity/status differs')
+                    except ObservationScoringError as exc:
+                        error = {'type': type(exc).__name__, 'message': str(exc)}
+                    finally:
+                        restore_recipe_observation(state_machine, snapshot)
+                    open_state(saved.reference, expected=saved.payload['metadata'])
+                    row.update(status='failed' if error else 'complete', error=error,
+                               requires_explicit_completion=bool(error), request_identity=canonical_digest(request))
+                    write_manifest(output/'campaign.json', result)
+                if role == 'pre_reset':
+                    state_machine.reset(saved)
+                    publish('post_reset')
+            if step == plan.horizon:
+                break
+            expected = plan.update_at(step)
+            if view_index != expected.site_local_index:
+                view_index = expected.site_local_index
+                batch = batches[view_index]
+                if batch_view(batch) != expected.view:
+                    raise ValueError('recipe indexed batch differs from bound view')
+                binding = bind_batch_identity(batch, expected_identity=expected.view.view_sha256)
+            used = [g['lr'] for g in learner.optimizer.param_groups]
+            event = learner.update([batch], batch_identities=[binding])
+            if (learner.completed != step + 1 or learner.exposure.completed != learner.completed
+                    or any(lr != description['config']['training']['lr'] * expected.lr_factor for lr in used)
+                    or event['payload']['lr_used'] != used):
+                raise ValueError('recipe update progress or consumed LR differs')
+        counts = learner.exposure.finalize()
+        events = [e for e in (json.loads(line) for line in (output/'metrics.jsonl').read_text().splitlines())
+                  if e['event_type'] == 'update']
+        if [e['payload']['completed_step'] for e in events] != list(range(initial_completed+1, plan.horizon+1)):
+            raise ValueError('recipe segment update log incomplete')
+        terminal = next(c for c in result['checkpoints'] if c['role'] == 'terminal')
+        freeze = {'schema': 'recipe-freeze-v1', 'status': 'training_frozen', 'plan_identity': plan.identity,
+            'checkpoint': {k: terminal[k] for k in ('path', 'sha256', 'size')}, 'counts': counts,
+            'progress': _recipe_progress(plan, learner.completed, learner.phase_start_step),
+            'segment_ancestry': state_machine.ancestry,
+            'metrics': {'path': str(output/'metrics.jsonl'), 'sha256': file_digest(output/'metrics.jsonl')}}
+        write_manifest(output/'freeze.json', freeze)
+        result.update(status='training_frozen', completed_updates=learner.completed, segment_updates=len(events),
+            observations_status='complete' if all(r['status'] == 'complete' for r in result['observations']) else 'pending',
+            freeze_reference={'path': str(output/'freeze.json'), 'sha256': file_digest(output/'freeze.json')})
+        write_manifest(output/'campaign.json', result)
+        return result
+    except Exception as exc:
+        result.update(completed_updates=0 if learner is None else learner.completed,
+                      error={'type': type(exc).__name__, 'message': str(exc)})
+        write_manifest(output/'campaign.json', result)
+        raise
+
+    finally:
+        if metrics is not None:
+            metrics.close()

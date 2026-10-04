@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import copy
 import hashlib
 import io
+import math
 import os
 from pathlib import Path
 import random
@@ -99,7 +100,7 @@ def _validate(payload):
         raise ValueError("incomplete or unknown state payload")
     if (
         payload["schema"] != "experiment-state-v2"
-        or payload["kind"] not in {"single_site_v2", "shared_encoder_v2", "original13_v1"}
+        or payload["kind"] not in {"single_site_v2", "shared_encoder_v2", "original13_v1", "recipe_v1"}
     ):
         raise ValueError("unsupported state schema/kind")
     metadata = payload["metadata"]
@@ -112,13 +113,17 @@ def _validate(payload):
             raise ValueError(f"missing {key}")
     count = metadata["completed_updates"]
     phase_count = count
+    if payload['kind'] == 'recipe_v1':
+        from .original13_state import validate_recipe_state
+        validate_recipe_state(payload)
+        phase_count = payload['stream']['phase_local_completed']
     if payload['kind'] == 'original13_v1':
         from .encoder_stages_plan import validate_original13_state
         validate_original13_state(payload)
         phase_count = payload['stream']['phase_local_completed']
     if metadata.get('protocol_identity') == 'encoder-original6-native16-stages-v1':
         phase_count = metadata['sharing']['phase_local_completed']
-    if payload['kind'] == 'original13_v1':
+    if payload['kind'] in {'original13_v1', 'recipe_v1'}:
         pass  # Validated by the original13 trust-boundary validator above.
     elif payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
         from .sharing_state import validate_sharing_state
@@ -161,6 +166,17 @@ def _validate(payload):
         "_growth_tracker",
     }:
         raise ValueError("incomplete scaler state")
+    if scaler_state:
+        for key in ("scale", "growth_factor", "backoff_factor"):
+            value = scaler_state[key]
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError("invalid scaler value")
+        if (scaler_state["scale"] <= 0 or scaler_state["growth_factor"] <= 1
+                or not 0 < scaler_state["backoff_factor"] < 1
+                or type(scaler_state["growth_interval"]) is not int or scaler_state["growth_interval"] <= 0
+                or type(scaler_state["_growth_tracker"]) is not int
+                or not 0 <= scaler_state["_growth_tracker"] < scaler_state["growth_interval"]):
+            raise ValueError("invalid scaler progression")
     if (
         not isinstance(payload["rng"]["torch"], torch.Tensor)
         or payload["rng"]["torch"].dtype != torch.uint8
@@ -201,7 +217,8 @@ def _validate(payload):
                     raise ValueError("optimizer/global update mismatch")
                 for key in ("exp_avg", "exp_avg_sq"):
                     value = moments[key]
-                    if tuple(value.shape) != shape or not torch.isfinite(value).all():
+                    if (not isinstance(value, torch.Tensor) or tuple(value.shape) != shape
+                            or str(value.dtype) != dtype or not torch.isfinite(value).all()):
                         raise ValueError("invalid optimizer moments")
     if metadata["parent_identity"] is not None:
         if (
@@ -221,6 +238,8 @@ def save_state(path, *, model, optimizer, scheduler, scaler, metadata, stream_st
                weight_export=None):
     """Durably publish once. A failed save never replaces any existing parent."""
     body = model.state_dict() if weight_export is None else weight_export()
+    if any(not isinstance(v, torch.Tensor) or not torch.isfinite(v).all() for v in body.values()):
+        raise ValueError('nonfinite or invalid communication weights')
     if weight_export is not None:
         current = model.state_dict()
         if current.keys() != body.keys() or any(
@@ -229,7 +248,7 @@ def save_state(path, *, model, optimizer, scheduler, scaler, metadata, stream_st
             raise ValueError('canonical export must contain exactly the communication body')
     payload = dict(
         schema="experiment-state-v2",
-        kind=('original13_v1' if 'original13_plan' in metadata else
+        kind=('recipe_v1' if 'recipe_plan' in metadata else 'original13_v1' if 'original13_plan' in metadata else
               "shared_encoder_v2" if metadata.get("sharing", {}).get("learner") == "shared" else "single_site_v2"),
         metadata=copy.deepcopy(metadata),
         parameter_map=parameter_map(model, optimizer),
@@ -294,16 +313,7 @@ def restore_state(validated: ValidatedState, *, model, optimizer, scheduler, sca
         validated.reference, expected=validated.payload["metadata"]
     ).payload
     _validate(payload)
-    if parameter_map(model, optimizer) != payload["parameter_map"]:
-        raise ValueError("optimizer parameter-map mismatch")
-    current = model.state_dict()
-    if current.keys() != payload["model"].keys() or any(
-        current[k].shape != v.shape or current[k].dtype != v.dtype
-        for k, v in payload["model"].items()
-    ):
-        raise ValueError("communication architecture mismatch")
-    if (scaler is None) != (payload["scaler"] is None):
-        raise ValueError("scaler presence mismatch")
+    preflight_restore(payload, model=model, optimizer=optimizer, scaler=scaler)
     if weight_load is None:
         model.load_state_dict(payload["model"], strict=True)
     else:
@@ -341,3 +351,26 @@ def branch_metadata(validated: ValidatedState, *, phase):
     metadata["phase"] = phase
     metadata["parent_identity"] = validated.reference.sha256
     return metadata
+
+
+def preflight_restore(payload, *, model, optimizer, scaler):
+    """Reject architecture/scaler/backend/RNG incompatibility before loading weights."""
+    if parameter_map(model, optimizer) != payload["parameter_map"]:
+        raise ValueError("optimizer parameter-map mismatch")
+    current = model.state_dict()
+    if current.keys() != payload["model"].keys() or any(
+        current[k].shape != v.shape or current[k].dtype != v.dtype
+        for k, v in payload["model"].items()
+    ):
+        raise ValueError("communication architecture mismatch")
+    if (scaler is None) != (payload["scaler"] is None):
+        raise ValueError("scaler presence mismatch")
+    if scaler is not None:
+        if scaler.is_enabled() != bool(payload["scaler"]):
+            raise ValueError("scaler enabled status mismatch")
+        candidate = copy.deepcopy(scaler)
+        candidate.load_state_dict(copy.deepcopy(payload["scaler"]))
+        if candidate.state_dict() != payload["scaler"]:
+            raise ValueError("scaler state cannot be restored exactly")
+    with isolated_rng():
+        restore_rng(payload["rng"])
