@@ -36,7 +36,8 @@ def state_exact(left, right):
     if type(left) is not type(right):
         return False
     if torch.is_tensor(left):
-        return left.dtype == right.dtype and torch.equal(left, right)
+        return (left.dtype == right.dtype and left.shape == right.shape
+                and torch.equal(left.detach().cpu(), right.detach().cpu()))
     if isinstance(left, np.ndarray):
         return left.dtype == right.dtype and np.array_equal(left, right)
     if isinstance(left, dict):
