@@ -3,7 +3,12 @@
 set -euo pipefail
 release=${1:?release}
 prepared=${2:?prepared study}
-phase=${3:?capacity, scoring, train, evaluate, or vanilla}
+phase=${3:?scoring, train, evaluate, or vanilla}
+case "$phase" in
+  scoring|train|evaluate|vanilla) ;;
+  capacity) echo "The capacity phase is retired" >&2; exit 2 ;;
+  *) echo "Unknown phase: $phase" >&2; exit 2 ;;
+esac
 output=${4:?artifact directory}
 cd "$release"
 # A source-only release must not inherit the parent checkout's unrelated commit.
@@ -17,9 +22,6 @@ nvidia-smi --query-gpu=timestamp,uuid,name,utilization.gpu,memory.used,power.dra
 telemetry_pid=$!
 trap 'kill "$telemetry_pid" 2>/dev/null || true' EXIT
 case "$phase" in
-  capacity)
-    uv run --locked --no-sync python -m scripts.outer_ln_capacity --manifest "$prepared/study-manifest.proposed.json" --indices "${5:?indices}" --output "$output/capacity-${SLURM_ARRAY_TASK_ID:-0}"
-    ;;
   scoring)
     # Exact archived preflight checkpoints are evaluation fixtures only.
     for route in enc_l9 dec_l8; do
@@ -44,5 +46,4 @@ PY
     bash scripts/slurm_study.sh evaluate "$prepared/vanilla-manifest.proposed.json" --fixed-step --checkpoint step_005000.pt --expected-step 5000 --attempt vanilla --evaluation-config "$prepared/vanilla.yaml"
     uv run --locked --no-sync python -m jscc.outer_ln_gate --manifest "$prepared/study-manifest.proposed.json" --output "$output/first-wave-gate.json"
     ;;
-  *) echo "Unknown phase: $phase" >&2; exit 2 ;;
 esac

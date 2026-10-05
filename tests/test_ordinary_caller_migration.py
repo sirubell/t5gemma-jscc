@@ -112,6 +112,95 @@ def test_retired_modules_and_retained_helpers():
     assert all(hasattr(prompt_policy_job, name) for name in ("sha", "validate_run"))
 
 
+@pytest.mark.parametrize("phase", ["capacity", "unknown"])
+def test_outer_ln_rejects_unsupported_phase_before_setup(tmp_path, phase):
+    environment, log = job_fixture(tmp_path)
+    gpu = tmp_path / ".local/bin/nvidia-smi"
+    gpu.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(log)!r}).touch()\n")
+    output = tmp_path / "output"
+    # Missing release and runtime identity must not obscure phase rejection.
+    environment.pop("SLURM_JOB_ID", None)
+    result = subprocess.run(["/bin/bash", str(ROOT / "scripts/slurm_outer_ln.sh"),
+                             str(tmp_path / "missing-release"), "unused-study", phase,
+                             str(output)], env=environment, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert ("retired" if phase == "capacity" else "Unknown phase") in result.stderr
+    assert not output.exists() and not log.exists()
+
+
+@pytest.mark.parametrize("phase", ["scoring", "train", "evaluate", "vanilla"])
+def test_outer_ln_supported_dispatch_retains_recorded_targets(tmp_path, phase):
+    shell_version = subprocess.check_output(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"], text=True)
+    if phase == "scoring" and int(shell_version) < 4:
+        pytest.skip("Retained scoring uses empty arrays under nounset, unsupported by Bash 3.2")
+    environment, log = job_fixture(tmp_path)
+    bindir = tmp_path / ".local/bin"
+    # Only argv is captured: no study, scoring engine or GPU process executes.
+    for name in ("bash", "uv", "nvidia-smi"):
+        tool = bindir / name
+        tool.write_text(f'''#!{sys.executable}
+import json, sys
+from pathlib import Path
+with Path({str(log)!r}).open("a") as stream:
+    stream.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]])+"\\n")
+''')
+        tool.chmod(0o755)
+    release = tmp_path / "release"
+    inputs = release / "outer-input"
+    inputs.mkdir(parents=True)
+    runs = {"enc_l9": "/recorded/encoder-attempt", "dec_l8": "/recorded/decoder-attempt"}
+    (inputs / "scoring-runs.json").write_text(json.dumps(runs))
+    prepared, output = tmp_path / "prepared", tmp_path / "output"
+    result = subprocess.run(["/bin/bash", str(ROOT / "scripts/slurm_outer_ln.sh"),
+                             str(release), str(prepared), phase, str(output)],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    dispatch = [row for row in commands if row[0] != "nvidia-smi"]
+    manifest = str(prepared / "study-manifest.proposed.json")
+    fixed = ["--fixed-step", "--checkpoint", "step_005000.pt", "--expected-step", "5000"]
+    if phase == "scoring":
+        expected = []
+        for route in ("enc_l9", "dec_l8"):
+            row = ["uv", "run", "--locked", "--no-sync", "python", "-m",
+                   "scripts.outer_ln_scoring_check", "--run", runs[route], "--checkpoint",
+                   "step_000080.pt", "--samples", str(inputs / "scoring-documents.jsonl"),
+                   "--output", str(output / f"scoring-{route}")]
+            if route == "enc_l9":
+                row += ["--tensor-fixtures", str(inputs / "anomaly-fixtures.json")]
+            expected.append(row)
+    elif phase == "train":
+        expected = [["bash", "scripts/slurm_study.sh", "train", manifest]]
+    elif phase == "evaluate":
+        expected = [["bash", "scripts/slurm_study.sh", "evaluate", manifest, *fixed,
+                     "--attempt", "codec"]]
+    else:
+        expected = [["bash", "scripts/slurm_study.sh", "evaluate",
+                     str(prepared / "vanilla-manifest.proposed.json"), *fixed,
+                     "--attempt", "vanilla", "--evaluation-config", str(prepared / "vanilla.yaml")],
+                    ["uv", "run", "--locked", "--no-sync", "python", "-m", "jscc.outer_ln_gate",
+                     "--manifest", manifest, "--output", str(output / "first-wave-gate.json")]]
+    assert dispatch == expected
+
+
+def test_native_preflight_execution_rejects_without_model_imports():
+    # Importing the retained digest stays usable; execution fails before setup.
+    from scripts.native_preflight_eval import digest
+    assert digest({"b": 2, "a": 1}) == digest({"a": 1, "b": 2})
+    code = """import runpy, sys
+class RejectRuntime:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'torch', 'jscc', 'lm_eval'}:
+            raise AssertionError('runtime import before rejection: ' + fullname)
+sys.meta_path.insert(0, RejectRuntime())
+runpy.run_module('scripts.native_preflight_eval', run_name='__main__')
+"""
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                            capture_output=True, text=True)
+    assert result.returncode != 0 and "execution is retired" in result.stderr
+    assert "runtime import before rejection" not in result.stderr
+
+
 @pytest.mark.parametrize("task", ["coco", "hellaswag"])
 def test_study_public_recorded_chain_with_distinct_evaluations(tmp_path, monkeypatch, task):
     """Actual record/reservation APIs; explicitly fake training and scoring engines."""
