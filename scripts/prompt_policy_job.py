@@ -1,11 +1,12 @@
-"""Execute an approved fixed-config train or eval task without checkpoint fallback."""
+"""Strict readers for historical fixed-budget prompt-policy engine runs.
 
-import argparse
+The prompt-policy training/evaluation executor is retired. Historical readers
+retain exact configuration, source, budget and checkpoint bindings.
+"""
+
 import hashlib
 import json
 from pathlib import Path
-import subprocess
-import sys
 
 
 def sha(path):
@@ -46,89 +47,5 @@ def validate_run(run, expected, config_hash):
     return checkpoint
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--root", type=Path, required=True)
-    p.add_argument("--split", required=True)
-    p.add_argument(
-        "--phase",
-        choices=["train", "eval5", "eval0", "vanilla5", "vanilla0"],
-        required=True,
-    )
-    a = p.parse_args()
-    root = a.root
-    manifest = json.loads((root / "APPROVAL-CARD.json").read_text())
-    config = root / "configs" / f"{a.split}.yaml"
-    expected = manifest["config_sha256"][config.name]
-    if sha(config) != expected:
-        raise ValueError("Frozen config changed")
-    link = root / "links" / f"{a.split}-train.txt"
-    if a.phase == "train":
-        subprocess.run(
-            [
-                sys.executable,
-                "train.py",
-                "--config",
-                str(config),
-                "--run-path-file",
-                str(link),
-            ],
-            check=True,
-        )
-        run = Path(link.read_text().strip())
-        (run / "launch-binding.json").write_text(
-            json.dumps({"prepared_config_sha256": expected}) + "\n"
-        )
-        validate_run(run, 10000, expected)
-    else:
-        evaluation_config = root / "evaluation" / f"{a.phase}.yaml"
-        if (
-            sha(evaluation_config)
-            != manifest["evaluation_sha256"][evaluation_config.name]
-        ):
-            raise ValueError("Evaluation config changed")
-        run = Path(link.read_text().strip())
-        checkpoint = validate_run(run, 10000, expected)
-        out = root / "links" / f"{a.split}-{a.phase}.txt"
-        subprocess.run(
-            [
-                sys.executable,
-                "evaluate.py",
-                "--run",
-                str(run),
-                "--checkpoint",
-                checkpoint.name,
-                "--expected-step",
-                "10000",
-                "--config",
-                str(root / "evaluation" / f"{a.phase}.yaml"),
-                "--output-path-file",
-                str(out),
-            ],
-            check=True,
-        )
-        result = json.loads(
-            (Path(out.read_text().strip()) / "results.json").read_text()
-        )
-        expected_conditions = (
-            ["no_noise", -6, 6, 18]
-            if a.phase == "eval5"
-            else (["vanilla"] if a.phase.startswith("vanilla") else ["no_noise"])
-        )
-        count = len(expected_conditions)
-        if result["optimizer_step"] != 10000 or len(result["conditions"]) != count:
-            raise ValueError("Incomplete formal evaluation")
-        if [c["condition"] for c in result["conditions"]] != expected_conditions:
-            raise ValueError("Wrong condition scope")
-        for c in result["conditions"]:
-            if not (
-                c["compact_num_samples"] == 10042
-                and c["finite_scores"]
-                and c["num_fewshot"] == (0 if a.phase.endswith("0") else 5)
-                and c["candidate_forward_requests"] == 40168
-            ):
-                raise ValueError("Incomplete sample/request/scoring scope")
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit("Prompt-policy execution is retired; use explicit ordinary training/evaluation commands.")

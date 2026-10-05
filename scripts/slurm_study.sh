@@ -18,14 +18,15 @@ fixed_step=false
 checkpoint=""
 expected_step=""
 evaluation_config=""
+attempt=""
 while (( $# )); do
   case "$1" in
     --fixed-step) fixed_step=true; shift ;;
-    --checkpoint|--expected-step|--evaluation-config)
+    --checkpoint|--expected-step|--evaluation-config|--attempt)
       if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
         echo "$1 requires a value" >&2; exit 2
       fi
-      if [[ "$1" == --checkpoint ]]; then checkpoint="$2"; elif [[ "$1" == --expected-step ]]; then expected_step="$2"; else evaluation_config="$2"; fi
+      if [[ "$1" == --checkpoint ]]; then checkpoint="$2"; elif [[ "$1" == --expected-step ]]; then expected_step="$2"; elif [[ "$1" == --evaluation-config ]]; then evaluation_config="$2"; else attempt="$2"; fi
       shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -39,8 +40,12 @@ fi
 if [[ -n "$evaluation_config" && "$phase" != evaluate ]]; then
   echo "--evaluation-config requires evaluate" >&2; exit 2
 fi
+if [[ -n "$attempt" && "$phase" != evaluate ]]; then
+  echo "--attempt requires evaluate" >&2; exit 2
+fi
 args=("$phase" --manifest "$manifest" --index "${SLURM_ARRAY_TASK_ID:?Use --array}")
 if [[ -n "$checkpoint" ]]; then args+=(--checkpoint "$checkpoint"); fi
 if [[ -n "$expected_step" ]]; then args+=(--expected-step "$expected_step"); fi
 if [[ -n "$evaluation_config" ]]; then args+=(--evaluation-config "$evaluation_config"); fi
+if [[ -n "$attempt" ]]; then args+=(--attempt "$attempt"); fi
 uv run --locked --no-sync python -m jscc.study_task "${args[@]}"

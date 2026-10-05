@@ -145,6 +145,7 @@ def test_train_evaluate_pairing_uses_the_same_index(tmp_path, monkeypatch):
     assert calls[0][calls[0].index("--config") + 1] == str(manifest.parent / entries[1]["config"])
     assert calls[1][calls[1].index("--run") + 1] == str(trained)
     assert calls[1][-1] == "last.pt"
+    assert calls[0][calls[0].index("--output") + 1] == str(manifest.parent / "runs" / manifest.name / "0001")
     assert not (manifest.parent / entries[0]["run_link"]).exists()
     with pytest.raises(FileExistsError):
         run_task(manifest, 1, "train")
@@ -178,3 +179,85 @@ def test_cli_preview_has_no_execution_or_filesystem_output(tmp_path, monkeypatch
     study.main()
     assert "13 training configurations; no jobs started" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["index", "duplicate", "absolute", "escape", "symlink", "overlap"])
+def test_manifest_paths_reject_before_execution(tmp_path, monkeypatch, kind):
+    manifest = export_study(expand_study(CONFIGS / "studies/baseline.yaml"), tmp_path / "plan")
+    record = json.loads(manifest.read_text())
+    if kind == "index":
+        record["runs"][1]["index"] = 0
+    elif kind == "duplicate":
+        record["runs"][1]["run_link"] = record["runs"][0]["run_link"]
+    elif kind == "absolute":
+        record["runs"][0]["config"] = str(tmp_path / "foreign.yaml")
+    elif kind == "escape":
+        record["runs"][0]["run_link"] = "../foreign.txt"
+    elif kind == "symlink":
+        (manifest.parent / "alias").symlink_to(tmp_path)
+        record["runs"][0]["run_link"] = "alias/foreign.txt"
+    else:
+        record["runs"][0]["run_link"] = "runs/manifest.json/0001/receipt.txt"
+    manifest.write_text(json.dumps(record))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("child execution"))
+    with pytest.raises(ValueError):
+        run_task(manifest, 0, "train")
+
+
+@pytest.mark.parametrize("used", ["root", "dangling_root", "dangling_link"])
+def test_study_rejects_retained_failure_or_dangling_paths(tmp_path, monkeypatch, used):
+    manifest = export_study(expand_study(CONFIGS / "studies/baseline.yaml"), tmp_path / "plan")
+    output = manifest.parent / "runs" / manifest.name / "0000"
+    link = manifest.parent / "links" / "0000.txt"
+    if used == "root":
+        output.mkdir(parents=True)
+    elif used == "dangling_root":
+        output.parent.mkdir(parents=True)
+        output.symlink_to(tmp_path / "missing")
+    else:
+        link.symlink_to(tmp_path / "missing")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("child execution"))
+    with pytest.raises((FileExistsError, ValueError)):
+        run_task(manifest, 0, "train")
+
+
+def test_moved_plans_and_full_filenames_select_distinct_fresh_roots(tmp_path, monkeypatch):
+    original = tmp_path / "original"
+    manifest = export_study(expand_study(CONFIGS / "studies/baseline.yaml"), original)
+    moved = tmp_path / "moved"
+    shutil.move(str(original), moved)
+    manifest = moved / manifest.name
+    second = moved / "alternate.json"
+    shutil.copyfile(manifest, second)
+    commands = []
+    def invoke(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        assert not output.exists()
+        commands.append(command)
+    monkeypatch.setattr(subprocess, "run", invoke)
+    run_task(manifest, 0, "train")
+    run_task(manifest, 1, "train")
+    run_task(second, 0, "train")
+    outputs = [Path(row[row.index("--output")+1]) for row in commands]
+    assert outputs == [moved/"runs"/"manifest.json"/"0000", moved/"runs"/"manifest.json"/"0001",
+                       moved/"runs"/"alternate.json"/"0000"]
+
+
+
+def test_evaluation_only_manifest_can_share_training_link(tmp_path, monkeypatch):
+    manifest = tmp_path / "panels.json"
+    rows = [{"index": index, "task": "coco", "experiment": "panels", "seed": 0,
+             "run_link": "training.txt", "evaluation_link": f"{attempt}.txt"}
+            for index, attempt in enumerate(("codec", "vanilla"))]
+    manifest.write_text(json.dumps({"version": 1, "runs": rows}))
+    (tmp_path / "training.txt").write_text(str(tmp_path / "retained-root"))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kw: calls.append(command))
+    for index, attempt in enumerate(("codec", "vanilla")):
+        run_task(manifest, index, "evaluate", attempt=attempt)
+    assert [row[row.index("--run")+1] for row in calls] == [str(tmp_path/"retained-root")]*2
+    assert [row[row.index("--attempt")+1] for row in calls] == ["codec", "vanilla"]
+    assert [row[row.index("--output-path-file")+1] for row in calls] == [
+        str(tmp_path/"codec.txt"), str(tmp_path/"vanilla.txt")]
+    with pytest.raises(ValueError, match="training links must be distinct"):
+        run_task(manifest, 0, "train")

@@ -6,7 +6,45 @@ import subprocess
 import sys
 
 
-def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, evaluation_config=None):
+def _contained(directory, value):
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        raise ValueError("study paths must be nonempty relative filenames")
+    path = (directory / value).resolve()
+    if directory not in path.parents:
+        raise ValueError("study path escapes manifest directory")
+    return directory / value
+
+
+def _manifest_paths(manifest_path, entries, phase):
+    directory = manifest_path.parent
+    links, outputs = [], []
+    for position, row in enumerate(entries):
+        if "index" in row and (type(row["index"]) is not int or row["index"] != position):
+            raise ValueError("study entry index must equal its positional index")
+        if "config" in row:
+            _contained(directory, row["config"])
+        link = _contained(directory, row["run_link"])
+        if phase == "train" and link.resolve() in [item.resolve() for item in links]:
+            raise ValueError("study training links must be distinct")
+        links.append(link)
+        outputs.append(directory / "runs" / manifest_path.name / f"{position:04d}")
+        if row.get("evaluation_link"):
+            _contained(directory, row["evaluation_link"])
+    for link in links:
+        resolved_link = link.resolve()
+        for output in outputs:
+            resolved_output = output.resolve()
+            if (resolved_link == resolved_output or resolved_output in resolved_link.parents
+                    or resolved_link in resolved_output.parents):
+                raise ValueError("study links and training roots must be disjoint")
+    return links, outputs
+
+
+def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, evaluation_config=None, *, attempt=None):
+    if phase not in ("train", "evaluate"):
+        raise ValueError("phase must be train or evaluate")
+    if attempt is not None and phase != "evaluate":
+        raise ValueError("attempt is only supported for evaluate")
     if evaluation_config and phase != "evaluate":
         raise ValueError("evaluation config is only supported for evaluate")
     if expected_step is not None:
@@ -23,28 +61,31 @@ def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, e
         raise ValueError("Unsupported study manifest version")
     if index < 0 or index >= len(manifest["runs"]):
         raise ValueError("Study index is out of range")
+    links, outputs = _manifest_paths(manifest_path, manifest["runs"], phase)
     entry = manifest["runs"][index]
     directory = manifest_path.parent
-    link = directory / entry["run_link"]
+    link = links[index]
     root = Path(__file__).resolve().parents[1]
     if phase == "train":
-        if link.exists():
+        if link.exists() or link.is_symlink() or outputs[index].exists() or outputs[index].is_symlink():
             raise FileExistsError("This study entry already has a completed training run; export a new plan for a new run")
         command = [sys.executable, str(root / "train.py"), "--config", str(directory / entry["config"]),
-                   "--run-path-file", str(link)]
+                   "--output", str(outputs[index]), "--run-path-file", str(link)]
     elif phase == "evaluate":
         # The train command writes this only after it returns successfully.
         run = link.read_text().strip()
         if not run:
             raise ValueError("Training run link is empty")
         command = [sys.executable, str(root / "evaluate.py"), "--run", run, "--checkpoint", checkpoint]
+        if attempt is not None:
+            command += ["--attempt", attempt]
         if expected_step is not None:
             command += ["--expected-step", str(expected_step)]
         if evaluation_config:
             command += ["--config", str(Path(evaluation_config).resolve())]
         if entry.get("evaluation_link"):
-            result_link = directory / entry["evaluation_link"]
-            if result_link.exists():
+            result_link = _contained(directory, entry["evaluation_link"])
+            if result_link.exists() or result_link.is_symlink():
                 raise FileExistsError("This study entry already has a completed evaluation")
             command += ["--output-path-file", str(result_link)]
     else:
@@ -60,9 +101,13 @@ def main():
     parser.add_argument("--index", required=True, type=int)
     parser.add_argument("--checkpoint", help="checkpoint filename (default: best.pt)")
     parser.add_argument("--expected-step", type=int, help="require this exact saved optimizer step")
+    parser.add_argument("--attempt", help="explicit evaluation attempt name (default: 0001)")
     parser.add_argument("--evaluation-config", help="evaluation-only overrides, e.g. a shared vanilla panel")
     args = parser.parse_args()
-    if args.evaluation_config:
+    if args.attempt is not None:
+        run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step,
+                 args.evaluation_config, attempt=args.attempt)
+    elif args.evaluation_config:
         run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step, args.evaluation_config)
     else:
         run_task(args.manifest, args.index, args.phase, args.checkpoint, args.expected_step)

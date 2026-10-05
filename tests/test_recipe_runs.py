@@ -271,9 +271,12 @@ def test_public_check_rejects_unsupported_choices(joined_assets, change, message
 def test_public_ordinary_dispatch_preserved(joined_assets, monkeypatch):
     from train import main
     calls = []
-    monkeypatch.setattr('jscc.training.train', lambda config, resume=None: calls.append((config, resume)))
-    main(['--config', str(joined_assets['task']), '--resume', 'ordinary.pt'])
-    assert calls[0][0]['task'] == 'hellaswag' and calls[0][1] == 'ordinary.pt'
+    monkeypatch.setattr('jscc.ordinary_runs.train_task',
+        lambda config, output, **kwargs: calls.append((config, output, kwargs)))
+    root = joined_assets['root']/'ordinary'
+    main(['--config', str(joined_assets['task']), '--output', str(root), '--resume', 'ordinary.pt'])
+    assert calls[0][0]['task'] == 'hellaswag' and calls[0][1] == str(root)
+    assert calls[0][2]['resume'] == 'ordinary.pt'
 
 
 def test_public_check_rejects_unsupported_task(joined_assets):

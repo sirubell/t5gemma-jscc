@@ -37,11 +37,11 @@ PY
     bash scripts/slurm_study.sh train "$prepared/study-manifest.proposed.json"
     ;;
   evaluate)
-    bash scripts/slurm_study.sh evaluate "$prepared/study-manifest.proposed.json" --fixed-step --checkpoint step_005000.pt --expected-step 5000
+    bash scripts/slurm_study.sh evaluate "$prepared/study-manifest.proposed.json" --fixed-step --checkpoint step_005000.pt --expected-step 5000 --attempt codec
     ;;
   vanilla)
     export SLURM_ARRAY_TASK_ID=0
-    bash scripts/slurm_study.sh evaluate "$prepared/vanilla-manifest.proposed.json" --fixed-step --checkpoint step_005000.pt --expected-step 5000 --evaluation-config "$prepared/vanilla.yaml"
+    bash scripts/slurm_study.sh evaluate "$prepared/vanilla-manifest.proposed.json" --fixed-step --checkpoint step_005000.pt --expected-step 5000 --attempt vanilla --evaluation-config "$prepared/vanilla.yaml"
     uv run --locked --no-sync python -m jscc.outer_ln_gate --manifest "$prepared/study-manifest.proposed.json" --output "$output/first-wave-gate.json"
     ;;
   *) echo "Unknown phase: $phase" >&2; exit 2 ;;

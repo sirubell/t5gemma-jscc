@@ -330,7 +330,10 @@ def verify_training_completion(directory, manifest, index, card):
     run_text = (directory / manifest["runs"][index]["run_link"]).read_text().strip()
     if not run_text:
         raise ValueError("Completed training link is empty")
-    run = Path(run_text)
+    from jscc.outer_ln_gate import resolve_training_run
+    entry = manifest["runs"][index]
+    logical, run, config = resolve_training_run(run_text, expected_config=directory / entry["config"]
+                                              if "config" in entry else None)
     completion = json.loads((run / "completion.json").read_text())
     expected = {"reason": "max_steps", "step": card["updates"],
                 "optimizer_updates": card["updates"], "presentations": card["presentations_per_run"]}
@@ -338,12 +341,16 @@ def verify_training_completion(directory, manifest, index, card):
         if completion.get(key) != value:
             raise ValueError(f"Incomplete COCO training: {key}={completion.get(key)!r}, expected {value!r}")
     checkpoint = run / card["fixed_checkpoint"]
+    if checkpoint.resolve().parent != run:
+        raise ValueError("Fixed checkpoint outside its training attempt")
     if not checkpoint.is_file():
         raise ValueError("Final fixed-step checkpoint is missing")
     state = torch.load(checkpoint, weights_only=True, map_location="cpu")
+    if config is not None and state.get("config") != config:
+        raise ValueError("Saved checkpoint configuration differs from bound case")
     if type(state.get("step")) is not int or state["step"] != card["updates"]:
         raise ValueError("Saved checkpoint step differs from fixed training budget")
-    return {"run": str(run), "completion": completion,
+    return {"run": str(run), "logical_root": str(logical), "completion": completion,
             "checkpoint": str(checkpoint), "checkpoint_sha256": digest(checkpoint)}
 
 
@@ -380,14 +387,15 @@ def execute(directory, phase, index, expected_manifest_hash):
             completed_training = verify_training_completion(directory, manifest, index, card)
         if phase == "vanilla":
             assert completed_training is not None
-            run = completed_training["run"]
+            run = completed_training["logical_root"]
             subprocess.run([sys.executable, str(source_root / "evaluate.py"), "--run", run,
                 "--checkpoint", card["fixed_checkpoint"], "--expected-step", str(card["updates"]),
+                "--attempt", "vanilla",
                 "--config", str(directory / "vanilla.yaml"),
                 "--output-path-file", str(directory / "links/vanilla.txt")], cwd=source_root, check=True)
         else:
             from jscc.study_task import run_task
-            kwargs = ({"checkpoint": card["fixed_checkpoint"], "expected_step": card["updates"]}
+            kwargs = ({"checkpoint": card["fixed_checkpoint"], "expected_step": card["updates"], "attempt": "codec"}
                       if phase == "evaluate" else {})
             run_task(directory / "manifest.json", index, phase, **kwargs)
             if phase == "train":

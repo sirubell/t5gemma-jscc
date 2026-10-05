@@ -35,10 +35,10 @@ prepared/
   manifest.json          # Task/variation/seed/index and paths
   configs/               # Complete resolved single-run YAMLs
   links/                 # Filled after each successful training process
-  runs/                  # Created by actual training, not by export
+  runs/manifest.json/0000/ # Logical root reserved by actual training, not export
 ```
 
-The original task/model files are not needed to read an exported config. Its output directory is relative to the prepared folder, so the folder can be transferred before execution. The manifest records the source revision and dirty state when available, but it does not copy or pin code: run from the intended source checkout. After execution, run links contain host-specific paths to the actual training output.
+The original task/model files are not needed to read an exported config. Training roots derive from the resolved manifest path as `<manifest-parent>/runs/<full-manifest-filename>/<positional-index:04d>` (for example, `prepared/runs/manifest.json/0000`). The full filename distinguishes manifests in one folder; positional indices distinguish entries even with identical config names. Resolve this path after moving a prepared folder before execution. Export does not precreate these final roots. The manifest records the source revision and dirty state when available, but it does not copy or pin code: run from the intended source checkout. After execution, run links contain host-specific paths to the actual training output.
 
 The pre-H200 `configs/studies/hellaswag_diagnostic.yaml` plan is intentionally
 HellaSwag-only and expands to five entries: an `enc_fn` reference, old/new
@@ -112,7 +112,7 @@ GPU smoke.
 
 Run outputs and completed links remain on the execution host. Transferring a plan before execution does not automatically sync later results back to the development machine.
 
-Use a fresh prepared folder for a new training attempt. Each entry is independent; rerunning evaluation creates a new evaluation directory for the same recorded checkpoint. A completed training link is not overwritten by another training invocation.
+Use a fresh prepared folder for a new training execution. Existing success links or roots block replay, including dangling links and retained failed/interrupted roots without links. Neither study nor Slurm wrappers infer retry or resume; explicit continuation uses the retained logical root and exact checkpoint under the ordinary continuation policy, repeating unsaved work. Each evaluation selects its exact training link, including old engine-directory links; a successful link is a caller receipt rather than scientific completion proof. Choose a fresh `--attempt` for each evaluation; the default is `0001`, and used attempts reject replay. Codec and vanilla evaluations of one root require distinct attempt labels. Moving an already executed plan does not relocate the absolute paths saved in its links.
 
 ## Separate Slurm jobs
 
@@ -140,7 +140,7 @@ uv run --locked python -m jscc.study_task evaluate --manifest runs/studies/smoke
 
 All supplied split/bottleneck entries have small-model CPU forward/backward/generation tests. Full-weight GPU smoke has covered the shared baseline, not every sweep combination. A full-duration sweep is only needed to collect research results; for software/GPU readiness, first run short checks on the target GPU, especially early encoder splits and larger-memory variants. See [validation levels](validation.md#what-a-sweep-test-does-and-does-not-prove).
 
-Training retains its existing validation/checkpoint rules. Each evaluation uses best.pt by default and the saved configuration; the module CLI can select --checkpoint last.pt. All SNRs for one checkpoint remain in one evaluation process. Vanilla results are currently computed per entry rather than deduplicated across a study.
+Training retains its existing validation/checkpoint rules. The study runner explicitly selects `best.pt` by default for both recorded roots and historical engine-directory links, using the bound or saved configuration. Direct `evaluate.py --run <recorded-root>` without a checkpoint selects that root's eligible recorded target. The module CLI can explicitly select --checkpoint last.pt. All SNRs for one checkpoint remain in one evaluation process. Vanilla results are currently computed per entry rather than deduplicated across a study.
 
 This workflow provides planning and train/eval pairing. It does not automatically resume timeouts, tune resource requests, aggregate thesis figures, or reproduce historical protocols. Existing results remain separate from newly prepared plans.
 
@@ -150,15 +150,14 @@ For a study whose primary result is a fixed optimizer step, supply both the
 checkpoint filename and expected internal step. For example:
 
 ```bash
-uv run --locked python -m jscc.study_task evaluate --manifest PREPARED/manifest.json --index 0 --checkpoint step_020000.pt --expected-step 20000
+uv run --locked python -m jscc.study_task evaluate --manifest PREPARED/manifest.json --index 0 --checkpoint step_020000.pt --expected-step 20000 --attempt step20000
 ```
 
-The Slurm wrapper forwards these options and offers `--fixed-step` to require
+`--attempt` is evaluation-only and is also forwarded by the Slurm wrapper. Use distinct labels such as `codec` and `vanilla` when evaluating both panels on one training root. The Slurm wrapper forwards these options and offers `--fixed-step` to require
 both explicitly. Pass `--fixed-step --checkpoint step_020000.pt --expected-step
 20000` after the manifest argument. The evaluator validates the loaded
 checkpoint's integer `step` before constructing the model; a missing or incorrect
-checkpoint fails, with no fallback to `best.pt`. General evaluation still defaults
-to `best.pt` when no fixed-step contract is requested. These commands describe
+checkpoint fails, with no fallback to `best.pt`. The study runner selects `best.pt` when no fixed-step contract or checkpoint is requested. Direct public evaluation of a recorded root without `--checkpoint` selects its eligible recorded default. These commands describe
 argument flow, not permission to submit a study.
 
 ## Native-v2 outer-LN comparison

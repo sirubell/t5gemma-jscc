@@ -19,11 +19,81 @@ def sha(path):
     return h.hexdigest()
 
 
+def resolve_training_run(linked, path_map=None, expected_config=None):
+    """Resolve only the finalized training attempt recorded by this bound case."""
+    from .config import load_config
+    from .ordinary_runs import SCHEMA, bound_config
+
+    def storage_path(value):
+        path = Path(value).expanduser()
+        if path_map:
+            prefix, replacement = (Path(part).expanduser().resolve() for part in path_map)
+            normalized = path.resolve()
+            if normalized.is_relative_to(prefix):
+                path = replacement / normalized.relative_to(prefix)
+        return path.resolve()
+
+    if not str(linked).strip():
+        raise ValueError("Completed training link is empty")
+    logical = storage_path(linked)
+    markers = ("experiment.json", "case.json", "training.json", "attempt.json", "checkpoint.json")
+    if not any((logical / name).exists() or (logical / name).is_symlink() for name in markers):
+        return logical, logical, None
+    for name in ("case.json", "config.yaml", "training.json"):
+        if (logical / name).resolve().parent != logical:
+            raise ValueError("recorded case file outside its own case")
+    case = read(logical / "case.json")
+    experiment = storage_path(case["experiment"])
+    experiment_record_path = experiment / "experiment.json"
+    if experiment_record_path.resolve().parent != experiment:
+        raise ValueError("recorded experiment file outside its own root")
+    experiment_record = read(experiment_record_path)
+    if (case.get("schema") != SCHEMA
+            or (logical != experiment and logical.parent != experiment / "cases")
+            or (logical == experiment and case.get("case_id") is not None)
+            or (logical != experiment and case.get("case_id") != logical.name)
+            or (experiment / "cases").resolve() != experiment / "cases"
+            or experiment_record.get("schema") != SCHEMA
+            or storage_path(experiment_record["root"]) != experiment):
+        raise ValueError("incompatible recorded training case ancestry/schema")
+    config = bound_config(logical)
+    identity = hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    if case.get("effective_identity") != identity:
+        raise ValueError("recorded effective configuration identity changed")
+    training = read(logical / "training.json")
+    if not isinstance(training.get("path"), str) or not training["path"]:
+        raise ValueError("invalid recorded training path")
+    run = storage_path(training["path"])
+    attempts = logical / "attempts"
+    if attempts.resolve() != attempts or run.parent != attempts:
+        raise ValueError("recorded training attempt outside its own case")
+    attempt = read(run / "attempt.json")
+    if (attempt.get("schema") != SCHEMA or attempt.get("stage") != "training"
+            or attempt.get("status") != "completed" or storage_path(attempt["case"]) != logical
+            or run.name != f"training-{attempt.get('attempt_id')}"):
+        raise ValueError("recorded training requires its own finalized completed attempt")
+    import yaml
+    for name in ("attempt.json", "config.yaml", "completion.json"):
+        if (run / name).resolve().parent != run:
+            raise ValueError("recorded training evidence outside its own attempt")
+    if yaml.safe_load((run / "config.yaml").read_text()) != config:
+        raise ValueError("training engine configuration differs from its bound case")
+    if expected_config is not None:
+        expected = load_config(expected_config)
+        expected["run"]["output_dir"] = config["run"]["output_dir"]
+        if expected != config:
+            raise ValueError("recorded configuration differs from prepared study")
+    return logical, run, config
+
+
 def check(manifest_path, output, path_map=None):
     def storage_path(value):
-        if path_map and str(value).startswith(path_map[0] + "/"):
-            value = path_map[1] + str(value)[len(path_map[0]):]
-        return Path(value)
+        path = Path(value).expanduser().resolve()
+        if path_map:
+            prefix, replacement = (Path(part).expanduser().resolve() for part in path_map)
+            if path.is_relative_to(prefix):
+                path = replacement / path.relative_to(prefix)
+        return path.resolve()
 
     identity_map = {}
 
@@ -41,7 +111,8 @@ def check(manifest_path, output, path_map=None):
     evidence = {}
     identities = set()
     for e in entries:
-        run = storage_path((root/e['run_link']).read_text().strip())
+        logical, run, _ = resolve_training_run((root/e['run_link']).read_text().strip(), path_map,
+                                               root/e['config'] if 'config' in e else None)
         completion = read(run/'completion.json')
         assert completion['status'] == 'FULL_BUDGET_COMPLETED'
         assert completion['step'] == completion['optimizer_updates'] == 5000
@@ -49,6 +120,7 @@ def check(manifest_path, output, path_map=None):
         assert completion['source_verified'] and completion['presentation_budget_verified']
         ckpt = completion['final_checkpoint']
         assert ckpt['file'] == 'step_005000.pt' and ckpt['step'] == 5000
+        assert (run/ckpt['file']).resolve().parent == run
         assert sha(run/ckpt['file']) == ckpt['sha256']
         evaluation = storage_path((root/e['evaluation_link']).read_text().strip())
         results = read(evaluation/'results.json')
@@ -67,7 +139,7 @@ def check(manifest_path, output, path_map=None):
         evidence[e['run_id']] = {'completion': completion, 'initial': read(run/'initialization.json'),
                                  'presentations': read(run/'presentations.json'),
                                  'noise': [json.loads(s) for s in (run/'randomness_audit.jsonl').read_text().splitlines()],
-                                 'run': str(run), 'evaluation': str(evaluation)}
+                                 'run': str(run), 'logical_root': str(logical), 'evaluation': str(evaluation)}
     assert len(identities) == 1, 'evaluation identities differ across first-wave routes/conditions'
     for record in evidence.values():
         assert record['completion']['consumed_ids_bytes_sha256'] == record['presentations']['actual_ids_bytes_sha256']
@@ -90,6 +162,8 @@ def check(manifest_path, output, path_map=None):
     assert v[0]['channel_uses_valid'] == {'hidden': 0, 'memory': 0}
     Path(output).write_text(json.dumps({'status': 'PASS_FIRST_WAVE_HEALTH_NOT_SCORE_GAIN',
                                        'plan_hash': manifest['plan_hash'], 'runs': list(evidence),
+                                       'training_runs': {key: {field: value[field] for field in ('run', 'logical_root')}
+                                                         for key, value in evidence.items()},
                                        'identity_compatibility_policy': 'process-docs-address-only-v1',
                                        'raw_to_compatible_identity': identity_map}, indent=2)+'\n')
 

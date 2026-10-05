@@ -28,7 +28,7 @@ uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
 
 The check commands parse and print the configuration without loading weights or data. Ordinary task loading uses its configured local/Hub cache behavior. Recipe execution requires explicitly acquired pinned registrations and never downloads missing assets implicitly. See [running on other machines](docs/running.md) for environment setup and Slurm.
 
-The supported recorded workflow selects an exact logical root with `train.py --config ... --output ...`, then evaluates that root with `evaluate.py --run ...`. See [operations commands and resumable examples](docs/operations-workflow.md). Calls without `--output` retain the historical timestamped route. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
+The supported recorded workflow selects an exact logical root with `train.py --config ... --output ...`, then evaluates that root with `evaluate.py --run ...`. See [operations commands and resumable examples](docs/operations-workflow.md). Actual training requires `--output`; output-free `--check` remains supported. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
 
 ## Train an experiment
 
@@ -108,7 +108,7 @@ W&B is optional: set `run.wandb_project` and add `--extra wandb` to `uv run --lo
 
 ## Read results and evaluate
 
-The historical timestamped route prints the following layout. The supported `--output` route saves authoritative training files under `attempts/training-0001/` and binds complete settings/checkpoint ancestry at the exact root; see [ordinary run records](docs/ordinary-runs.md):
+Current training requires an explicit logical root and saves authoritative training files under `attempts/training-0001/`; complete settings and checkpoint ancestry are bound at that root. See [ordinary run records](docs/ordinary-runs.md). Older timestamped engine directories retain this historical layout and remain exact evaluation inputs:
 
 ```text
 runs/<time>-<name>-<id>/

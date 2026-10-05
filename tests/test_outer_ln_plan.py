@@ -54,7 +54,8 @@ def test_wrapper_vanilla_options(tmp_path):
     assert args[-6:] == ['--checkpoint', 'step_005000.pt', '--expected-step', '5000', '--evaluation-config', 'vanilla.yaml']
 
 
-def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
+@pytest.mark.parametrize("recorded", [False, True])
+def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path, recorded):
     import hashlib
     from jscc.outer_ln_gate import check
     from jscc.identity_compatibility import identity_digest
@@ -68,8 +69,23 @@ def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
     for route in ['enc_fn', 'dec_l8', 'enc_emb']:
         for arm in ['ref', 'outer_none']:
             name = arm+'_'+route
-            run = tmp_path/name
-            run.mkdir()
+            logical = tmp_path/name
+            run = logical / 'attempts/training-0001' if recorded else logical
+            run.mkdir(parents=True)
+            if recorded:
+                import yaml
+                config = load_config(TASK)
+                config['run']['output_dir'] = str(logical)
+                encoded = yaml.safe_dump(config)
+                (logical/'config.yaml').write_text(encoded)
+                (run/'config.yaml').write_text(encoded)
+                (logical/'experiment.json').write_text(json.dumps({'schema':'experiment-run-v1','root':str(logical)}))
+                (logical/'case.json').write_text(json.dumps({'schema':'experiment-run-v1','experiment':str(logical),
+                    'config_sha256':hashlib.sha256(encoded.encode()).hexdigest(),
+                    'effective_identity':hashlib.sha256(json.dumps(config,sort_keys=True,allow_nan=False).encode()).hexdigest()}))
+                (logical/'training.json').write_text(json.dumps({'path':str(run)}))
+                (run/'attempt.json').write_text(json.dumps({'schema':'experiment-run-v1','case':str(logical),
+                    'stage':'training','status':'completed','attempt_id':'0001'}))
             ckpt = run/'step_005000.pt'
             ckpt.write_bytes(b'CPU gate fixture, not a model')
             completion = {'status':'FULL_BUDGET_COMPLETED', 'step':5000, 'optimizer_updates':5000,
@@ -89,7 +105,7 @@ def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
             for condition in conditions:
                 (ev / f"identity_{condition['condition']}.json").write_text(json.dumps(identity))
             (ev/'results.json').write_text(json.dumps({'optimizer_step':5000,'checkpoint':str(ckpt),'conditions':conditions}))
-            (tmp_path/'links'/f'{name}.txt').write_text(str(run))
+            (tmp_path/'links'/f'{name}.txt').write_text(str(logical))
             (tmp_path/'links'/f'{name}-eval.txt').write_text(str(ev))
             entries.append({'wave':1,'run_id':name,'run_link':f'links/{name}.txt','evaluation_link':f'links/{name}-eval.txt'})
         pairs.append({'reference':'ref_'+route,'candidate':'outer_none_'+route,'pair_id':route})
@@ -103,14 +119,130 @@ def test_first_wave_gate_rejects_partial_or_changed_evidence(tmp_path):
     manifest.write_text(json.dumps({'runs':entries,'pairs':pairs,'plan_hash':'plan'}))
     check(manifest,tmp_path/'gate.json')  # low scores do not block a healthy result
     assert json.loads((tmp_path/'gate.json').read_text())['status'].startswith('PASS')
-    identity_file = tmp_path/'ref_enc_fn/eval/identity_no_noise.json'
+    engine = tmp_path/'ref_enc_fn'
+    if recorded:
+        engine = engine/'attempts/training-0001'
+        report = json.loads((tmp_path/'gate.json').read_text())
+        assert report['training_runs']['ref_enc_fn'] == {'run':str(engine),'logical_root':str(tmp_path/'ref_enc_fn')}
+    identity_file = engine/'eval/identity_no_noise.json'
     identity_file.write_text(json.dumps({'tampered': True}))
     with pytest.raises(ValueError, match='identity hash mismatch'):
         check(manifest, tmp_path/'tampered-gate.json')
     identity_file.write_text(json.dumps(identity))
-    bad = tmp_path/'ref_enc_fn/completion.json'
+    bad = engine/'completion.json'
     value = json.loads(bad.read_text())
     value['step'] = 4999
     bad.write_text(json.dumps(value))
     with pytest.raises(AssertionError):
         check(manifest,tmp_path/'gate2.json')
+
+
+def recorded_training_fixture(tmp_path):
+    import hashlib
+    import yaml
+    from jscc.outer_ln_gate import resolve_training_run
+    logical = tmp_path / 'recorded'
+    run = logical / 'attempts/training-0001'
+    run.mkdir(parents=True)
+    config = load_config(TASK)
+    config['run']['output_dir'] = str(logical)
+    encoded = yaml.safe_dump(config)
+    (logical / 'config.yaml').write_text(encoded)
+    (run / 'config.yaml').write_text(encoded)
+    (logical / 'experiment.json').write_text(json.dumps({'schema': 'experiment-run-v1', 'root': str(logical)}))
+    (logical / 'case.json').write_text(json.dumps({'schema': 'experiment-run-v1',
+        'experiment': str(logical), 'config_sha256': hashlib.sha256(encoded.encode()).hexdigest(),
+        'effective_identity': hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False).encode()).hexdigest()}))
+    (logical / 'training.json').write_text(json.dumps({'path': str(run)}))
+    (run / 'attempt.json').write_text(json.dumps({'schema': 'experiment-run-v1',
+        'case': str(logical), 'stage': 'training', 'status': 'completed', 'attempt_id': '0001'}))
+    return logical, run, config, resolve_training_run
+
+
+def test_recorded_reader_exact_attempt_and_path_map(tmp_path):
+    logical, run, config, resolve_run = recorded_training_fixture(tmp_path)
+    assert resolve_run(logical, expected_config=TASK) == (logical, run, config)
+    foreign_prefix = tmp_path / 'compute'
+    for file, field in [(logical / 'case.json', 'experiment'),
+                        (logical / 'training.json', 'path'), (run / 'attempt.json', 'case'),
+                        (logical / 'experiment.json', 'root')]:
+        value = json.loads(file.read_text())
+        value[field] = str(foreign_prefix / Path(value[field]).relative_to(tmp_path))
+        file.write_text(json.dumps(value))
+    assert resolve_run(foreign_prefix / 'recorded', (str(foreign_prefix / '.'), str(tmp_path))) == (logical, run, config)
+
+
+@pytest.mark.parametrize('mutation', ['foreign', 'stage', 'partial', 'malformed', 'symlink', 'config', 'case_id', 'root', 'missing_training', 'config_symlink'])
+def test_recorded_reader_rejects_foreign_or_invalid_without_legacy_fallback(tmp_path, mutation):
+    logical, run, _, resolve_run = recorded_training_fixture(tmp_path)
+    # Plausible legacy evidence must not turn a damaged recorded root into a legacy input.
+    (logical / 'completion.json').write_text('{}')
+    if mutation == 'case_id':
+        value = json.loads((logical / 'case.json').read_text())
+        value['case_id'] = 'foreign'
+        (logical / 'case.json').write_text(json.dumps(value))
+    elif mutation == 'root':
+        value = json.loads((logical / 'experiment.json').read_text())
+        value['root'] = str(tmp_path / 'other')
+        (logical / 'experiment.json').write_text(json.dumps(value))
+    elif mutation == 'missing_training':
+        (logical / 'training.json').unlink()
+    elif mutation == 'config_symlink':
+        target = tmp_path / 'config.yaml'
+        (logical / 'config.yaml').rename(target)
+        (logical / 'config.yaml').symlink_to(target)
+    elif mutation == 'malformed':
+        (logical / 'training.json').write_text('{')
+    elif mutation == 'foreign':
+        value = json.loads((run / 'attempt.json').read_text())
+        value['case'] = str(tmp_path / 'other')
+        (run / 'attempt.json').write_text(json.dumps(value))
+    elif mutation in ('stage', 'partial'):
+        value = json.loads((run / 'attempt.json').read_text())
+        value['stage' if mutation == 'stage' else 'status'] = 'evaluation' if mutation == 'stage' else 'partial'
+        (run / 'attempt.json').write_text(json.dumps(value))
+    elif mutation == 'symlink':
+        outside = tmp_path / 'outside'
+        run.rename(outside)
+        run.symlink_to(outside, target_is_directory=True)
+    else:
+        (run / 'config.yaml').write_text('{}')
+    with pytest.raises((ValueError, KeyError, FileNotFoundError)):
+        resolve_run(logical)
+
+
+def test_recorded_marker_dangling_symlink_cannot_fall_back(tmp_path):
+    from jscc.outer_ln_gate import resolve_training_run
+    legacy = tmp_path / 'legacy'
+    legacy.mkdir()
+    assert resolve_training_run(legacy) == (legacy, legacy, None)
+    (legacy / 'training.json').symlink_to(tmp_path / 'missing')
+    with pytest.raises((FileNotFoundError, ValueError)):
+        resolve_training_run(legacy)
+
+
+@pytest.mark.parametrize("named_case", [False, True])
+def test_recorded_experiment_marker_cannot_escape_root(tmp_path, named_case):
+    logical, run, _, resolve_run = recorded_training_fixture(tmp_path)
+    experiment = logical
+    if named_case:
+        child = experiment / "cases" / "named"
+        child.parent.mkdir()
+        child.mkdir()
+        for path in tuple(experiment.iterdir()):
+            if path.name not in ("experiment.json", "cases"):
+                path.rename(child / path.name)
+        logical, run = child, child / "attempts" / run.name
+        case = json.loads((logical / "case.json").read_text())
+        case["case_id"] = "named"
+        (logical / "case.json").write_text(json.dumps(case))
+        (logical / "training.json").write_text(json.dumps({"path": str(run)}))
+        attempt = json.loads((run / "attempt.json").read_text())
+        attempt["case"] = str(logical)
+        (run / "attempt.json").write_text(json.dumps(attempt))
+    resolve_run(logical)
+    outside = tmp_path / "foreign-experiment.json"
+    (experiment / "experiment.json").rename(outside)
+    (experiment / "experiment.json").symlink_to(outside)
+    with pytest.raises(ValueError, match="experiment file outside"):
+        resolve_run(logical)

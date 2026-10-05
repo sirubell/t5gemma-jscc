@@ -54,11 +54,11 @@ uv run --locked python -c "import torch; print(torch.cuda.get_device_name(), tor
 The *_h200.yaml smoke filenames record where those CUDA/bfloat16 recipes were validated. Their contents do not test for an H200 or request Slurm resources. They can be used for an initial small check on another compatible CUDA GPU:
 
 ```bash
-uv run --locked python train.py --config configs/smoke/coco_h200.yaml
+uv run --locked python train.py --config configs/smoke/coco_h200.yaml --output runs/coco-smoke
 # Evaluate the run directory printed above.
-uv run --locked python evaluate.py --run runs/<coco-smoke-run>
-uv run --locked python train.py --config configs/smoke/hellaswag_h200.yaml
-uv run --locked python evaluate.py --run runs/<hellaswag-smoke-run>
+uv run --locked python evaluate.py --run runs/coco-smoke
+uv run --locked python train.py --config configs/smoke/hellaswag_h200.yaml --output runs/hellaswag-smoke
+uv run --locked python evaluate.py --run runs/hellaswag-smoke
 ```
 
 Run sequentially on one GPU. These recipes already use batch size 1 for training/evaluation, but memory fit still depends on available VRAM, the model build and the selected split. The historical enc_fn / external LayerNorm-both recipe passed full-weight training/checkpoint/evaluation smoke on a Linux RTX 5090 using PyTorch 2.10.0+cu128 and BF16. That observation does not establish acceptance of the current enc_l9 defaults or the new two-stage paths on a rebuilt workstation. At batch 1, recorded training peak allocated memory was about 4.80 GiB for COCO and 4.34 GiB for HellaSwag. These are PyTorch training peaks, not total driver-reserved memory or a guarantee for larger batches/other splits.
@@ -91,7 +91,7 @@ sacct -j JOBID --format=JobID,State,Elapsed,MaxRSS,AllocTRES,ExitCode
 scontrol show job JOBID
 ```
 
-Inspect the configured stdout/stderr paths. The Run line identifies the artifact directory. runs/jobs/JOBID/*.run.txt is written only after training returns successfully. MaxRSS measures host RAM, not GPU VRAM; GPU allocation is reported by the training metric peak_memory_gib or nvidia-smi inside an allocation.
+Inspect the configured stdout/stderr paths. The Run line identifies the artifact directory. Each original config argument has its own ordinal, starting at `0001`: its logical root is `runs/jobs/JOB_ID/training-0001` and its success link is `runs/jobs/JOB_ID/links/0001.run.txt`. Identical arguments and duplicate basenames remain distinct. The adapter requires a job identifier, preflights all selected roots/links, and creates only parent infrastructure; training reserves the final roots. Same-job replay rejects used roots/links, including retained failed roots. Links are written only after training returns successfully and do not prove scientific budget completion. Evaluation uses the returned logical root. MaxRSS measures host RAM, not GPU VRAM; GPU allocation is reported by the training metric peak_memory_gib or nvidia-smi inside an allocation.
 
 ## Time limits and recovery
 

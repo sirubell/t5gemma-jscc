@@ -1,6 +1,6 @@
 # Script catalog
 
-Run commands from the repository root with the locked uv environment. The primary experiment interface is `train.py` for one COCO or HellaSwag run and `evaluate.py --run runs/<run-directory>` for its checkpoint. `study.py` can preview or export a multi-run plan when needed; it does not run the plan. No study manifest is required for an individual run.
+Run commands from the repository root with the locked uv environment. The primary experiment interface is `train.py --config <task.yaml> --output <fresh-root>` for one COCO or HellaSwag run and `evaluate.py --run runs/<run-directory>` for its checkpoint. `study.py` can preview or export a multi-run plan when needed; it does not run the plan. No study manifest is required for an individual run.
 
 | Scripts | Purpose |
 |---|---|
@@ -11,7 +11,7 @@ Run commands from the repository root with the locked uv environment. The primar
 | [`hellaswag_replay_preflight.py`](hellaswag_replay_preflight.py) | Check one unchanged 64-example enc_l9 batch against local replay, with no-noise/fixed AWGN, explicit parity gates and zero optimizer updates. Config-only mode loads no model/data; [guide](../docs/hellaswag-replay-preflight.md). GPU execution requires a separately bounded allocation. |
 | `compare_evidence_json.py`, `recompute_coco.py` | Reusable offline evidence comparison and COCO CIDEr recomputation utilities. The latter consumes exported per-image JSONL evidence. |
 | `index_*.py`, `extract_compact_samples.py`, `verify_manifest.py`, `recompute_*.py` | Evidence indexing, extraction, verification and recomputation for specific saved artifact formats. Check each script's inputs before reuse. |
-| Other root-level diagnostic, preflight, policy, closeout and Slurm scripts | Reproduce or inspect bounded historical work. Some start training, evaluation or scheduler jobs; their old source bindings and approvals are historical evidence, not current execution authorization. |
+| Other retained diagnostic, policy and Slurm scripts | Inspect or explicitly execute their documented bounded work. Their old source bindings and approvals remain historical evidence, not current execution authorization. |
 | [`experiments/`](experiments/README.md) | The relocated evening and main-weight screen modules, with exact old-to-new module names. |
 
 For a reusable offline recomputation, for example:
@@ -26,3 +26,7 @@ Keep historical manifests, source hashes and result paths with their archived ev
 
 - `encfn_baseline.py` previews the finite four-cell plan, executes one explicitly prepared segment, or writes exact comparisons for a complete campaign. See [baseline guide](../docs/encfn-baseline.md).
 - `render_experiment_report.py` verifies saved scalar/artifact inventories and creates local PNG/CSV/HTML reports. See [records guide](../docs/experiment-records.md). It does not load models or launch jobs.
+
+## Retired training surfaces
+
+The closeout production harness and prompt-alignment pair executor are retired from current source. Native preflight retains only imported indexing/collation and gradient-check helpers; prompt-policy retains strict `sha`/`validate_run` readers. Their module training executors are unsupported. The prompt-alignment shell retains its independent benchmark branch, and the prompt-policy shell retains exact64 preflight. Standalone `evaluate_prompt_alignment.py`, fixed prompt YAMLs and historical plans/results/source packages remain available. These validators retain source gates and may require the matching historical source environment. Future training uses explicit ordinary roots and exact recorded checkpoints; retirement does not rewrite scientific receipts or release held sources.

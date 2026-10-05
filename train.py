@@ -1,7 +1,7 @@
 """Train either task with uv:
 
-uv run --locked python train.py --config configs/tasks/coco.yaml
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml
+uv run --locked python train.py --config configs/tasks/coco.yaml --output runs/coco-case
+uv run --locked python train.py --config configs/tasks/hellaswag.yaml --output runs/hellaswag-case
 """
 import argparse
 from pathlib import Path
@@ -11,13 +11,33 @@ import yaml
 from jscc.config import load_config
 
 
+def _success_link(output, filename):
+    """Validate a transient success receipt before creating any directories."""
+    if filename is None:
+        return None
+    link = Path(filename).expanduser()
+    root = Path(output).expanduser().resolve()
+    resolved = link.resolve()
+    if resolved == root or root in resolved.parents or resolved in root.parents:
+        raise ValueError("run-path-file and output must be disjoint in both ancestry directions")
+    if link.exists() or link.is_symlink():
+        raise FileExistsError("run-path-file already exists; use a fresh success link")
+    return link
+
+
+def _publish_link(link, run):
+    if link is not None:
+        with link.open("x") as receipt:
+            receipt.write(str(run) + "\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output", help="exact logical experiment root for a task or recipe")
     parser.add_argument("--resume", help="exact saved checkpoint from an interrupted run")
     parser.add_argument("--check", action="store_true", help="print resolved YAML, without loading a model")
-    parser.add_argument("--run-path-file", help="write the completed run path for a following evaluation")
+    parser.add_argument("--run-path-file", help="write the returned logical root after successful command return; readers verify completion")
     parser.add_argument("--case", help="recipe case, e.g. width-32-ratio-50")
     parser.add_argument("--attempt", default="0001", help="explicit recipe training attempt name")
     parser.add_argument("--registrations", help="directory of explicitly acquired pinned recipe asset registrations")
@@ -27,6 +47,9 @@ def main(argv=None):
     parser.add_argument("--finalize-terminal", action="store_true", help="restore and finalize a recorded terminal with zero updates")
     parser.add_argument("--reconcile-interrupted", help="prior running attempt name; asserts that its worker has stopped")
     args = parser.parse_args(argv)
+    if not args.check and not args.output:
+        parser.error("actual training requires --output at an exact logical root")
+    link = None if args.check else _success_link(args.output, args.run_path_file)
     bound_recipe = args.output and (Path(args.output)/"recipe-run.json").is_file()
     authored = None if bound_recipe else yaml.safe_load(Path(args.config).read_text())
     if bound_recipe or (isinstance(authored, dict) and authored.get("schema") == "shared-codec-recipe-v1"):
@@ -66,13 +89,12 @@ def main(argv=None):
                 raise ValueError('unknown recipe case')
             print(yaml.safe_dump(resolved, sort_keys=False))
             return resolved
-        if args.run_path_file:
-            Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
+        if link is not None:
+            link.parent.mkdir(parents=True, exist_ok=True)
         run = train_recipe(args.config, args.output, registrations=args.registrations, selected=args.case,
             attempt_id=args.attempt, resume=args.resume, prepare_only=args.prepare_only,
             timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid, finalize_terminal=args.finalize_terminal)
-        if args.run_path_file:
-            Path(args.run_path_file).write_text(str(run)+"\n")
+        _publish_link(link, run)
         return recipe_run_record(run)
     if (args.case or args.attempt != "0001" or args.registrations or args.prepare_only or args.device_uuid
             or args.timeout_seconds != 86400 or args.finalize_terminal or args.reconcile_interrupted):
@@ -81,16 +103,11 @@ def main(argv=None):
     if args.check:
         print(yaml.safe_dump(config, sort_keys=False))
         return
-    if args.run_path_file:
-        Path(args.run_path_file).parent.mkdir(parents=True, exist_ok=True)
-    from jscc.training import train
-    if args.output:
-        from jscc.ordinary_runs import train_task
-        run = train_task(config, args.output, authored_config=args.config, resume=args.resume)
-    else:
-        run = train(config, resume=args.resume)
-    if args.run_path_file:
-        Path(args.run_path_file).write_text(str(run) + "\n")
+    if link is not None:
+        link.parent.mkdir(parents=True, exist_ok=True)
+    from jscc.ordinary_runs import train_task
+    run = train_task(config, args.output, authored_config=args.config, resume=args.resume)
+    _publish_link(link, run)
 
 
 if __name__ == "__main__":

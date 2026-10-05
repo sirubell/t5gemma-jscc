@@ -24,7 +24,7 @@ uv run --locked python train.py --config configs/operations/hellaswag-resumable.
 uv run --locked python evaluate.py --run runs/hellaswag-case
 ```
 
-`--check` prints composed settings without weights/data/output creation. `--output` selects the exact logical root; existing paths cannot silently restart or overwrite. Bound `config.yaml` freezes complete effective settings even if authored YAML changes. Training artifacts live in `attempts/training-0001/`; `training.json` identifies the current attempt, while `checkpoint.json` identifies the eligible default and its own ancestry. COCO retains caption/CIDEr evaluation and batch16/accumulation4/500 updates. HellaSwag retains five-shot prompts, accuracy scoring and batch64/accumulation1/10,000 updates. These settings share effective batch64 but have different data and evaluation policies.
+`--check` prints composed settings without weights/data/output creation. Actual training requires `--output`, which selects the exact logical root; existing paths cannot silently restart or overwrite. Bound `config.yaml` freezes complete effective settings even if authored YAML changes. Training artifacts live in `attempts/training-0001/`; `training.json` identifies the current attempt, while `checkpoint.json` identifies the eligible default and its own ancestry. COCO retains caption/CIDEr evaluation and batch16/accumulation4/500 updates. HellaSwag retains five-shot prompts, accuracy scoring and batch64/accumulation1/10,000 updates. These settings share effective batch64 but have different data and evaluation policies.
 
 Continuation is a separate operation after the parent is finalized, using a checkpoint actually published by that parent:
 
@@ -44,7 +44,7 @@ uv run --locked python evaluate.py --run runs/coco-case --checkpoint step_000500
 uv run --locked python evaluate.py --run runs/hellaswag-case --checkpoint step_001000.pt --expected-step 1000 --attempt step1000
 ```
 
-Historical calls without `--output` retain timestamped output and iterator restart semantics. Use the recorded route above for supported exact continuation; old state cannot be silently upgraded.
+Historical timestamped engine directories retain their saved layout and iterator restart semantics. Current actual training requires an explicit output root; use the recorded route above for supported exact continuation. Old state cannot be silently upgraded.
 
 ## Recipe preparation, cases and recorded evaluation
 

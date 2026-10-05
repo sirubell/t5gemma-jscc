@@ -41,7 +41,7 @@ uv run --locked python evaluate.py --run runs/coco-case \
 
 Explicit checkpoint selections and evaluation overrides are supplemental requests. A supported partial attempt can be evaluated by an explicit checkpoint filename; it cannot become the default result. Overrides stay restricted to the existing evaluation settings and are frozen within that evaluation attempt. Each evaluation has its own outcome; completed condition results survive a later scoring failure. A second evaluation needs an explicit fresh `--attempt` identifier, while the default `0001` reservation prevents an accidental repeated invocation. Training/evaluation/collection records are separate, so failed collection cannot alter successful training or evaluation.
 
-The recorded ordinary route supports explicit exact continuation under the policy below. Calls without `--output` retain the legacy timestamped run path and historical iterator restart behavior. Recipe dispatch, automatic assets, scientific multi-case execution, scheduler/source preflight and collection commands belong to their respective owners.
+The recorded ordinary route supports explicit exact continuation under the policy below. Actual training requires `--output`; output-free `--check` remains supported. Older timestamped engine directories retain their historical iterator restart behavior and saved layout; their bytes are not upgraded to exact continuation. Recipe dispatch, automatic assets, scientific multi-case execution, scheduler/source preflight and collection commands belong to their respective owners.
 
 ## Callable record/API release
 

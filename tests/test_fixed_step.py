@@ -150,3 +150,27 @@ def test_direct_cli_requires_explicit_checkpoint(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         evaluate.main()
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("attempt", ["codec", "vanilla"])
+def test_study_and_launcher_forward_distinct_evaluation_attempts(tmp_path, monkeypatch, attempt):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"version": 1, "runs": [{"task": "hellaswag", "experiment": "fixed",
+        "seed": 0, "run_link": "run.txt"}]}))
+    (tmp_path / "run.txt").write_text(str(tmp_path / "root"))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+    run_task(manifest, 0, "evaluate", attempt=attempt)
+    assert calls[0][-2:] == ["--attempt", attempt]
+    monkeypatch.undo()
+    result, argv = invoke_launcher(tmp_path, "evaluate", ["--attempt", attempt])
+    assert result.returncode == 0, result.stderr
+    assert argv is not None
+    assert argv[-2:] == ["--attempt", attempt]
+
+
+def test_study_rejects_training_attempt_option_before_manifest(tmp_path):
+    with pytest.raises(ValueError, match="only supported for evaluate"):
+        run_task(tmp_path/"missing.json", 0, "train", attempt="codec")
+    result, argv = invoke_launcher(tmp_path, "train", ["--attempt", "codec"])
+    assert result.returncode != 0 and argv is None

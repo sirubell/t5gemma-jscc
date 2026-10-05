@@ -15,13 +15,16 @@ t5gemma-jscc/
   releases/<version>-<sha>/       # one source checkout for this version
   campaigns/<campaign>/          # frozen configs and input identities
   runs/<run-name>/               # resolved config, command and source SHA
-    outputs/
-    logs/
-    checkpoints/
+    experiment.json
+    case.json
+    config.yaml
+    training.json
+    checkpoint.json
+    attempts/training-0001/      # authoritative engine artifacts
 ```
 
 Existing host runtimes and model/data caches may be referenced by path and revision; they need not be copied for each run. Create the Python environment separately on each host. Spark's recorded CUDA runtime differs from the default lock installation and must be selected explicitly.
 
-The standard `train.py` already creates timestamped run directories under `run.output_dir`. Use a fresh `runs/<run-name>/outputs` as that parent if retaining its normal naming. Preserve the full resolved configuration it writes. Relative output paths and `model_config` references resolve from the YAML location; configure the intended paths explicitly when storing YAML outside the source checkout.
+Current actual training requires `train.py --config <task.yaml> --output runs/<run-name>`, selecting an exact fresh logical root. Output-free `--check` remains supported. The program reserves the root; do not precreate it. Preserve its complete resolved configuration and recorded attempt/checkpoint ancestry. `model_config` references resolve from the YAML location. Older timestamped directories under their historical `run.output_dir` remain saved engine evidence; this current command policy does not rewrite those bytes.
 
 A clean commit identifies tracked source bytes. Uncommitted edits or required untracked modules need separate byte identities and prevent calling that checkout the pinned version. Complete and validate those changes in development before adopting another experiment commit. No active checkout or campaign should be updated in place.

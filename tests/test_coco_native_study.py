@@ -181,7 +181,7 @@ def test_authorized_execution_is_once_only_and_fixed_step(tmp_path, monkeypatch)
     frozen = digest(output / "PREPARED-FILES.json")
     save_completed_training(output, 2)
     execute(output, "evaluate", 2, frozen)
-    assert calls[0][1] == {"checkpoint": "step_006000.pt", "expected_step": 6000}
+    assert calls[0][1] == {"checkpoint": "step_006000.pt", "expected_step": 6000, "attempt": "codec"}
     assert json.loads((output / "execution/evaluate-0002.json").read_text())["status"] == "COMPLETED"
     with pytest.raises(FileExistsError):
         execute(output, "evaluate", 2, frozen)
@@ -455,3 +455,23 @@ def test_selected_six_scope_and_execution_refusal(tmp_path):
     with pytest.raises(ValueError, match="unselected"):
         execute(output, "train", 1, digest(output / "PREPARED-FILES.json"))
     assert not (output / "execution").exists()
+
+
+def test_coco_recorded_completion_uses_bound_attempt_and_fixed_checkpoint(tmp_path):
+    import torch
+    from test_outer_ln_plan import recorded_training_fixture
+    from scripts.coco_native_study import verify_training_completion
+    logical, run, config, _ = recorded_training_fixture(tmp_path)
+    (tmp_path / 'run.txt').write_text(str(logical))
+    card = {'updates': 5000, 'presentations_per_run': 640000, 'fixed_checkpoint': 'step_005000.pt'}
+    (run / 'completion.json').write_text(json.dumps({'reason': 'max_steps', 'step': 5000,
+        'optimizer_updates': 5000, 'presentations': 640000}))
+    checkpoint = run / 'step_005000.pt'
+    torch.save({'step': 5000, 'config': config}, checkpoint)
+    manifest = {'runs': [{'run_link': 'run.txt'}]}
+    result = verify_training_completion(tmp_path, manifest, 0, card)
+    assert result['run'] == str(run) and result['logical_root'] == str(logical)
+    assert result['checkpoint'] == str(checkpoint)
+    torch.save({'step': 5000, 'config': {}}, checkpoint)
+    with pytest.raises(ValueError, match='checkpoint configuration'):
+        verify_training_completion(tmp_path, manifest, 0, card)
