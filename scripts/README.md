@@ -4,6 +4,7 @@ Run commands from the repository root with the locked uv environment. The primar
 
 | Scripts | Purpose |
 |---|---|
+| [`benchmark_speed.py`](benchmark_speed.py) | Measure bounded reference/streamed throughput from one fixed communication checkpoint, with restored optimizer state and effective batch 32. Reports checkpoint SHA-256 and the effective checkpoint configuration after batch/accumulation and fixed CUDA/BF16 overrides, including update-setting defaults. |
 | [`coco_query_endpoint_diagnostic.py`](coco_query_endpoint_diagnostic.py) | Verify local COCO checkpoint/source identities, then explicitly execute a bounded query-image and endpoint diagnostic. Preparation/check modes do not load models. See the [diagnostic guide](../docs/coco-query-endpoint-diagnostic.md). |
 | [`coco_trajectory_diagnostic.py`](coco_trajectory_diagnostic.py) | Replay saved COCO generation trajectories and compare cached/full-prefix states under a bounded diagnostic. Requires explicit source/checkpoint/evidence bindings; [guide](../docs/coco-trajectory-diagnostic.md). |
 | [`shared_encoder_atlas.py`](shared_encoder_atlas.py) | Prepare fixed HellaSwag views, then explicitly capture encoder-site activations and verify local replay. Zero optimizer updates; this is not shared-codec training. See the [atlas guide](../docs/shared-encoder-atlas.md). |
@@ -21,6 +22,21 @@ uv run --locked python scripts/recompute_coco.py path/to/captions_no_noise.jsonl
 ```
 
 Keep historical manifests, source hashes and result paths with their archived evidence. A new execution needs a fresh recipe and source binding; moving a script does not revise an earlier result or authorize another run.
+
+For a separately authorized speed benchmark:
+
+```bash
+uv run --locked python scripts/benchmark_speed.py --checkpoint path/to/checkpoint.pt --output path/to/benchmark --variant streamed --batch-size 16 --accumulation 2
+```
+
+The checkpoint supplies the configuration and data IDs; there is no authored
+`--config` input. Each repeat reports `effective_config` and
+`effective_config_hash` (SHA-256 of UTF-8 JSON with sorted keys, compact
+separators and no nonfinite values). This identifies the configuration actually
+used, including `grad_clip`, `kl_weight` and `mse_weight` defaults, rather than an
+unused YAML file. `checkpoint_hash` separately binds the saved model and
+optimizer state; checkpoint LR/weight-decay state is restored unchanged. Saved
+historical `config_hash`/`config_path` records retain their original meaning.
 
 ## Versioned baseline and local records
 

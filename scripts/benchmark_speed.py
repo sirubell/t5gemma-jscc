@@ -24,7 +24,6 @@ from typing import Any
 
 import torch
 
-from jscc.config import load_config
 from jscc.data import load_data
 from jscc.runtime import prepare_trainable_parameters, promote_optimizer_state, seed_everything
 from jscc.models.split_model import build_model
@@ -137,9 +136,8 @@ def _batch_counts(model, batches: list[dict[str, torch.Tensor]]) -> dict[str, in
     }
 
 
-def _load_repeat(config_path: Path, checkpoint_path: Path, batch_size: int,
+def _load_repeat(checkpoint_path: Path, batch_size: int,
                  accumulation: int, seed: int):
-    config = load_config(config_path)
     state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     config = state["config"]
     config["training"] = dict(config["training"])
@@ -228,18 +226,19 @@ def _profile_update(model, loader, iterator, optimizer, parameters, settings, va
     return trace_path
 
 
-def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: str,
+def run_repeat(checkpoint_path: Path, output: Path, variant: str,
                batch_size: int, accumulation: int, warmup: int, measured: int,
                repeat: int, snr: float | None, valid_only_kl: bool,
                logging_mode: str, profile: bool) -> dict[str, Any]:
     config, model, data, optimizer, parameters = _load_repeat(
-        config_path, checkpoint_path, batch_size, accumulation, 9000 + repeat)
+        checkpoint_path, batch_size, accumulation, 9000 + repeat)
     settings = config["training"]
     settings = dict(settings)
     settings.update({"batch_size": batch_size, "gradient_accumulation": accumulation,
                      "grad_clip": settings.get("grad_clip", 1.0),
                      "kl_weight": settings.get("kl_weight", 1.0),
                      "mse_weight": settings.get("mse_weight", 0.1)})
+    config["training"] = settings
     model.train()
     torch.manual_seed(12345)
     iterator = iter(data.train)
@@ -297,6 +296,10 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
     telemetry = sampler.summary()
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     result = {
+        "effective_config": config,
+        "effective_config_hash": hashlib.sha256(
+            json.dumps(config, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        ).hexdigest(),
         "variant_id": variant,
         "status": "completed",
         "repeat_id": repeat,
@@ -345,7 +348,6 @@ def run_repeat(config_path: Path, checkpoint_path: Path, output: Path, variant: 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--variant", choices=("reference", "streamed"), required=True)
@@ -363,20 +365,18 @@ def main():
         raise SystemExit("benchmark effective batch must remain 32")
     args.output.mkdir(parents=True, exist_ok=True)
     result = run_repeat(
-        args.config.resolve(), args.checkpoint.resolve(), args.output.resolve(),
+        args.checkpoint.resolve(), args.output.resolve(),
         args.variant, args.batch_size, args.accumulation, args.warmup,
         args.measured, args.repeat, args.snr, args.valid_only_kl,
         args.logging_mode, args.profile,
     )
     result.update({
         "source_hash": os.environ.get("T5GEMMA_SOURCE_HASH"),
-        "config_hash": sha256_file(args.config.resolve()),
         "checkpoint_hash": sha256_file(args.checkpoint.resolve()),
         "noise_policy_id": "no_noise" if args.snr is None else f"fixed_{args.snr:g}db",
         "sample_order_hash": hashlib.sha256(
             json.dumps({"seed": 12345, "repeat": args.repeat}, sort_keys=True).encode()
         ).hexdigest(),
-        "config_path": str(args.config.resolve()),
         "checkpoint_path": str(args.checkpoint.resolve()),
     })
     path = args.output / "benchmark-repeats.jsonl"
