@@ -31,15 +31,20 @@ An `update` payload requires:
 | --- | --- |
 | Axes | `site_id`, `attempted_step`, `completed_step`, `final_step`, `phase_start_step`, `site_step`, `sweep` |
 | `exposure` | `source_tokens`, `target_tokens`, `sequences`, `padded_tokens`, `valid_tokens`, `cumulative_valid_tokens`, `latent_width`, `hidden_coordinates`, `hidden_coordinates_allocated`, `memory_coordinates`, `memory_coordinates_allocated` |
-| `objective` | `kind` (`local` or `combined`), measured `total`, `components` keyed by `K` and `R` |
+| `objective` | Legacy/baseline: `kind` (`local` or `combined`), measured `total`, `components` keyed by `K` and `R`; original13: `kind` (`reconstruction` or `combined`), measured `total`, `components` keyed by `kl`, `hidden`, `memory`, and `resolved_weights` |
 | Optimizer | `lr_used`, `lr_next` arrays by parameter group; `gradient` with measured `pre_clip`, `post_clip`, `clip_threshold`, boolean `clipped`; booleans `nonfinite`, `skipped`; measured `update_l2` |
 | `snr` | `condition`, measured `min`, `mean`, `max`, exact `draw_ref` |
 | `timing` | measured `step_seconds`, `elapsed_seconds`, `data_cache_seconds`, `throughput`; `throughput_denominator`, `scope` |
 | `memory` | measured `allocated_bytes`, `reserved_bytes`; `reset_scope` |
 
-Exposure counters are nonnegative integers except the two memory-coordinate fields, which
-are measurements so an absent receiver-memory stream remains unavailable with
-`not_applicable`. Hidden real-coordinate counts are not bits or Eb/N0. Global
+Exposure counters are nonnegative integers. In legacy/baseline updates, the two
+memory-coordinate fields are measurements, so an absent receiver-memory stream
+remains unavailable with `not_applicable`. Original13 decoder updates emit integer
+`memory_coordinates` and `memory_coordinates_allocated`; encoder updates retain
+unavailable measurements because there is no receiver-memory stream. The validator
+also accepts measured original13 memory counts, but requires availability to match
+the encoder/decoder role and allocated counts to cover valid counts. Hidden
+real-coordinate counts are not bits or Eb/N0. Global
 update axes do not reset at a staged phase boundary; `phase_start_step` records
 the offset. `site_step` and `sweep` allow a shared learner's global update to be
 compared at matched site exposure with a specialist. Cumulative token exposure
@@ -49,9 +54,24 @@ these events; the helper marks their completion incomplete.
 
 Each objective component contains measured `raw`, `weighted`, `numerator` and
 an integer `denominator`. Measured raw values must equal numerator/denominator.
-Successful combined objective is `K + 0.1 R`; successful local objective is
-`0.1 R`, with all K measurements unavailable and denominator zero. Objective
-curves must retain their kind rather than comparing local and combined totals.
+For legacy/baseline updates, successful combined objective is `K + 0.1 R`;
+successful local objective is `0.1 R`, with all K measurements unavailable and
+denominator zero. Original13 updates instead carry the following exact
+`resolved_weights`; the successful total is the sum of required weighted streams:
+
+| Original13 update kind | Role | `kl` | `hidden` | `memory` |
+| --- | --- | --- | --- | --- |
+| `reconstruction` | encoder | 0 | 0.1 | 0 |
+| `reconstruction` | decoder | 0 | 0.05 | 0.05 |
+| `combined` | encoder | 1 | 0.1 | 0 |
+| `combined` | decoder | 1 | 0.05 | 0.05 |
+
+Hidden reconstruction is required in both roles; decoder memory reconstruction
+is also required. KL is measured only in combined updates; encoder memory and
+reconstruction-phase KL remain unavailable with denominator zero. These update
+fields do not change observation `objective_kind` or its K/R components below.
+Objective curves must retain their variant, role and kind rather than comparing
+unlike totals.
 Update-L2 is required on the first update of a phase, every global tenth update,
 and its final update; intermediate values are null with a sampling reason.
 Timing scopes must describe asynchronous boundaries, cache/data work and the
@@ -107,9 +127,17 @@ specialists, including l14, are rejected. `details` requires `prompt`,
 for input construction, prefix/generation behavior, the frozen RNG/draw request and the predeclared output/reference policy. The `outputs` request field identifies that output contract, not hashes of future generated result bytes. Actual output hashes and realized draw receipts belong in the retained artifact inventory. This keeps expected observation identities computable before acquisition; never rewrite a scheduled identity after seeing results.
 Requests bind both global `step` and matched-exposure `site_step`.
 
-New codec observations have the exact ordered condition grid
-`["no_noise", -6, 0, 6, 12, 18]`. Vanilla uses only `["vanilla"]` and the matching
-learner kind. Vanilla bypass and no-noise codec execution have separate identities.
+Codec observations normally have the exact ordered condition grid
+`["no_noise", -6, 0, 6, 12, 18]`. The named protocols
+`sharing-dn-native16-long-v1`, `encoder-original6-native16-pilot-v1`, and
+`encoder-original6-native16-stages-v1` also permit a singleton containing one
+condition from that grid. These are explicit protocol exceptions, not a generic
+arbitrary-subset policy; original13 update kinds do not grant this exception.
+Vanilla uses only `["vanilla"]` and the matching learner kind. Vanilla bypass and
+no-noise codec execution have separate identities. See
+[request validation](../jscc/experiment_records.py),
+[sharing protocol names](../jscc/sharing_schedule.py), and
+[staged protocol names](../jscc/encoder_stages_plan.py).
 
 An observation payload contains `request`, its computed `identity`, `status`
 (`complete`, `incomplete` or `failed`), `conditions`, and `reuse` (null or a receipt).
@@ -132,7 +160,7 @@ consumer performs only cache reads.
 ## Atomic files, inventories and derived completion
 
 Public APIs are `measure`, `validate_event`, `validate_observation`,
-`observation_identity`, `canonical_bytes`, `append_event`, `read_events`,
+`observation_identity`, `canonical_bytes`, `append_event`, `AppendOnlyEventWriter`, `read_events`,
 `write_json_atomic`, `artifact_ref`, `verify_inventory`, and `completion_status`.
 Validation raises `RecordError`; I/O failures propagate to stop the caller.
 
@@ -145,6 +173,29 @@ retry or repair occurs, and the old file remains unchanged before replacement.
 A directory-fsync failure can occur after replacement: it is still a failed
 operation whose crash durability is not certified. Do not resume that arm merely
 because the destination is readable. A truncated existing log is rejected.
+
+`AppendOnlyEventWriter(path)` is the retained long-run writer. Acquisition rejects
+symlink logs, validates existing history once, and checks that its stat identity
+did not change during that read. Each `append(event)` validates and serializes
+only the new event. It creates a new log exclusively or checks the existing open
+file's device/inode/size/mtime/ctime against its last acknowledged state, writes
+one canonical JSON line, fsyncs the file, and records the new stat identity. First
+creation also fsyncs the directory. It does not reread, rewrite or hash prior
+events on each append and returns no artifact reference. Use one writer per log;
+concurrent writers or external mutation are unsupported.
+
+Invalid events are rejected before writing. Ownership or I/O failure marks that
+writer failed and stops the caller; subsequent append attempts are rejected, with
+no retry or automatic repair. A short write can leave the prior valid prefix plus
+a diagnostic tail, which `read_events` rejects as truncated. Fsync failure can
+leave a readable complete line whose durability was not acknowledged; readability
+does not certify a successful append. Consumers must read/validate the complete
+history again and hash retained bytes at their final history/inventory gate.
+The writer does not perform or certify that final gate itself.
+
+The sharing, encoder-pilot and staged/original13 runners use this append writer;
+`jscc/baseline_protocol.py` retains the stateless atomic `append_event` consumer.
+Both APIs preserve the event schema and final inventory/completion contracts.
 
 `artifact_ref(path, root, kind)` binds a relative path, `kind` (`metadata` or
 `tensor`), exact `sha256` and `bytes`. It hashes bytes without loading tensors.

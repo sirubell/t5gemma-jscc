@@ -14,12 +14,27 @@ Implement torch.nn.Module.forward(z, snr_db). See the [attenuation example](../e
 |---|---|
 | Input z | Real tensor [batch, tokens, bottleneck] |
 | Output | Received representation with the same shape, device and dtype |
-| Power | With normalize_power enabled, the caller normalizes mean power over all token/bottleneck elements in each sample |
+| Power | With normalize_power enabled, encoder hidden and receiver-memory streams use sequence-wide mean power over valid token/bottleneck coordinates in each sample; decoder hidden streams normalize each token over its bottleneck coordinates |
 | SNR | One numeric value per batch; None is the clean path, returned unchanged by the example |
-| Precision | Research recipes use CUDA/bfloat16; internal float32/complex computation is possible if the output restores the input dtype |
+| Precision | Preserve the actual channel input dtype: normalization promotes BF16/FP16 latents to FP32 and keeps FP32/FP64 precision; the backbone dtype does not determine the channel input dtype |
 | Gradients | End-to-end training needs gradients back to z; evaluation may use a non-differentiable simulator |
 
 AWGN adds real Gaussian noise with standard deviation 10 ** (−snr_db / 20), assuming approximately unit signal power. Define the relationship again when introducing complex I/Q, modulation or coding.
+
+The encoder/memory validity mask excludes padding from the sequence-wide power
+estimate. Without a mask, that policy averages all token/bottleneck coordinates.
+Decoder hidden normalization is tokenwise to preserve causality: later tokens
+cannot change an earlier token's normalization factor, and the mask does not
+couple tokens in this policy. Disabling normalize_power passes the encoded latent
+to the channel without normalization or its precision promotion.
+
+Internal float32/complex simulator computation is possible if the output restores
+the actual input dtype. With the default numerical policy, the caller decodes
+the received latent and casts the reconstructed stream back to the incoming
+backbone activation dtype. The opt-in `codec_receiver_fp32` policy keeps receiver
+computation in FP32; its separate stored reconstruction cast does not change the
+channel input/output contract. See [normalization](../jscc/models/channel.py) and
+[the transmission boundary](../jscc/models/split_model.py).
 
 ## Integration steps
 

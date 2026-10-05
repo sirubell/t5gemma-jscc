@@ -53,8 +53,20 @@ Production uses the pinned HF snapshot directory and requires its four retained
 input tokenizer/config hashes to match. Unavailable target assets are explicitly
 pending: plan checks may succeed, but execution refuses them until a complete
 target binding is created. Asset identity enters checkpoint metadata and every
-resume/evaluation comparison; all bytes are checked before model construction. Execution
-requires `--approved-source`, a finite `--timeout-seconds`, and, on CUDA, an
+resume/evaluation comparison. Before model construction, acquired bindings check
+the recorded path/revision, pinned snapshot layout, tokenizer/input identity,
+asset inventory, file presence and size, and acquired target/stat signatures.
+Startup does not rehash model bytes. Acquisition or transfer binds full byte
+hashes with `bind_model_assets`; an explicit
+`verify_model_assets(config, verify_bytes=True)` audit compares the full byte
+inventory. Changed layout or stat state requires audit/reacquisition rather than
+silently accepting new assets. Historical bindings without `trust` retain their
+presence/size policy alongside path/revision and tokenizer/input identity checks;
+they do not gain stat or full-byte verification at ordinary startup. See
+[asset provenance](../jscc/original13_provenance.py) and
+[path/stat checks](../jscc/asset_paths.py).
+
+Execution requires `--approved-source`, a finite `--timeout-seconds`, and, on CUDA, an
 explicit `--device-uuid` matching CUDA_VISIBLE_DEVICES. Production requires CUDA;
 synthetic tiny CPU fixtures remain a separate software-validation path. The existing
 `scripts/encoder_stages.py` retains the legacy A/E/R CLI.
