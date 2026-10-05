@@ -1,4 +1,4 @@
-# Input to scripts/encfn_baseline.py's protocol, not the legacy study expander.
+# Protocol description for the versioned encoder-final baseline, not a CLI or generic-study input.
 schema: baseline-plan-v2
 site: enc_fn
 bottleneck_dim: 512

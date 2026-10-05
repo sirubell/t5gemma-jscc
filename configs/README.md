@@ -85,7 +85,7 @@ uv run --locked python study.py --config configs/studies/hellaswag_corrected.yam
 uv run --locked python study.py --config configs/studies/hellaswag_corrected.yaml --task hellaswag --output runs/studies/hellaswag-corrected-h200
 ```
 
-References inside a task/study YAML are relative to that file. Direct task runs write to the project runs/ directory; smoke runs retain their configured output directory. Exported studies instead collect artifacts beneath their prepared directory. See [study execution](../docs/studies.md) for the manifest and job workflow.
+References inside a task/study YAML are relative to that file. Actual task training, including smoke runs, requires `--output` at an exact logical experiment root; `--check` works without `--output`. Exported studies instead collect artifacts beneath their prepared directory. See [study execution](../docs/studies.md) for the manifest and job workflow.
 
 The corrected HellaSwag plan's export command only prepares three resolved
 configs and a manifest. The expected future H200 entry point is the exported
