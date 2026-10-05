@@ -4,13 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
-
-
-def _hash_text(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def extract(source: Path, output: Path, *, run_id: str, checkpoint_sha256: str,
