@@ -47,6 +47,8 @@ def public(recipe, registrations, root, *extra):
             saved = next(row for row in index['checkpoints'] if row['path'] == str(checkpoint))
             ex['continuation'] = {'path': str(checkpoint), 'sha256': saved['sha256'], 'size_bytes': saved['size'],
                                    'role': saved['role'], 'step': saved['step'], 'parent_attempt': str(checkpoint.parents[1])}
+            if '--reconcile-interrupted' in options:
+                ex['continuation']['reconcile_interrupted'] = options['--reconcile-interrupted']
             if '--finalize-terminal' in extra:
                 ex['continuation']['finalize_terminal'] = True
             invoke(recipe.parent, 'shared', 'resume', ex)
@@ -185,9 +187,10 @@ main(argv)
         if not hard_death:
             with pytest.raises(ValueError, match='no implicit retry'):
                 public(recipe, registrations, interrupted, '--case', 'width-8-ratio-50')
-        with pytest.raises(ValueError, match='recorded nonterminal checkpoint from this case'):
+        with pytest.raises(ValueError, match=r'^continuation checkpoint role/step/attempt differs$'):
             public(recipe, registrations, interrupted, '--case', 'width-8-ratio-75',
                    '--resume', saved['path'], '--attempt', '0002')
+        assert not (interrupted/'cases/width-8-ratio-75/attempts/training-0002').exists()
         monkeypatch.setattr(_body_shared_training, 'run_recipe_training', original)
         reconciliation = []
         if hard_death:

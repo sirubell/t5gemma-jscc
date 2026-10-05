@@ -15,7 +15,7 @@ import torch
 
 from jscc.activation_replay import canonical_digest, file_digest
 from jscc.data.coco import CaptionDataset
-from jscc.shared_inputs import (CocoCachedData, batch_identity, bind_coco_data_cache,
+from jscc.shared_inputs import (_validate_coco_processor, CocoCachedData, batch_identity, bind_coco_data_cache,
                                 load_coco_panel_data, validate_recipe_cache)
 from jscc.shared_config import resolve_recipe
 
@@ -265,3 +265,92 @@ def test_demo_membership_guards_remain_with_zero_demo_support(acquired, demos, m
     with pytest.raises(ValueError, match=match):
         bind_coco_data_cache(**invalid)
     assert not invalid['output'].exists()
+
+
+@pytest.fixture
+def serialized_coco_image_processor(tmp_path):
+    from transformers.models.gemma3.image_processing_pil_gemma3 import Gemma3ImageProcessorPil
+
+    assets = tmp_path / 'processor-assets'
+    assets.mkdir()
+    image_processor = Gemma3ImageProcessorPil(size={'height': 8, 'width': 8},
+                                             do_pan_and_scan=False)
+    image_processor.save_pretrained(assets)
+    (assets / 'tokenizer.json').write_text('{}')
+    tokenizer = SimpleNamespace(name_or_path=str(assets),
+                                backend_tokenizer=SimpleNamespace(to_str=lambda: '{}'))
+    processor = SimpleNamespace(tokenizer=tokenizer,
+                                image_processor=Gemma3ImageProcessorPil.from_pretrained(
+                                    assets, local_files_only=True))
+    expected = json.loads((assets / 'preprocessor_config.json').read_text())
+    return processor, assets, expected
+
+
+def test_coco_processor_accepts_official_serialized_mean_std_tuples(serialized_coco_image_processor):
+    processor, assets, expected = serialized_coco_image_processor
+    actual = processor.image_processor.to_dict()
+    for field in ('image_mean', 'image_std'):
+        assert isinstance(expected[field], list)
+        assert isinstance(actual[field], tuple)
+        assert list(actual[field]) == expected[field]
+    _validate_coco_processor(processor, assets)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('image_mean', (0.4, 0.5, 0.5)),
+    ('image_std', (0.5, 0.4, 0.5)),
+    ('size', {'height': 16, 'width': 8}),
+    ('do_resize', False),
+    ('rescale_factor', 1.0),
+    ('do_rescale', False),
+])
+def test_coco_processor_rejects_changed_preprocessing(
+        serialized_coco_image_processor, field, value):
+    processor, assets, _ = serialized_coco_image_processor
+    actual = processor.image_processor.to_dict()
+    actual[field] = value
+    processor.image_processor = SimpleNamespace(to_dict=lambda: actual)
+    with pytest.raises(ValueError, match='preprocessing differs'):
+        _validate_coco_processor(processor, assets)
+
+
+@pytest.mark.parametrize('field', ['image_mean', 'image_std', 'size', 'do_resize', 'rescale_factor'])
+def test_coco_processor_rejects_missing_acquired_fields(serialized_coco_image_processor, field):
+    processor, assets, _ = serialized_coco_image_processor
+    actual = processor.image_processor.to_dict()
+    del actual[field]
+    processor.image_processor = SimpleNamespace(to_dict=lambda: actual)
+    with pytest.raises(ValueError, match='preprocessing differs'):
+        _validate_coco_processor(processor, assets)
+
+
+@pytest.mark.parametrize('value', [object(), {0.5}, float('nan'), float('inf')])
+def test_coco_processor_rejects_non_json_preprocessing(serialized_coco_image_processor, value):
+    processor, assets, _ = serialized_coco_image_processor
+    actual = processor.image_processor.to_dict()
+    actual['image_mean'] = value
+    processor.image_processor = SimpleNamespace(to_dict=lambda: actual)
+    with pytest.raises((TypeError, ValueError)):
+        _validate_coco_processor(processor, assets)
+
+
+def test_coco_processor_compares_only_acquired_fields(serialized_coco_image_processor):
+    processor, assets, _ = serialized_coco_image_processor
+    actual = processor.image_processor.to_dict()
+    actual['runtime_only'] = object()
+    processor.image_processor = SimpleNamespace(to_dict=lambda: actual)
+    _validate_coco_processor(processor, assets)
+
+
+def test_coco_processor_rejects_changed_tokenizer(serialized_coco_image_processor):
+    processor, assets, _ = serialized_coco_image_processor
+    processor.tokenizer.backend_tokenizer = SimpleNamespace(to_str=lambda: '{"different": true}')
+    with pytest.raises(ValueError, match='tokenizer differs'):
+        _validate_coco_processor(processor, assets)
+
+
+def test_coco_processor_rejects_changed_local_path(serialized_coco_image_processor, tmp_path):
+    processor, assets, _ = serialized_coco_image_processor
+    processor.tokenizer.name_or_path = str(tmp_path / 'another-snapshot')
+    with pytest.raises(ValueError, match='processor differs'):
+        _validate_coco_processor(processor, assets)

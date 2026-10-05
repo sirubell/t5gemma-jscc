@@ -662,7 +662,10 @@ def _validate_coco_processor(processor, assets):
     expected = json.loads(asset_file_path(assets,'preprocessor_config.json').read_text())
     image_processor = getattr(processor,'image_processor',None)
     actual = image_processor.to_dict() if image_processor is not None else {}
-    if any(actual.get(key) != value for key,value in expected.items()):
+    if any(key not in actual for key in expected):
+        raise ValueError('COCO runtime image preprocessing differs from acquired config')
+    actual = json.loads(json.dumps({key: actual[key] for key in expected}, allow_nan=False))
+    if actual != expected:
         raise ValueError('COCO runtime image preprocessing differs from acquired config')
     backend = getattr(tokenizer,'backend_tokenizer',None)
     if backend is None or json.loads(backend.to_str()) != json.loads(asset_file_path(assets,'tokenizer.json').read_text()):
