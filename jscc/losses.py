@@ -1,9 +1,9 @@
 """Losses used by the frozen-backbone JSCC distillation loop.
 
-The public helpers return a mean by default for compatibility with the old
-training code.  The ``*_stats`` helpers expose numerators and denominators so
-the caller can form one objective over an effective batch (including gradient
-accumulation) instead of averaging already-normalised microbatch losses.
+The ``*_stats`` helpers expose numerators and denominators so the caller can
+form one objective over an effective batch (including gradient accumulation)
+instead of averaging already-normalised microbatch losses.  The reconstruction
+helper also retains the historical mean reduction for direct callers.
 """
 
 from __future__ import annotations
@@ -54,38 +54,16 @@ def distillation_loss_stats(
             ).sum(dim=-1) * temperature**2
             numerators.append(token_kl.sum())
         return torch.stack(numerators).sum(), valid.sum()
-    else:
-        student_float = student.float() / temperature
-        teacher_float = teacher.float() / temperature
+    student_float = student.float() / temperature
+    teacher_float = teacher.float() / temperature
     token_kl = F.kl_div(
         F.log_softmax(student_float, dim=-1),
         F.softmax(teacher_float, dim=-1),
         reduction="none",
     ).sum(dim=-1) * temperature**2
-    numerator = token_kl.sum() if valid_only else token_kl.masked_select(valid).sum()
+    numerator = token_kl.masked_select(valid).sum()
     denominator = valid.sum()
     return numerator, denominator
-
-
-def distillation_loss(
-    student: torch.Tensor,
-    teacher: torch.Tensor,
-    labels: torch.Tensor,
-    temperature: float = 1.0,
-    *,
-    reduction: str = "mean",
-    valid_only: bool = False,
-) -> torch.Tensor:
-    """Compute KL(teacher || student) over non-padding target tokens."""
-
-    if reduction not in {"mean", "sum"}:
-        raise ValueError("reduction must be mean or sum")
-    numerator, denominator = distillation_loss_stats(
-        student, teacher, labels, temperature, valid_only=valid_only
-    )
-    if reduction == "sum":
-        return numerator
-    return numerator / denominator.clamp_min(1).to(numerator.dtype)
 
 
 def _expanded_mask(mask: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
