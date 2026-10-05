@@ -19,7 +19,7 @@ For research planning, implementation or experiments, read the [current handoff]
 
 ## Working conventions
 
-Use `gpt-6.1-sol` for delegated work and reviews; use `gpt-5.6-sol` when a different model is needed. This supersedes older Astra preferences.
+Use `gpt-6.1-sol` for delegated work and reviews
 
 This project primarily supports the owner's research workflow. Keep the README centered on features and experiments. Put collaboration details in the channel guide and personal infrastructure details in docs/local/.
 
