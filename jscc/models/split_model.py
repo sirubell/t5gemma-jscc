@@ -619,16 +619,18 @@ def build_model(config, *, local_files_only=False):
         raise ValueError("flash_math is currently supported only for task=coco")
     # Imports are delayed so --check and tensor-only tests need no Transformers.
     from transformers import AutoModelForSeq2SeqLM, AutoProcessor, AutoTokenizer
-    kwargs: dict[str, Any] = {"revision": model_config["revision"]}
+    processor_kwargs: dict[str, Any] = {"revision": model_config["revision"]}
     if local_files_only:
-        kwargs['local_files_only'] = True
+        processor_kwargs['local_files_only'] = True
+    # Model execution options must not enter tokenizer initialization metadata.
+    model_kwargs = dict(processor_kwargs)
     if 'attn_implementation' in model_config:
-        kwargs['attn_implementation'] = model_config['attn_implementation']
+        model_kwargs['attn_implementation'] = model_config['attn_implementation']
     processor_cls = AutoProcessor if config["task"] == "coco" else AutoTokenizer
-    processor = processor_cls.from_pretrained(model_config["name"], **kwargs)
+    processor = processor_cls.from_pretrained(model_config["name"], **processor_kwargs)
     dtype = getattr(torch, model_config["dtype"])
     base = AutoModelForSeq2SeqLM.from_pretrained(
-        model_config["name"], dtype=dtype, low_cpu_mem_usage=True, **kwargs
+        model_config["name"], dtype=dtype, low_cpu_mem_usage=True, **model_kwargs
     )
     input_dim = int(base.config.decoder.hidden_size)
     codec = Codec(input_dim, config["codec"])
