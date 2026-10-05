@@ -27,7 +27,7 @@ def tensor_digest(tensor):
 
 def fixed_prefix(document):
     ids = document['cached_ids']
-    if len(ids) < 65 or ids[0] != 2 or any(not isinstance(x, int) or x < 0 for x in ids):
+    if len(ids) < 65 or ids[0] != 2 or any(type(x) is not int or x < 0 for x in ids):
         raise ValueError('Require at least 65 cached IDs beginning with native BOS2')
     return torch.tensor([ids[:-1][:64]], dtype=torch.long)
 

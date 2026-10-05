@@ -6,7 +6,8 @@ from scripts.coco_long_prefix_diagnostic import fixed_prefix, compare_logits, ca
 def test_prefix_exactly_64_native_tokens_and_discards_last():
     ids = [2] + list(range(3, 70))
     assert fixed_prefix({'cached_ids': ids}).tolist() == [ids[:64]]
-    for bad in ([2] * 64, [1] * 65, [2] + [-1] * 64):
+    for bad in ([2] * 64, [1] * 65, [2] + [-1] * 64,
+                [2, True] + [3] * 63, [2] + [3] * 63 + [False]):
         with pytest.raises(ValueError):
             fixed_prefix({'cached_ids': bad})
 
