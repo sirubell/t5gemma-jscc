@@ -6,6 +6,7 @@ Metrics include ordinary flat rows and recipe-training-event-v1 update envelopes
 """
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -110,6 +111,147 @@ def test_snapshot_retry_verifies_reuses_and_preserves_failed_pass(tmp_path):
     failed = collect_snapshot(snapshot, destination)
     assert failed["counts"]["failed"]["count"] == 1 and failed["status"] != "complete"
     assert checkpoint.read_bytes() == b"different"
+
+
+def test_default_companion_retains_original_source_through_snapshot_retries(tmp_path):
+    """G01: exports survive independently; companion repair needs original bytes."""
+    root = tmp_path / "run"
+    singleton(root)
+    companion = root / "config.yaml"
+    original = companion.read_bytes()
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    manifest = prepare_snapshot(root, snapshot)
+    entry = next(row for row in manifest["artifacts"] if row["path"] == "files/config.yaml")
+    assert entry["kind"] == "companion"
+    assert entry["source"] == str(companion)
+    assert entry["sha256"] == hashlib.sha256(original).hexdigest()
+    assert entry["bytes"] == len(original)
+    assert all(Path(row["source"]).is_relative_to(root)
+               for row in manifest["artifacts"] if row["kind"] == "companion")
+    exports = [row for row in manifest["artifacts"] if row["kind"] == "export"]
+    assert exports
+    assert all(Path(row["source"]) == snapshot / row["path"] for row in exports)
+    assert not (snapshot / "files/config.yaml").exists()
+    snapshot_bytes = {path: path.read_bytes() for path in snapshot.rglob("*") if path.is_file()}
+
+    companion.unlink()
+    missing = collect_snapshot(snapshot, destination)
+    assert missing["status"] == "incomplete"
+    assert missing["counts"]["missing"] == {"count": 1, "bytes": len(original), "unknown_bytes": 0}
+    assert all((destination / row["path"]).read_bytes() == Path(row["source"]).read_bytes()
+               for row in exports)
+    assert not (destination / entry["path"]).exists()
+    prior_receipts = {Path(missing["receipt"]): Path(missing["receipt"]).read_bytes()}
+
+    companion.write_bytes(original)
+    recovered = collect_snapshot(snapshot, destination)
+    assert recovered["status"] == "complete"
+    assert recovered["counts"]["copied"]["count"] == 1
+    copied = destination / entry["path"]
+    assert copied.read_bytes() == companion.read_bytes() == original
+    prior_receipts[Path(recovered["receipt"])] = Path(recovered["receipt"]).read_bytes()
+
+    companion.unlink()
+    reused = collect_snapshot(snapshot, destination)
+    assert reused["status"] == "complete"
+    assert reused["counts"]["reused"] == reused["counts"]["selected"]
+    assert reused["counts"]["copied"]["count"] == 0
+    assert not companion.exists()
+    prior_receipts[Path(reused["receipt"])] = Path(reused["receipt"]).read_bytes()
+
+    copied.write_bytes(b"damaged destination")
+    missing_repair = collect_snapshot(snapshot, destination)
+    assert missing_repair["status"] == "incomplete"
+    assert missing_repair["counts"]["missing"]["count"] == 1
+    assert copied.read_bytes() == b"damaged destination"
+    prior_receipts[Path(missing_repair["receipt"])] = Path(missing_repair["receipt"]).read_bytes()
+
+    companion.write_bytes(b"changed original")
+    failed_repair = collect_snapshot(snapshot, destination)
+    assert failed_repair["status"] == "incomplete"
+    assert failed_repair["counts"]["failed"]["count"] == 1
+    assert copied.read_bytes() == b"damaged destination"
+    assert companion.read_bytes() == b"changed original"
+    prior_receipts[Path(failed_repair["receipt"])] = Path(failed_repair["receipt"]).read_bytes()
+
+    companion.write_bytes(original)
+    repaired = collect_snapshot(snapshot, destination)
+    assert repaired["status"] == "complete"
+    assert repaired["counts"]["copied"]["count"] == 1
+    assert copied.read_bytes() == companion.read_bytes() == original
+    assert all(path.read_bytes() == content for path, content in prior_receipts.items())
+    assert all(path.read_bytes() == content for path, content in snapshot_bytes.items())
+
+
+@pytest.mark.parametrize("select_receipt", [False, True])
+def test_panel_receipt_reference_retention_versus_explicit_byte_selection(tmp_path, select_receipt):
+    """G02: selecting a receipt verifies its bytes, not its hashed siblings."""
+    root = tmp_path / "run"
+    singleton(root)
+    evaluation = root / "evaluations/evaluation-0001/panels"
+    panel_dir = evaluation / "enc_l2_no_noise"
+    request = {"schema": "recipe-terminal-request-v1", "scope": "initial", "expected_items": 2,
+               "sites": ["enc_l2"], "conditions": ["no_noise"]}
+    parent_request = write(evaluation / "request.json", request)
+    panel_request = write(panel_dir / "request.json", {
+        **request, "schema": "recipe-panel-request-v1", "target_site": "enc_l2", "conditions": ["no_noise"],
+    })
+    items = panel_dir / "items.jsonl"
+    items.write_text('{"item": 1}\n{"item": 2}\n')
+    output_hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                     for path in (panel_request, items)}
+    panel = {"site": "enc_l2", "condition": "no_noise", "status": "complete",
+             "requested_items": 2, "completed_items": 2, "denominator": 2,
+             "metrics": {"acc": .5}, "output_hashes": output_hashes}
+    receipt_path = write(panel_dir / "receipt.json", panel)
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_reference = {"path": str(receipt_path), "sha256": hashlib.sha256(receipt_bytes).hexdigest()}
+    parent_result = write(evaluation / "result.json", {
+        "schema": "recipe-evaluation-receipt-v1", "status": "complete", "request": request,
+        "panels": [{**panel, "receipt": receipt_reference}],
+        "requested_panels": 1, "completed_panels": 1, "failed_panels": 0, "pending_panels": 0,
+    })
+    relative_receipt = receipt_path.relative_to(root).as_posix()
+    snapshot, destination = tmp_path / "snapshot", tmp_path / "destination"
+    manifest = prepare_snapshot(root, snapshot, selected=[relative_receipt] if select_receipt else [])
+    artifacts = {row["path"]: row for row in manifest["artifacts"]}
+    for path in (parent_request, parent_result, panel_request):
+        assert artifacts["files/" + path.relative_to(root).as_posix()]["kind"] == "companion"
+    if select_receipt:
+        selected = artifacts["files/" + relative_receipt]
+        assert selected["kind"] == "explicit"
+        assert selected["source"] == str(receipt_path)
+        assert selected["sha256"] == receipt_reference["sha256"]
+        assert selected["bytes"] == len(receipt_bytes)
+    else:
+        assert "files/" + relative_receipt not in artifacts
+        reference = next(row for row in manifest["remote"] if row["path"] == relative_receipt)
+        assert reference["recorded_sha256"] == receipt_reference["sha256"]
+        assert reference["retrieval_ref"] == receipt_path.as_uri()
+        assert reference["verification"] == "metadata only; bytes not copied or verified"
+
+    # A mismatched hashed sibling does not change collection's selected-byte success.
+    items.write_text('{"changed": true}\n')
+    assert hashlib.sha256(items.read_bytes()).hexdigest() != output_hashes[items.name]
+    source_bytes = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    collected = collect_snapshot(snapshot, destination)
+    assert collected["status"] == "complete"
+    for path in (parent_request, parent_result, panel_request):
+        assert (destination / "files" / path.relative_to(root)).read_bytes() == path.read_bytes()
+    saved_panel = read(destination / "files" / parent_result.relative_to(root))["panels"][0]
+    assert saved_panel["receipt"] == receipt_reference
+    assert saved_panel["output_hashes"] == output_hashes
+    assert lines(destination / "exports/results.jsonl")[0]["row"] == saved_panel
+    copied_receipt = destination / "files" / relative_receipt
+    if select_receipt:
+        assert copied_receipt.read_bytes() == receipt_bytes
+        assert read(copied_receipt)["output_hashes"] == output_hashes
+        copied_row = next(row for row in collected["artifacts"] if row["path"] == "files/" + relative_receipt)
+        assert copied_row["status"] == "verified" and copied_row["copied"]
+    else:
+        assert not copied_receipt.exists()
+    assert not (destination / "files" / items.relative_to(root)).exists()
+    assert all(path.read_bytes() == content for path, content in source_bytes.items())
 
 
 def test_absent_selected_source_is_not_silently_removed_or_rebound(tmp_path):
