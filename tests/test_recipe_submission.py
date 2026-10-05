@@ -271,7 +271,8 @@ def test_saved_preflight_preserves_model_prepared_and_source_integrity(job_files
     metadata.write_bytes(original)
     asset = Path(b['prepared']['path'])
     manifest = json.loads(asset.read_text())
-    manifest['configs']['8']['training']['lr'] = .001
+    width = str(b['resolved']['trajectories'][0]['width'])
+    manifest['configs'][width]['training']['lr'] = .001
     asset.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match='prepared digest'):
         submission_preflight(b)

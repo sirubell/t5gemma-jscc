@@ -44,7 +44,9 @@ Bound effective settings come from `bundle.json`, so later authored YAML edits
 cannot change a queued case. Editing the bundle or prepared/config bytes fails
 identity checks. Changing science/source/budget requires a new reviewed binding
 and an explicitly linked case/revision; a rejected check is not an exact retry.
-Old bundles without `source_binding` need fresh preparation, not silent migration.
+Saved bundles lacking `source_binding` cannot pass this preflight; retain their
+original source-specific readers where needed. New work requires fresh current
+case preparation.
 
 ## Callable interfaces
 
@@ -106,12 +108,12 @@ submissions record `queued`. Exceptions after reservation conservatively record
 A source or prepared/config preflight failure records type/message/stage with zero scheduler calls
 and retains the output reservation. No automatic retry or release occurs.
 
-`run_job` writes an exclusive per-trajectory preflight marker. Wrong/dirty source,
+`run_job` writes an exclusive per-group/case preflight marker. Wrong/dirty source,
 changed runtime/config, or loaded helper checkout mismatch records a failed
 marker before GPU/model execution. Duplicate invocation cannot overwrite it. The CLI also retains JSON/identity
 validation failures beside the trusted bundle path without using a mutated
 bundle's output path.
-A failed trajectory never releases a shared submission: other rows may still be
+A failed task never releases a shared submission: other rows may still be
 queued/running. The owning submission session must reconcile every task before
 recording terminal state and release. Neither a CLI error nor one task's exit
 proves that the whole consumer is terminal.
