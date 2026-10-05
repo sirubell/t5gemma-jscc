@@ -631,7 +631,6 @@ def build_model(config, *, local_files_only=False):
         model_config["name"], dtype=dtype, low_cpu_mem_usage=True, **kwargs
     )
     input_dim = int(base.config.decoder.hidden_size)
-    config["codec"]["input_dim"] = input_dim
     codec = Codec(input_dim, config["codec"])
     wrapper = SplitModel(base, codec, build_channel(config["channel"]),
                          config["split"], config["channel"], sdpa_backend_policy=policy,
