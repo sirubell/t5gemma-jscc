@@ -1,5 +1,12 @@
-"""Fresh bounded dec_l20 stream-weight screen, or discarded two-update preflight."""
-import argparse
+"""Retained screen configuration, selection and instrumented CPU test helpers.
+
+The historical executor is retired; imported helpers preserve their contracts.
+"""
+if __name__ == "__main__":
+    raise SystemExit(
+        "main_weight_screen_train executor is retired; retained helpers are available by import."
+    )
+
 import copy
 import gzip
 import hashlib
@@ -13,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from jscc import training
-from jscc.config import load_config, resolve_codec_configs, validate_config
+from jscc.config import resolve_codec_configs, validate_config
 from jscc.presentation import tensor_digest
 from scripts.experiments.evening_gradients import selection_ids, validate_fixture
 
@@ -194,23 +201,3 @@ def run_screen(base, output, arm, *, preflight=False, seconds=2600, deadline_epo
     finally:
         flush()
     return report
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--arm", choices=ARMS, required=True)
-    parser.add_argument("--preflight", action="store_true")
-    parser.add_argument("--seconds", type=int, default=2600)
-    parser.add_argument("--deadline-epoch", type=float)
-    parser.add_argument("--selection-fixture", type=Path, required=True)
-    args = parser.parse_args()
-    if not 1 <= args.seconds <= 2700:
-        parser.error("seconds must be in1..2700")
-    run_screen(load_config(args.config), args.output, args.arm, preflight=args.preflight,
-               seconds=args.seconds, deadline_epoch=args.deadline_epoch, selection_fixture=args.selection_fixture)
-
-
-if __name__ == "__main__":
-    main()

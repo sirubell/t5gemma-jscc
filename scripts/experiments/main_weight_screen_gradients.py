@@ -1,28 +1,26 @@
 """Bounded no-noise pooled32 K/H/M probe for the main-weight early screen.
 
-One invocation is one observation (12 VJPs). The orchestrator owns the shared
-96-attempt cap and invokes shared initialization only once. Gradient bytes are
+The imported probe observes one pooled32 sample (12 VJPs). The historical
+executor is retired; helpers retain the original observation algebra. Gradient bytes are
 not exported; saved norms/dots permit offline algebra, not a fresh VJP replay.
 """
 from __future__ import annotations
 
-import argparse
+if __name__ == "__main__":
+    raise SystemExit(
+        "main_weight_screen_gradients executor is retired; retained helpers are available by import."
+    )
+
 import copy
-import json
-from pathlib import Path
-import time
 from typing import Any, cast
 
 import torch
 
 from jscc.data.hellaswag import Collator
-from jscc.data.hellaswag_prompts import digest
-from jscc.models.split_model import build_model
-from jscc.runtime import configure_training_determinism, isolated_rng, source_state
+from jscc.runtime import isolated_rng
 from jscc.training import batch_losses, effective_batch_denominators
 from scripts.experiments.evening_gradients import (
-    Budget, component_vjps, feature_rows, file_hash, gradient_summary,
-    selection_fixture, validate_fixture,
+    component_vjps, feature_rows, gradient_summary,
 )
 
 COMPONENTS = ('kl', 'hidden', 'memory')
@@ -147,81 +145,3 @@ def run_probe(model, rows, training, pad_id, hidden_weight, budget, write, ident
             setattr(model, key, value)
         model.activation = model.reconstruction = None
         model.memory_activation = model.memory_reconstruction = None
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--checkpoint', required=True, type=Path)
-    parser.add_argument('--fixture', required=True, type=Path)
-    parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--arm', required=True, choices=['shared_init', 'W005', 'W05', 'W5'])
-    parser.add_argument('--step', required=True, type=int, choices=[0, 500, 1000])
-    parser.add_argument('--hidden-weight', required=True, type=float, choices=[.05, .5, 5.])
-    parser.add_argument('--seconds', type=int, default=300)
-    parser.add_argument('--deadline-epoch', required=True, type=float)
-    args = parser.parse_args()
-    expected_weight = {'shared_init': .05, 'W005': .05, 'W05': .5, 'W5': 5.}[args.arm]
-    if args.hidden_weight != expected_weight or (args.arm == 'shared_init') != (args.step == 0):
-        parser.error('arm/weight/step are not an approved observation')
-    if not 1 <= args.seconds <= 600:
-        parser.error('seconds must be in1..600')
-    budget = Budget(12, args.seconds)
-    budget.deadline = min(budget.deadline, time.monotonic()+args.deadline_epoch-time.time())
-    budget.check()
-    args.output.mkdir(parents=True, exist_ok=False)
-    started = time.monotonic()
-    receipt = {'arm': args.arm, 'checkpoint_step': args.step, 'checkpoint': str(args.checkpoint),
-               'checkpoint_sha256': file_hash(args.checkpoint), 'fixture_file_sha256': file_hash(args.fixture),
-               'source': source_state(), 'source_file_sha256': file_hash(__file__),
-               'gradient_bytes_exported': False, 'completion': 'FAILED'}
-
-    def write(name, value):
-        with (args.output/name).open('a') as stream:
-            stream.write(json.dumps(value, allow_nan=False)+'\n')
-
-    try:
-        state = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
-        if type(state.get('step')) is not int or state['step'] != args.step:
-            raise ValueError('checkpoint internal step mismatch')
-        config = state['config']
-        if tuple(config['split'].get(k) for k in ('stack', 'where', 'index')) != ('dec', 'after_layer', 20):
-            raise ValueError('expected dec_l20 split')
-        if config.get('protocol') != 'corrected-baseline-v2-native-decoder-inputs':
-            raise ValueError('native-v2 checkpoint required')
-        if config['codec'].get('snr_film', False) or config['codec'].get('memory', {}).get('snr_film', False):
-            raise ValueError('FiLM must remain off')
-        configure_training_determinism(config['training'])
-        tokenizer, model = build_model(config)
-        model.load_communication_state(state)
-        payload = json.loads(args.fixture.read_text())
-        supplied = payload['rows'] if isinstance(payload, dict) else payload
-        expected_rows = {r['row_id']: r for r in selection_fixture(config, state['data_ids'], tokenizer)}
-        for row in supplied:
-            for key in ['input_ids', 'attention_mask', 'label_ids']:
-                if row[key] != expected_rows[row['row_id']][key]:
-                    raise ValueError('E3 frozen fixture token mismatch')
-        rows = validate_fixture(supplied, state['data_ids'])[:32]
-        receipt['row_ids'] = [r['row_id'] for r in rows]
-        receipt['fixture_sha256'] = digest(rows)
-        (args.output/'fixture32.json').write_text(json.dumps({'rows': rows}))
-        identity = {k: receipt[k] for k in ('arm', 'checkpoint_step', 'checkpoint_sha256', 'fixture_sha256')}
-        run_probe(model, rows, config['training'], tokenizer.pad_token_id, args.hidden_weight,
-                  budget, write, identity)
-        if budget.calls != 12:
-            raise RuntimeError('completed observation must have12 VJPs')
-        receipt['completion'] = 'COMPLETE'
-    except Exception as exc:
-        receipt['error'] = f'{type(exc).__name__}: {exc}'
-        raise
-    finally:
-        receipt.update(component_vjp_calls=budget.calls, teacher_forwards=budget.teacher_forwards,
-                       student_forwards=budget.student_forwards, presentations=budget.presentations,
-                       optimizer_updates=0, wall_seconds=time.monotonic()-started,
-                       checkpoint_sha256_after=file_hash(args.checkpoint))
-        (args.output/'receipt.json').write_text(json.dumps(receipt, indent=2, allow_nan=False))
-        if receipt['checkpoint_sha256_after'] != receipt['checkpoint_sha256']:
-            raise RuntimeError('checkpoint bytes changed during probe')
-
-
-if __name__ == '__main__':
-    main()

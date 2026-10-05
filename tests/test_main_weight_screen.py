@@ -149,3 +149,25 @@ def test_actual_frozen_e3_fixture_order_regression():
     assert selection_ids(ids) != expected
     assert set(selection_ids(ids)) == set(expected)
     assert frozen_selection_order(ids, fixture) == expected
+
+
+@pytest.mark.parametrize("as_module", [False, True])
+def test_retired_executor_rejects_before_dependencies_or_output(tmp_path, as_module):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    module = "main_weight_screen_train"
+    target = ["-m", f"scripts.experiments.{module}"] if as_module else [
+        str(root / "scripts/experiments" / f"{module}.py")
+    ]
+    output = tmp_path / "must-not-exist"
+    result = subprocess.run(
+        [sys.executable, "-S", *target, "--output", str(output)],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert f"{module} executor is retired" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not output.exists()
