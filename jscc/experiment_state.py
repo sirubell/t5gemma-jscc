@@ -312,7 +312,6 @@ def restore_state(validated: ValidatedState, *, model, optimizer, scheduler, sca
     payload = open_state(
         validated.reference, expected=validated.payload["metadata"]
     ).payload
-    _validate(payload)
     preflight_restore(payload, model=model, optimizer=optimizer, scaler=scaler)
     if weight_load is None:
         model.load_state_dict(payload["model"], strict=True)

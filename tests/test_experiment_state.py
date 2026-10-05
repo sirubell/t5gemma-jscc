@@ -124,3 +124,42 @@ def test_hash_correct_but_missing_required_state_rejected(tmp_path):
     ref = CheckpointRef(str(invalid), hashlib.sha256(data).hexdigest(), len(data))
     with pytest.raises(ValueError, match="invalid checkpoint"):
         open_state(ref, expected=metadata())
+
+
+def test_restore_reopens_bytes_despite_mutated_in_memory_payload(tmp_path):
+    model, optimizer, scheduler = components()
+    ref = save(tmp_path / "state.pt", model, optimizer, scheduler)
+    validated = open_state(ref, expected=metadata())
+    validated.payload["model"]["weight"].fill_(float("nan"))
+    validated.payload["stream"]["offset"] = 64
+    other, other_optimizer, other_scheduler = components()
+    stream = restore_state(
+        validated,
+        model=other,
+        optimizer=other_optimizer,
+        scheduler=other_scheduler,
+        scaler=None,
+    )
+    assert stream == {"completed_updates": 0, "offset": 0}
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, other.state_dict()[name])
+
+
+def test_restore_rejects_bytes_changed_after_open_before_mutation(tmp_path):
+    model, optimizer, scheduler = components()
+    path = tmp_path / "state.pt"
+    validated = open_state(save(path, model, optimizer, scheduler), expected=metadata())
+    path.write_bytes(path.read_bytes()[:30])
+    other, other_optimizer, other_scheduler = components()
+    before = {name: value.clone() for name, value in other.state_dict().items()}
+    with pytest.raises(ValueError, match="corrupt"):
+        restore_state(
+            validated,
+            model=other,
+            optimizer=other_optimizer,
+            scheduler=other_scheduler,
+            scaler=None,
+        )
+    for name, value in before.items():
+        assert torch.equal(value, other.state_dict()[name])
+    assert not other_optimizer.state

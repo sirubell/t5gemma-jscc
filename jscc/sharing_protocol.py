@@ -151,7 +151,6 @@ class SharingLearner(BaselineLearner):
             if (batch_identities is None or len(batch_identities) != 1
                     or not isinstance(batch_identities[0], BoundBatchIdentity)):
                 raise ValueError('accumulation requires one verified parent binding')
-            batch_identities[0].validate(batches[0])
             batches = partition_native64(batches[0], microbatch_size=self.microbatch_size)
             batch_identities = [bind_batch_identity(batch) for batch in batches]
         self.pending_update = actual
