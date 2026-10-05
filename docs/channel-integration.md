@@ -1,8 +1,9 @@
 # Custom wireless channel integration
 
+Current experiment calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). The small tensor checker is a diagnostic.
 This guide is for collaborators implementing a physical wireless simulator. The project's normal research workflow is in the [README](../README.md). Integration starts by replacing the channel between codec encoding and decoding.
 
-Both tasks reference the same `configs/model.yaml`: an encoder-after-layer-9 residual-codec baseline with external LayerNorm `none` and SNR-FiLM disabled. All supplied training and smoke recipes reference it. Start channel integration with this baseline. The simulator still accepts SNR to model noise; it does not need to implement or coordinate FiLM. FiLM is reserved for an explicit later experiment.
+Both tasks reference the same `configs/models/default.yaml`: an encoder-after-layer-9 residual-codec baseline with external LayerNorm `none` and SNR-FiLM disabled. All supplied training and smoke recipes reference it. Start channel integration with this baseline. The simulator still accepts SNR to model noise; it does not need to implement or coordinate FiLM. FiLM is reserved for an explicit later experiment.
 
 An H200 account is not needed to develop the channel. The tensor checker and automated tests run on CPU; full model checks can run on a compatible standalone CUDA GPU such as RTX 5090. Follow the [workstation guide](running.md#standalone-gpu-workstations-including-rtx-5090), starting with a small batch. The static analysis tools are installed with `uv sync --locked --extra dev`.
 
@@ -39,11 +40,11 @@ channel input/output contract. See [normalization](../jscc/models/channel.py) an
 ## Integration steps
 
 1. Create an importable Python module and an nn.Module class with constructor options.
-2. Copy [wireless.yaml](../configs/evaluation/wireless.yaml); set channel.type to module:ClassName and channel.kwargs to your options.
+2. Copy [wireless-options.yaml](../configs/requests/wireless-options.yaml); set channel.type to module:ClassName and channel.kwargs to your options.
 3. Check small tensors before loading a model:
 
    ```bash
-   uv run --locked python -m examples.check_channel --config configs/evaluation/wireless.yaml
+   uv run --locked python -m examples.check_channel --config configs/requests/wireless-options.yaml
    ```
 
    Use your copied filename when applicable. This checker currently uses CPU/float32 and 0 dB. A message reporting no usable gradient means evaluation-only use until resolved, even if the process exits normally. Also test CUDA/BF16, clean operation, other SNRs and sequence lengths before training.
@@ -51,15 +52,17 @@ channel input/output contract. See [normalization](../jscc/models/channel.py) an
 4. Evaluate a saved codec with the replacement channel:
 
    ```bash
-   uv run --locked python evaluate.py --run runs/<coco-run> --config configs/evaluation/wireless.yaml
-   uv run --locked python evaluate.py --run runs/<hellaswag-run> --config configs/evaluation/wireless.yaml
+   uv run --locked python experiment.py --config /path/to/coco-wireless-request.yaml
+   uv run --locked python experiment.py --config /path/to/hellaswag-wireless-request.yaml
    ```
+
+   Copy [wireless.yaml](../configs/requests/wireless.yaml) for each bound ordinary root. Set `execution.root`, a fresh `execution.attempt` and `execution.evaluation.overrides` to the copied options file; paths resolve from the request. Ordinary COCO and HellaSwag support custom channels. Current shared requests support AWGN and identity only.
 
    A replacement channel is a new instance. Parameters from another channel checkpoint are not automatically imported.
 
    Evaluation restores the checkpoint's saved model settings. An older FiLM-enabled checkpoint stays FiLM-enabled even after editing a current YAML. Use a checkpoint saved with the intended shared baseline when comparing simulators; historical COCO decoder-split results are not equivalent to the new encoder-split baseline.
 
-5. For training, copy `configs/model.yaml` to a named design file and change its channel.type and channel.kwargs. Preserve normalize_power, train_noise, train_snr_range and clean_film_snr; keep codec.snr_film false. Point each task YAML's model_config at the new design file. Both tasks then use the same simulator and codec. Trainable channel parameters are included with codec parameters in the optimizer.
+5. For training, copy `configs/models/default.yaml` to a named design file and change its channel.type and channel.kwargs. Preserve normalize_power, train_noise, train_snr_range and clean_film_snr; keep codec.snr_film false. Point each task YAML's model_config at the new design file. Both tasks then use the same simulator and codec. Trainable channel parameters are included with codec parameters in the optimizer.
 
 ## Agree on the physical interpretation
 

@@ -1,139 +1,158 @@
-# Recorded experiment operations
+# One-operation YAML workflow
 
-Run commands from the project root after `uv sync --locked`. Training, evaluation and live submission require their applicable scope and budget; these examples are not launch receipts. [Running](running.md) covers local/Colab/CUDA setup. Local research starts at `docs/local/research/HANDOFF.md`, then the session guide and assigned ticket; those ignored files are optional for a fresh clone.
+Invoke `uv run --locked python experiment.py --config FILE`. Every new public request has `schema: jscc-experiment-v1`, `workflow: ordinary|shared`, exactly one `operation`, and an `execution` mapping. Authored scientific settings go in `experiment`; requests for an existing bound root may omit science. If supplied, science must match the binding. All relative paths resolve from their declaring file. A root, case, attempt or checkpoint is always explicit; there is no latest lookup or implicit retry.
 
-Acquire any missing pinned model/tokenizer/data bytes in a separately scoped setup step using [the existing cache/setup guide](running.md). Then keep these normal operations cache-only:
+| Operation | Effects and owned fields |
+|---|---|
+| check | Compose/describe only; optional `resolution.output` exclusively writes resolved JSON. Shared `resolution.model_config` reads pinned local topology, not tensors. A bound root supplies immutable science. |
+| acquire | `acquisition: {model_path, model_revision, output, synthetic_cpu}` attests complete existing local model bytes to fresh JSON. Shared `kind: coco-cache` binds existing dataset/images/processor/demo/reference/scorer assets as described below. No download or branch resolution. |
+| register | `registration` owns exact `model_name`, fresh `output`, and either checksum-bound `references` or `from_prepared`. It preserves existing acquisition identity. |
+| prepare | Authored science plus `preparation`; reserve/bind a fresh root or standalone prepared destination. No training. Shared chooses `registrations` or `assets` plus `model_config`; ordinary uses an empty preparation and explicit root. |
+| train | Explicit root and new attempt. Fresh ordinary science is composed once; exact ordinary preparation can be consumed once. Shared uses an already bound root or exact train-only `prepared: {path, sha256}`. No implicit registration/acquisition. |
+| resume | Bound root, new attempt and `continuation` exact durable checkpoint/role/step/parent/size/hash. Shared requires one case and may explicitly reconcile a stopped parent or finalize terminal. No unsaved counters are borrowed. |
+| evaluate | Bound root, new attempt and optional exact `evaluation` checkpoint/expected_step/overrides/scope. Ordinary defaults to recorded eligible best; shared to own frozen terminal. Development shared evaluation needs its declared checkpoint. |
+| collect | Explicit root and `collection` destination/snapshot/selection. Copies verified small artifacts; raw inputs and checkpoints stay referenced. Incomplete collection exits nonzero with receipts. |
+| preview | `plan.kind: study` expands/optionally exports; `kind: submission` binds/renders a CASE plan. Neither invokes a scheduler. Study is a plan kind, not an operation. |
+| submit | Existing CASE plan, limits, fresh exact receipt directory and source-bound authorization. Uses existing scheduler/dependency/resource/source-consumer guards. A request file is not live launch authorization. |
 
-```bash
-export HF_HUB_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
+Unknown, inactive, conflicting and unsupported fields reject before their effects. Acquire/register/collect/preview/submit reject authored science. Check rejects preparation/acquisition/registration. Prepare selects exactly one destination and one assets path. No command selects a scientific recipe, resource budget or report deadline for you.
+
+A fresh ordinary request copies the scientific `experiment` from the supplied COCO or HellaSwag check example and changes only its operation/execution:
+
+```yaml
+schema: jscc-experiment-v1
+workflow: ordinary
+operation: train
+execution:
+  root: ../runs/NEW-ordinary
+  attempt: training-NEW
+  success_link: ../links/NEW-ordinary.txt
+experiment:
+  # Full task/model/data/training/evaluation authoring from the task example.
 ```
 
-The existing ordinary loaders honor this environment; missing cached inputs fail instead of starting an implicit acquisition. Recipe commands also require their acquired registration receipts. `--check` resolves settings without loading model/data, and neither setup nor these examples grants training/submission authority.
+The comment above is a shape illustration, not a runnable partial experiment. Use complete science. `success_link` is optional and must be fresh and disjoint from the root in both ancestry directions. It publishes only after the operation returns; receipt publication failure does not rerun completed training.
 
-## Ordinary training, evaluation and continuation
+Bound ordinary evaluation does not reread mutable training YAML:
 
-Use explicit fresh roots for the supported recorded COCO and HellaSwag route. The complete [resumable examples](../configs/operations/README.md) use the shared model design, with `data.num_workers: 0` set **before** binding. The named COCO example adds a nonterminal save at100 while retaining selection at500 and the500-update budget; this extra save is an explicit example policy. COCO retains supplied scientific settings. The named HellaSwag variant additionally sets `training.presentation_stream: null`, replacing the default fixed-presentation stream with the ordinary map loader; this changes sampling/presentation policy and requires a fresh scientific identity. Prompts/objectives/update budgets and paired randomness are preserved. Supplied `configs/tasks/coco.yaml` remains valid fresh training with four workers, but cannot exactly continue. The standard HellaSwag default also remains supported fresh training, but its fixed-presentation loader cannot exactly continue. A later YAML edit cannot add a cursor to an existing run.
-
-```bash
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --check
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --check
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case
-uv run --locked python evaluate.py --run runs/coco-case
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
-uv run --locked python evaluate.py --run runs/hellaswag-case
+```yaml
+schema: jscc-experiment-v1
+workflow: ordinary
+operation: evaluate
+execution:
+  root: ../runs/RECORDED-ordinary
+  attempt: evaluation-NEW
+  evaluation: {}
 ```
 
-`--check` prints composed settings without weights/data/output creation. Actual training requires `--output`, which selects the exact logical root; existing paths cannot silently restart or overwrite. Bound `config.yaml` freezes complete effective settings even if authored YAML changes. Training artifacts live in `attempts/training-0001/`; `training.json` identifies the current attempt, while `checkpoint.json` identifies the eligible default and its own ancestry. COCO retains caption/CIDEr evaluation and batch16/accumulation4/500 updates. HellaSwag retains five-shot prompts, accuracy scoring and batch64/accumulation1/10,000 updates. These settings share effective batch64 but have different data and evaluation policies.
+Set `evaluation.checkpoint` to a recorded filename and `expected_step` for an exact supplemental target. An `overrides` file contains evaluation controls only. COCO generation batch/max tokens differ from HellaSwag candidate batch/fewshot/scoring policy; they are not interchangeable. Ordinary configured custom channels still reach the model/channel consumers.
 
-Continuation is a separate operation after the parent is finalized, using a checkpoint actually published by that parent:
+For shared COCO cache acquisition, `execution.acquisition` declares `kind: coco-cache`, `dataset_path`, `assets`, `dataset_name`, `dataset_revision`, `model_revision`, `karpathy_path`, `karpathy_name`, `karpathy_revision`, `fixed_data_ids` and fresh `output`. Paths identify existing local Arrow/image and processor assets plus the exact Karpathy membership; `fixed_data_ids` requires unique disjoint `train_ids`, `demo_ids`, `selection_ids` and `report_ids`; optional `development` and `final_validation` each carry matching `input_ids` and `source_family_ids`. Selection/report IDs belong to Karpathy validation; demos belong to restval; train/demo IDs exclude validation/test. The acquired receipt binds complete image/reference/demo inventories and local PTB/CIDEr scorer assets. It is separate from model acquisition and does not train or download. Registration/preparation consume its exact checksum-bound cache reference. COCO caption policy/seed and image-aware targets stay in effective science; no HellaSwag token-only fixture stands in for multimodal acceptance.
 
-```bash
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case \
-  --resume runs/coco-case/attempts/training-0001/step_000100.pt
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case \
-  --resume runs/hellaswag-case/attempts/training-0001/step_001000.pt
+A shared request uses science from the shared example. Check requires local `resolution.model_config`; prepare selects one explicit acquisition path:
+
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: prepare
+execution:
+  root: ../runs/NEW-shared
+  preparation:
+    registrations: ../acquired/EXACT-registrations
+experiment:
+  # Full shared task_config, locations, quotas, widths, phases, objectives and panels.
 ```
 
-These paths are examples of scheduled saves, not claims they exist or remain nonterminal. A checkpoint at the completed maximum/early-stop boundary cannot add updates. Continuation receives an exclusive deterministic attempt name `resume-<parent-id>-<saved-step>`; repeat invocation rejects reuse. Restore includes optimizer/LR/scaler/RNG, counters, ordinary batch cursor and checkpoint-time best selection. Saving1000 then interrupting after unsaved1500 restores1000 and next executes1001. Source/runtime/config/input identity must match. A crashed `running` parent needs explicit stopped-worker/outcome reconciliation before continuation. See [ordinary records and exact support limits](ordinary-runs.md#exact-ordinary-continuation), including unsupported multi-worker/fixed-presentation loaders and metadata-only pending-publication recovery.
+Standalone preparation uses `preparation.output` instead of root. Explicit assets use `preparation.assets` and `model_config`; the assets JSON owns its reference paths, cache hashes, initializers and fixed templates. Registration accepts `references` with model_binding/cache/observation_template/terminal_template `{path, sha256}` records and explicit `synthetic_cpu`, or an exact `from_prepared` path without new references.
 
-Default evaluation requires the recorded eligible best target, never a newest search or partial fallback. A previous eligible default can survive a partial child with its original ancestry. Explicit current-attempt checkpoints/overrides are supplemental, with fresh independent evaluation attempts:
+After preparation, shared training and terminal evaluation are separate calls:
 
-```bash
-uv run --locked python evaluate.py --run runs/coco-case --checkpoint step_000500.pt --expected-step 500 --attempt step500
-uv run --locked python evaluate.py --run runs/hellaswag-case --checkpoint step_001000.pt --expected-step 1000 --attempt step1000
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: train
+execution:
+  root: ../runs/RECORDED-shared
+  case: width-RECORDED-ratio-RECORDED
+  attempt: training-NEW
 ```
 
-Historical timestamped engine directories retain their saved layout and iterator restart semantics. Current actual training requires an explicit output root; use the recorded route above for supported exact continuation. Old state cannot be silently upgraded.
+Use `cases` for an explicit unique set, or omit selection to execute declared cases. Resume requires one case. Shared evaluation uses `operation: evaluate`, a new attempt, and `evaluation: {scope: initial}`. Completed/failed/missing/pending denominators remain visible; incomplete evaluation cannot pass final eligibility. Shared COCO uses acquired image/reference/demo/scorer identities. A single named shared COCO or HellaSwag case can distribute whole site/condition panels to independent processes through `evaluation.parallel`.
 
-## Recipe preparation, cases and recorded evaluation
-
-[Retained original13](../configs/recipes/original13.yaml) declares thirteen locations, quota10,000 and nine independent width/ratio cases. [Changed](../configs/recipes/changed.yaml) declares ordered `[dec_l3, enc_l2, enc_emb]`, quota80 and one `width-32-ratio-50` case. Editing locations, rows/selection, supported optimizer/schedule, objective coefficients and saves in these existing YAMLs changes science without Python edits. Keep their complete observation/evaluation sections and declaring-file-relative task references. Functional KL remains additive to reconstruction; quota spans existing phases/reset semantics rather than applying anew to each phase. Native16/accumulation1 and supported HellaSwag semantics remain required; this does not introduce COCO shared-codec or arbitrary recipe channels/batching.
-
-First acquire/register pinned bytes explicitly using [existing acquisition commands](experiment-recipes.md#acquire-and-prepare). Given a retained prepared receipt, registration reuses its existing assets without downloads or training:
-
-```bash
-uv run --locked python scripts/experiment_recipe.py --register-from-prepared /existing/retained/prepared.json \
-  --model-name google/t5gemma-2-1b-1b --output assets/registrations/pinned.json
-uv run --locked python train.py --config configs/recipes/original13.yaml --registrations assets/registrations --check
-uv run --locked python train.py --config configs/recipes/changed.yaml --registrations assets/registrations --check
-uv run --locked python train.py --config configs/recipes/original13.yaml --registrations assets/registrations --output runs/retained-comparison --prepare-only
-uv run --locked python train.py --config configs/recipes/original13.yaml --output runs/retained-comparison --case width-512-ratio-75
-uv run --locked python train.py --config configs/recipes/changed.yaml --registrations assets/registrations --output runs/changed-comparison --prepare-only
-uv run --locked python train.py --config configs/recipes/changed.yaml --output runs/changed-comparison --case width-32-ratio-50
-uv run --locked python evaluate.py --run runs/retained-comparison --case width-512-ratio-75
-uv run --locked python evaluate.py --run runs/changed-comparison --case width-32-ratio-50
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: resume
+execution:
+  root: ../runs/RECORDED-shared
+  case: RECORDED_CASE
+  attempt: resume-NEW
+  continuation:
+    path: ../runs/RECORDED-shared/cases/RECORDED_CASE/attempts/training-PARENT/engine/checkpoint.pt
+    parent_attempt: ../runs/RECORDED-shared/cases/RECORDED_CASE/attempts/training-PARENT
+    role: RECORDED_ROLE
+    step: 1 # Replace with recorded positive step.
+    size_bytes: 1 # Replace with recorded byte size.
+    sha256: RECORDED_SHA256
 ```
 
-`--prepare-only` binds fresh small records/initializers/templates and complete effective configs from exact acquired registrations; it executes no training. Missing/conflicting identity fails without guessing latest. Existing bound roots require an explicit case for training. Independent local cases run sequentially; separately allocated jobs can run their own selected cases. These examples do not repeat or take ownership of the active frozen original13 campaign.
+The checkpoint may be inside the engine subdirectory; parent_attempt identifies its owning durable training attempt. Training compatibility still verifies source/runtime/config and complete optimizer/LR/scaler/RNG/view/phase state. New source cannot masquerade as an old source-compatible resume.
 
-| Count | Retained original13 | Changed |
-|---|---:|---:|
-| Selected locations N / quota Q | 13 / 10,000 | 3 / 80 |
-| Updates per case N×Q | 130,000 | 240 |
-| Base-stream presentations Q×16 | 160,000 | 1,280 |
-| Declared processed presentations N×Q×16 | 2,080,000 | 3,840 |
-| Declared cases / comparison updates | 9 / 1,170,000 | 1 / 240 |
+Study preview/export is nonexecuting:
 
-Selected eligible rows are separately observed during preparation: changed requests12; the retained measured workload had39,058 eligible rows. Neither number is an update/presentation budget. Three locations at quota10,000 declare30,000 updates versus130,000 for thirteen; totals sum independent cases, and actual processed exposures/updates remain engine records. Recipe `--check` requires existing registrations for pinned model topology (or a bound `--output` root); it reports resolved settings/derived declared counts without new acquisition or execution, not observed eligible rows.
-
-Recipe continuation selects a path from the case's `checkpoints.json` and a fresh attempt, preserving pre/post-reset role:
-
-```bash
-uv run --locked python train.py --config configs/recipes/changed.yaml --output runs/changed-comparison \
-  --case width-32-ratio-50 --resume runs/changed-comparison/cases/width-32-ratio-50/attempts/training-0001/engine/step_000120_pre_reset.pt --attempt 0002
+```yaml
+schema: jscc-experiment-v1
+workflow: ordinary
+operation: preview
+execution:
+  plan:
+    kind: study
+    path: ../configs/studies/baseline.yaml
+    output: ../prepared/NEW-study
 ```
 
-After confirming a crashed previous worker stopped, `--reconcile-interrupted 0001` explicitly reconciles its running reservation. `--finalize-terminal` can publish a valid durable full-budget terminal with zero updates; nonterminal state cannot use it. Default recipe evaluation requires the own completed frozen terminal. Explicit `--scope development` needs a YAML-declared observation checkpoint/expected step; `--scope supplemental` uses frozen YAML supplemental conditions and a fresh `--attempt`. [Detailed recipe commands](experiment-recipes.md#public-recorded-evaluation) document exact syntax and obligations, including pending prior observations and retained failed/missing denominators.
+Exports contain complete one-operation train requests and a manifest with task/run links. Optional Slurm study transport generates fresh evaluation requests from the exact recorded training link. It keeps fixed-step and distinct codec/vanilla attempts. `scripts/slurm_job.sh` accepts explicit requests; it does not infer a train/evaluate sequence.
 
-## Finite reviewed graph and mock recovery
+Submission preview uses `plan: {kind: submission, path: CASE_PLAN}` and `submission: {limits: LIMITS, bundle_output: FRESH_JSON}`. Submit uses `submission: {plan: CASE_PLAN, limits: LIMITS, bundle_output: FRESH_RECEIPT_DIR/bundle.json, receipt_dir: FRESH_RECEIPT_DIR, authorization: EXACT_APPROVAL_MAPPING}`. The existing CASE source/runtime/resource/array/dependency guards remain authoritative. Generated train/evaluate requests preserve root/case/attempt and live in the bundle's owned requests directory. Old queued bundles keep their original source and argv identity.
 
-Existing `recipe-case-submission-v1` job YAML selects finite `cases` and `evaluation_cases`, resources, source SHA/path, registrations, fresh run/submission roots and attempt. `cases: null` selects all declared cases; `evaluation_cases: []` adds none. Preview displays exact commands, selected tasks, source/runtime/effective settings, dependencies, per-task resources, array caps and separate science totals. This public graph is recipe-specific; it makes no ordinary-task Slurm array promise. Use [the existing job/limits example](source-lifetime.md#reviewed-public-recipe-case-arrays), adjusted to real approved absolute paths and finite resources.
+Collection remains separate from training and evaluation:
 
-```bash
-uv run --locked python scripts/submit_recipe.py action --job reviewed-cases.yaml --limits approved-limits.yaml --output reviews/new-comparison.json
-uv run --locked python scripts/submit_recipe.py preview --bundle reviews/new-comparison.json
-uv run --locked python scripts/submit_recipe.py check --bundle reviews/new-comparison.json
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: collect
+execution:
+  root: ../runs/RECORDED
+  collection:
+    snapshot: ../snapshots/NEW
+    destination: ../results/RECORDED
+    select: []
 ```
 
-`action` without scheduler flags only prepares/previews. Source binding requires a clean full-SHA checkout and fixed locked environment held for every queued/running consumer; different concurrent revisions use separate pinned worktrees. Separate arrays use stable indices and `aftercorr` own-training gates; compatible combined allocations still record separate train/evaluation outcomes. Array tasks, allocated GPUs and optimizer updates are distinct.
+An exact retry reuses the same snapshot/root/selection/retrieval identity. Missing or failed copies remain incomplete; scientific completion is retained independently.
 
-For a reviewed one-group **local fixture** bundle, explicitly save fake scheduler responses using the existing payload shape. Mock submits no scheduler command; it still creates durable reservations/receipts, so use an isolated fresh fixture output:
+## Parallel panels of one shared case
 
-```bash
-python - <<'PY'
-import json
-from pathlib import Path
-Path('fake-responses.json').write_text(json.dumps([
-    {'returncode': 0, 'stdout': '900001\n', 'stderr': ''}
-]))
-PY
-uv run --locked python scripts/submit_recipe.py submit --bundle reviews/local-fixture.json --mock-results fake-responses.json
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: evaluate
+execution:
+  root: ../runs/RECORDED-shared
+  case: RECORDED_CASE
+  attempt: evaluation-NEW
+  evaluation:
+    scope: initial
+    parallel:
+      backend: local
+      workers: 2
+      devices: [cpu, cpu]
 ```
 
-Provide one response per selected group (two for separate train/evaluation arrays). The mock/live payload is the same; mock acceptance does not authorize live submission or establish real IDs. Intent and partial/unknown responses persist before/after adapter invocation. Unknown acceptance blocks duplicate retry. Recovery consumes retained exact evidence without querying/submitting:
+Repeated CPU entries identify separate processes and require registered synthetic CPU assets. CUDA entries use distinct visible device indices, for example `cuda:0`; each child retains one assigned device and loads one runtime/model and one whole-panel data view. The current CASE resource admission allows one GPU, so its parallel CUDA request admits only `cuda:0`. Worker count is an execution choice, separate from scientific item counts and scheduler array concurrency. Parallel execution requires `case`, rejects `cases`, overrides and a parent `device_uuid`, and keeps the recorded checkpoint, source, runtime, input, scorer and noise policy. Both tasks score their entire ordered panel inventory; COCO never averages CIDEr image shards.
 
-```bash
-uv run --locked python scripts/submit_recipe.py intents --bundle submission/bundle.json
-uv run --locked python scripts/submit_recipe.py reconcile --bundle submission/bundle.json --evidence scheduler-evidence.json
-uv run --locked python scripts/submit_recipe.py prepare-retry --bundle submission/bundle.json --output retry-bundle.json --retry-output /absolute/approved/root/retry-submission --attempt 0002
-uv run --locked python scripts/submit_recipe.py authorize-retry --bundle submission/bundle.json --new-bundle retry-bundle.json --authorization retry-approval.json
-uv run --locked python scripts/submit_recipe.py terminal --bundle submission/bundle.json
-uv run --locked python scripts/submit_recipe.py release --bundle submission/bundle.json
-```
+A parent process alone publishes live `aggregate.json` and immutable snapshots below the evaluation attempt's `panels/worker-attempts/ATTEMPT`. Worker records preserve started, completed, failed, missing, pending and interrupted outcomes. The standard panel receipt retains full task metrics and artifact identities. Final eligibility requires every panel complete and the required training observations verified complete. A complete panel set cannot complete pending training observations. Recorded noise policy identity is distinct from sampled noise audit evidence; CPU tests verify actual paired draws on tiny task bodies. CUDA timing and speedup require separate execution evidence.
 
-Only proven unaccepted/stopped unattempted groups qualify for a separately approved recovery child. Accepted work never resubmits; every task needs durable terminal evidence before source release. [Recovery evidence/approval fields](source-lifetime.md#explicit-scheduler-reconciliation-and-recovery) retain authoritative-match/nonacceptance/conflict rules and ancestry. Preparation and retry authorization execute no live submission.
+For a stopped partial/failed/interrupted evaluation, use a fresh public request with a new `execution.attempt` and `evaluation.parallel.parent_attempt` naming the exact prior `panels/worker-attempts/ATTEMPT` directory. Its registered terminal snapshot and evidence inventory must still match. Only complete panels are inherited; the parent failures and bytes remain retained, and unfinished panels get new worker outputs. A different case, checkpoint, input or scoring policy needs its own evaluation plan.
 
-## Collect and record one scientific question
-
-```bash
-uv run --locked python scripts/collect_results.py --run runs/coco-case --snapshot collection-snapshots/coco-01 --output collected/coco-01
-uv run --locked python scripts/collect_results.py --run runs/hellaswag-case --snapshot collection-snapshots/hellaswag-01 --output collected/hellaswag-01
-uv run --locked python scripts/collect_results.py --run runs/changed-comparison --snapshot collection-snapshots/changed-01 --output collected/changed-01
-```
-
-Snapshots/destinations stay outside scientific roots. Repeat the same command for the same snapshot retry; new results use fresh names. Default collection retains final/intermediate tables, every recorded scalar row and small identity/status companions, with selected/copied/verified/reused/missing/failed accounting. Large raw/checkpoint/input bytes remain retrievable at exact references. [Collection details](result-collection.md) cover explicit selections, snapshot limits and separate incomplete exit status; this local action performs no network transfer.
-
-Use one canonical local experiment ticket per scientific question, whether one job or several cases. For a singleton, record purpose, unchanged task YAML/source identity, exact root, budget/authority, training attempt, recorded checkpoint, evaluation attempt and collection receipt. For a comparison, add stable case IDs, each effective config/source/budget and retained operational attempts; a source/science/budget change is an explicitly linked revision/case, not an exact retry. A new question gets a new linked ticket. Link the existing `experiment.json`, `case.json`, `training.json`, `checkpoint.json`, `attempt.json`, recipe records and scheduler/collection receipts instead of duplicating a tracker/schema.
-
-Update training, evaluation and collection outcomes separately. Keep failed/partial cases and pending observations visible with denominators. Reports/charts are optional; closure records the interpretation and explicit owner acceptance of any partial/deferred scope, without converting fixture checks or collection success into scientific success. Follow the local session guide for status/claim/map changes and the coordinator-owned HANDOFF for navigation. Offline/mock checks, future live scheduler acceptance, target/GPU fit and scientific conclusions are separate evidence.
+A CASE job may supply `evaluation: {scope: initial, parallel: ...}`. It retains one evaluation task for each selected original case index and the existing `aftercorr` training dependency. Panel indices never become scheduler task indices. A retry parent in a CASE job requires `combined: false` and exactly one evaluation case. Scheduler recovery still applies only to explicitly eligible unaccepted/unattempted groups; retrying accepted failed scientific execution uses a separate fresh evaluation request. Source holds remain subject to the existing terminal/release authority.

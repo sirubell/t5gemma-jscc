@@ -1,4 +1,9 @@
 """Residual/factorized and direct affine codecs with explicit YAML designs."""
+
+import copy
+from contextlib import contextmanager
+from unittest.mock import patch
+from jscc.presentation import derived_seed
 import torch
 from torch import nn
 
@@ -110,3 +115,66 @@ class Codec(nn.Module):
             hidden = layer(hidden)
         hidden = self.output_norm(hidden)
         return hidden
+
+
+FAMILIES = ("affine_core", "shallow_nonlinear", "current_residual")
+
+
+EXPECTED_PARAMETERS = dict(zip(FAMILIES, (1181312, 3837824, 14473088)))
+
+
+class SimpleCodec(Codec):
+    def __init__(self, input_dim, config, family):
+        nn.Module.__init__(self)
+        self.config = copy.deepcopy(config)
+        self.config["n_res_blocks"] = 0
+        width, bottleneck = config["hidden_dim"], config["bottleneck_dim"]
+        self.input_norm, self.output_norm = nn.Identity(), nn.Identity()
+        self.film = None
+        if family == "affine_core":
+            self.encoder = nn.Sequential(nn.Linear(input_dim, bottleneck))
+            self.decoder = nn.Sequential(nn.Linear(bottleneck, input_dim))
+        else:
+            self.encoder = nn.Sequential(nn.Linear(input_dim, width), nn.GELU(), nn.Linear(width, bottleneck))
+            self.decoder = nn.Sequential(nn.Linear(bottleneck, width), nn.GELU(), nn.Linear(width, input_dim))
+
+    def encode(self, hidden):
+        return self.encoder(hidden)
+
+    def decode(self, received, snr_db):
+        return self.decoder(received)
+
+
+def projection_roles(codec, family) -> dict[str, nn.Linear]:
+    roles = {"encoder_to_latent": codec.encoder[-1], "decoder_from_latent": codec.decoder[0]}
+    if family != "affine_core":
+        roles.update(encoder_from_hidden=codec.encoder[0], decoder_to_hidden=codec.decoder[-1])
+    if not all(isinstance(module, nn.Linear) for module in roles.values()):
+        raise TypeError("projection roles must identify Linear modules")
+    return {role: module for role, module in roles.items() if isinstance(module, nn.Linear)}
+
+
+def codec_factory(input_dim, config, family, seed=0):
+    if family not in FAMILIES:
+        raise ValueError(f"unknown experimental codec family: {family}")
+    if config["layernorm"] != "none" or config["snr_film"] or config.get("dropout", 0) != 0:
+        raise ValueError("E5 requires outer none, FiLM off, dropout zero")
+    if config["activation"] != "gelu" or config["n_res_blocks"] != 2:
+        raise ValueError("E5 reference requires GELU and two residual blocks")
+    # Construction and role initialization never consume the caller RNG stream.
+    with torch.random.fork_rng(devices=[]):
+        torch.set_rng_state(torch.Generator().manual_seed(derived_seed(seed, "e5:private:" + family)).get_state())
+        codec = Codec(input_dim, config) if family == "current_residual" else SimpleCodec(input_dim, config, family)
+        for role, module in projection_roles(codec, family).items():
+            torch.set_rng_state(torch.Generator().manual_seed(
+                derived_seed(seed, f"e5:projection:{role}:{tuple(module.weight.shape)}")).get_state())
+            module.reset_parameters()
+    return codec
+
+
+@contextmanager
+def codec_family_context(family, seed=0):
+    """Only wrap model construction; restore the production factory on exit."""
+    from jscc.models import split_model
+    with patch.object(split_model, "Codec", lambda dim, cfg: codec_factory(dim, cfg, family, seed)):
+        yield

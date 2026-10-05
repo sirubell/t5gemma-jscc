@@ -1,16 +1,15 @@
-"""Read-only verifier for task-7's single bounded overnight campaign.
+"""Compatibility reader for the saved task-7 overnight campaign artifacts.
 
-Budget holds alone are never executable. The owner's exact payload approval and
-its live-ledger link are mandatory; this module neither reserves nor settles.
+Interpret exact recorded payload, ledger, continuation and recovery bindings.
+This module does not grant live execution authority, query a scheduler, reserve
+resources or settle budgets. Current operations use the single YAML entry.
 """
 
 from pathlib import Path
 import json
-import os
 import re
 
-from .activation_replay import file_digest
-from .sharing_accumulation import partition_policy
+from .batch_partition import partition_policy
 
 CAMPAIGN = "overnight-shared-eval-20261001-01"
 DEADLINE = 1790935200
@@ -64,7 +63,6 @@ CONTINUATION_WORKLOAD = {
 }
 
 
-
 CORRECTED_PRIOR_RUN = "sharing-dn-b512-q400-science-5090-20261002-01"
 CORRECTED_NEW_RUN = "sharing-dn-b512-q400-science-5090-20261002-02"
 CORRECTED_SETTLEMENT_SHA = "2c0e515660f2fdf74da139d5ac96f440604daffdabb5e38576961fa280057b24"
@@ -103,7 +101,6 @@ def _corrected_attempt(extension, pending, settled):
             and type(current.get("max_device_seconds")) is int
             and 0 < current["max_device_seconds"] <= 14117,
             "corrected attempt must follow exact settled283 and named remaining slot")
-
 
 
 THIRD_RUN = "sharing-dn-b512-q400-science-5090-20261002-03"
@@ -238,31 +235,10 @@ def _continuation_rows(ledger):
     return pending, settled
 
 
-def require(value, message):
-    if not value:
-        raise ValueError(message)
 
 
-def verify_ref(ref):
-    require(
-        isinstance(ref, dict)
-        and isinstance(ref.get("path"), str)
-        and Path(ref["path"]).is_absolute(),
-        "absolute immutable receipt reference required",
-    )
-    digest = ref.get("sha256")
-    require(
-        isinstance(digest, str)
-        and len(digest) == 64
-        and all(c in "0123456789abcdef" for c in digest)
-        and file_digest(Path(ref["path"])) == digest,
-        "receipt file checksum mismatch",
-    )
-    return Path(ref["path"])
 
 
-def read_ref(ref):
-    return json.loads(verify_ref(ref).read_text())
 
 
 def _budget_rows(ledger):
@@ -320,8 +296,14 @@ def _budget_rows(ledger):
     return pending, settled
 
 
-def validate_overnight_admission(contract, diagnostic_only):
-    """Validate actual owner schemas; caller retains target/lease/qualification gates."""
+def validate_overnight_admission(contract, diagnostic_only, *, query_live=False):
+    """Validate saved owner schemas and exact checksum-bound artifact links.
+
+    The retained name interprets the historical format only. Live admission was
+    owned by the retired controller and is unsupported here.
+    """
+    if type(query_live) is not bool or query_live:
+        raise ValueError("live historical admission is unsupported; use a YAML operation")
     require(type(diagnostic_only) is bool, "explicit diagnostic boolean required")
     ledger = json.loads(Path(contract["ledger_path"]).read_text())
     require(
@@ -621,8 +603,8 @@ def _h200_budget(contract, payload, admission, hold, ledger_origin, cap,
 
 
 def _prepared_payload(contract, payload, binding, width, q):
-    from .sharing_preparation import load_prepared
-    from .sharing_controller import binding_identity
+    from .checkpoint_readers import load_prepared
+    from .qualification import controller_binding_identity as binding_identity
 
     manifest = load_prepared(verify_ref(contract["prepared"]))
     require(
@@ -729,10 +711,12 @@ def _runtime_device(contract, payload, admission_origin, payload_origin):
         "sealed H200 runtime binding mismatch or missing evidence",
     )
     require(
-        bool(os.environ.get("SLURM_JOB_ID"))
-        and runtime.get("slurm_job_id") == os.environ.get("SLURM_JOB_ID")
-        and runtime.get("slurm_array_task_id") == os.environ.get("SLURM_ARRAY_TASK_ID")
-        and bool(os.environ.get("SLURMD_NODENAME"))
-        and runtime.get("node") == os.environ.get("SLURMD_NODENAME"),
-        "runtime receipt does not belong to current Slurm allocation",
+        isinstance(runtime.get("slurm_job_id"), str) and bool(runtime["slurm_job_id"])
+        and isinstance(runtime.get("node"), str) and bool(runtime["node"]),
+        "saved runtime receipt omits its recorded Slurm job or node",
     )
+
+# Concrete saved/scientific providers transferred; caller exports are temporary.
+from .checkpoint_readers import require_saved_admission as require  # noqa: F401, E402
+from .checkpoint_readers import verify_admission_reference as verify_ref  # noqa: F401, E402
+from .checkpoint_readers import read_admission_reference as read_ref  # noqa: F401, E402

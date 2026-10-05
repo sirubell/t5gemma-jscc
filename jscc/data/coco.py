@@ -15,12 +15,15 @@ def caption_prompt(captions):
 
 
 class CaptionDataset(Dataset):
-    def __init__(self, rows, processor, demo_images, demo_captions, config, training, *, record_presentations=False):
+    def __init__(self, rows, processor, demo_images, demo_captions, config, training, *, record_presentations=False, target_indices=None):
         self.rows, self.processor = rows, processor
         self.demo_images = demo_images
         self.prompt = caption_prompt(demo_captions)
         self.config, self.training = config, training
         self.record_presentations = record_presentations
+        self.target_indices = target_indices
+        if target_indices is not None and len(target_indices) != len(rows):
+            raise ValueError("explicit COCO targets must match row count")
 
     def __len__(self):
         return len(self.rows)
@@ -28,7 +31,15 @@ class CaptionDataset(Dataset):
     def __getitem__(self, index):
         row = self.rows[index]
         captions = [caption for caption in row["answer"] if caption]
-        target = random.choice(captions) if self.training else captions[0]
+        if not captions:
+            raise ValueError("COCO row requires nonempty caption references")
+        if self.target_indices is None:
+            target = random.choice(captions) if self.training else captions[0]
+        else:
+            choice = self.target_indices[index]
+            if type(choice) is not int or not 0 <= choice < len(captions):
+                raise ValueError("explicit COCO target outside nonempty references")
+            target = captions[choice]
         inputs = self.processor(
             images=self.demo_images + [row["image"].convert("RGB")], text=self.prompt,
             return_tensors="pt", padding="max_length", truncation=True,
@@ -43,6 +54,9 @@ class CaptionDataset(Dataset):
         result = {"input_ids": inputs["input_ids"][0],
                 "attention_mask": inputs["attention_mask"][0],
                 "pixel_values": inputs["pixel_values"], "labels": labels}
+        for key, value in inputs.items():
+            if key not in result:
+                result[key] = value[0] if key != "pixel_values" else value
         if self.record_presentations:
             result["coco_image_id"] = int(row["file_name"].rsplit("_", 1)[1].split(".")[0])
             full_target = self.processor.tokenizer(

@@ -4,7 +4,7 @@
 standard library. It never imports a model, tensor loader, GPU runtime or online
 tracker. This is an explicit new contract, `experiment-records-v1`; historical
 `metrics.jsonl` files are not silently interpreted or rewritten as this schema.
-The helper's CPU tests establish evidence mechanics. The versioned baseline runner integrates actual learner/evaluator production,
+The helper's CPU tests establish evidence mechanics. The historical versioned baseline runner integrated learner/evaluator production under its frozen source,
 artifact reconciliation and completion. Full-weight telemetry, GPU timing accuracy
 and scientific quality still require their own acceptance receipts.
 
@@ -136,8 +136,7 @@ arbitrary-subset policy; original13 update kinds do not grant this exception.
 Vanilla uses only `["vanilla"]` and the matching learner kind. Vanilla bypass and
 no-noise codec execution have separate identities. See
 [request validation](../jscc/experiment_records.py),
-[sharing protocol names](../jscc/sharing_schedule.py), and
-[staged protocol names](../jscc/encoder_stages_plan.py).
+[saved sharing and staged protocol readers](../jscc/checkpoint_readers.py).
 
 An observation payload contains `request`, its computed `identity`, `status`
 (`complete`, `incomplete` or `failed`), `conditions`, and `reuse` (null or a receipt).
@@ -193,9 +192,14 @@ does not certify a successful append. Consumers must read/validate the complete
 history again and hash retained bytes at their final history/inventory gate.
 The writer does not perform or certify that final gate itself.
 
-The sharing, encoder-pilot and staged/original13 runners use this append writer;
-`jscc/baseline_protocol.py` retains the stateless atomic `append_event` consumer.
-Both APIs preserve the event schema and final inventory/completion contracts.
+Under the frozen historical source, sharing, encoder-pilot and staged/original13
+runners used this append writer, while `jscc/baseline_protocol.py` consumed the
+stateless atomic `append_event` API. Those execution fronts are retired from the
+current tree. The current shared YAML runtime in
+`jscc.shared_training.run_recipe_training` writes `recipe-training-event-v1` JSONL
+through its recipe event sink; `jscc.panel_evaluation.recipe_training_rows`
+validates the bound records. The retained `AppendOnlyEventWriter` and
+`append_event` APIs preserve their `experiment-records-v1` contracts.
 
 `artifact_ref(path, root, kind)` binds a relative path, `kind` (`metadata` or
 `tensor`), exact `sha256` and `bytes`. It hashes bytes without loading tensors.
@@ -244,9 +248,9 @@ records, but `tensor_bytes_verified` remains false. The tensor byte flag verifie
 Run focused checks from the repository root with the project's pinned environment:
 
 ```bash
-uv run --offline --no-sync python -m pytest -q tests/test_experiment_records.py
-uv run --offline --no-sync ruff check jscc/experiment_records.py tests/test_experiment_records.py
-uv run --offline --no-sync pyright jscc/experiment_records.py tests/test_experiment_records.py
+uv run --offline --no-sync python -m pytest -q tests/contracts/test_experiment_records.py
+uv run --offline --no-sync ruff check jscc/experiment_records.py tests/contracts/test_experiment_records.py
+uv run --offline --no-sync pyright jscc/experiment_records.py tests/contracts/test_experiment_records.py
 ```
 
 Tests inject short writes, file-fsync and replacement failures; reject truncated
@@ -309,7 +313,7 @@ and a deliberately failed COCO observation:
 uv run --offline --no-sync python tests/fixtures/experiment_records/build_fixture.py /tmp/records-fixture-new
 uv run --offline --no-sync python scripts/render_experiment_report.py \
   --records /tmp/records-fixture-new --output /tmp/records-report-new
-uv run --offline --no-sync python -m pytest -q tests/test_experiment_records.py tests/test_experiment_report.py
+uv run --offline --no-sync python -m pytest -q tests/contracts/test_experiment_records.py tests/contracts/test_experiment_report.py
 ```
 
 Use fresh paths so prior failures and receipts remain available. The fixture's
@@ -349,7 +353,9 @@ does not infer bank membership, sum overlapping inventory aliases, or treat a
 smaller parameter bank as measured speedup. The fixture's eight-byte binary
 artifacts are synthetic byte-verification inputs, not serialized model tensors.
 
-## Connected baseline evidence
+## Historical connected baseline evidence
+
+> **Historical frozen-source evidence.** The following records the original baseline producer and its original test names/cadence. These references are retained evidence, not current commands or a requirement to recover the retired executor. Interpret them under their saved source identity.
 
 See [encoder-final baseline](encfn-baseline.md) for strict producer integration.
 `tests/test_baseline_pipeline.py` exercises all four topologies through actual
@@ -358,3 +364,5 @@ CPU updates, save/reload, six-condition model forwards, records and rendering.
 400/200+200 trajectories. `tests/test_baseline_comparisons.py` verifies four actual
 short arms and 144 explicit condition/metric contrast rows. These are synthetic
 mechanics tests, with no pretrained download or real-data scientific claim.
+
+Current updater checks use `tests/compatibility/test_baseline_protocol.py` and `tests/shared/test_recipe_training.py`; exact continuation uses `tests/shared/test_recipe_resume.py`. Terminal request/receipt and changed-policy guards use `tests/shared/test_recipe_observations.py` and `tests/shared/test_recipe_evaluation.py`. Saved baseline readers/fixtures retain their historical meanings. The current `tests/compatibility/test_current_baseline_obligations.py` covers ordinary BF16 objective metrics and exact continuation, numerical-policy targets, shared mask/noise/audit bindings, event/optimizer/resource failures, and damaged saved-arm comparisons. It does not reproduce the retired four-arm training/report producer or its historical event payload schema.

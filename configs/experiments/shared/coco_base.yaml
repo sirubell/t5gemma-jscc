@@ -1,0 +1,37 @@
+# Shared COCO task defaults. The request owns quota, saves, observations and scoring.
+model_config: ../../models/shared_direct_affine.yaml
+task: coco
+seed: 0
+run:
+  name: coco-enc_l9
+  output_dir: ../../../runs
+  wandb_project: null
+data:
+  name: lmms-lab/COCO-Caption
+  revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  karpathy_name: yerevann/coco-karpathy
+  karpathy_revision: 448fdb1bc7b2d09e46881c4541a14d796a3d41e8
+  num_train: 10000
+  num_demos: 4
+  max_prompt_length: 1500
+  max_target_length: 64
+  caption_policy: indexed-reference-v1
+  caption_seed: 0
+training:
+  batch_size: 16
+  gradient_accumulation: 1
+  lr: 0.0002
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  temperature: 1.0
+  streamed_backward: true
+  valid_only_kl: true
+  presentation_stream:
+    policy: epoch-permutations-v1
+    seed: 0
+    start_presentation: 0
+evaluation: {}
+runtime:
+  sdpa_backend_policy: flash_math

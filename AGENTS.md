@@ -23,7 +23,7 @@ Use `gpt-6.1-sol` for delegated work and reviews
 
 This project primarily supports the owner's research workflow. Keep the README centered on features and experiments. Put collaboration details in the channel guide and personal infrastructure details in docs/local/.
 
-Use uv. Both COCO and HellaSwag must remain visible in command documentation and task tests. Task YAMLs reference one shared model_config file; the loader saves a complete resolved configuration in every run. Put architectural variations in a named model design file rather than duplicating them inside task YAMLs.
+Use uv. Public experiment requests select exactly one YAML operation through experiment.py --config FILE; see [operation fields and effects](docs/operations-workflow.md) when authoring or changing requests/callers. Both COCO and HellaSwag must remain visible in command documentation and task tests. Ordinary experiment YAMLs reference a named model_config file; the loader saves a complete resolved configuration in every run. Put architectural variations in a named model design file rather than duplicating them inside task YAMLs.
 
 Keep the supplied task and smoke model designs aligned with the shared baseline in docs/architecture.md. SNR-FiLM is off by default; enable it only for an explicitly requested FiLM experiment, not as part of routine channel integration.
 
@@ -46,8 +46,8 @@ uv sync --locked --extra dev
 uv run --locked --extra dev pyright
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python train.py --config configs/tasks/coco.yaml --check
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
+uv run --locked python experiment.py --config configs/experiments/ordinary/coco.yaml
+uv run --locked python experiment.py --config configs/experiments/ordinary/hellaswag.yaml
 ```
 
 For documentation-only edits, check content, links and commands rather than starting model runs. Preserve unrelated user edits.

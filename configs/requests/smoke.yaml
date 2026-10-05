@@ -1,0 +1,8 @@
+schema: jscc-experiment-v1
+workflow: ordinary
+operation: evaluate
+execution:
+  root: /explicit/bound/ordinary-run
+  attempt: evaluation-NEW
+  evaluation:
+    overrides: smoke-options.yaml

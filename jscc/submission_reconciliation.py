@@ -29,7 +29,7 @@ def _locked(directory):
 
 
 def _read(bundle, directory):
-    from .recipe_submission import validate_bundle
+    from .submission import validate_bundle
     validate_bundle(bundle)
     _require(directory.resolve() == Path(bundle['output']).resolve(), 'receipt/output differs')
     receipt = json.loads((directory/'SUBMISSION.json').read_text())
@@ -47,7 +47,7 @@ def _latest(directory):
 
 
 def _save(directory, record):
-    from .recipe_submission import _sync_directory, write_json
+    from .submission import _sync_directory, write_json
     folder = directory/'reconciliation'
     folder.mkdir(exist_ok=True)
     _sync_directory(directory)
@@ -229,7 +229,7 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
         record.update(_retry_metadata(previous))
         if conflicts:
             record['conflicts'] = conflicts
-            from .recipe_submission import source_consumers
+            from .submission import source_consumers
             registry = source_consumers(bundle)
             registry_path = registry.directory/(canonical_digest(str(Path(bundle['source']['path']).resolve()))+'.json')
             consumers = json.loads(registry_path.read_text())['consumers'] if registry_path.exists() else {}
@@ -244,7 +244,7 @@ def reconcile_job(bundle, receipt_dir, *, evidence):
 
 def finalize_source_consumer(bundle, receipt_dir, *, release=False):
     """Explicitly terminalize all-task evidence; release is a separate choice."""
-    from .recipe_submission import source_consumers
+    from .submission import source_consumers
     directory = Path(receipt_dir)
     with _locked(directory):
         _read(bundle, directory)
@@ -278,7 +278,7 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
     remain. Retry submission still uses the existing exact submission approval.
     Changed science/source/resources requires its separate revision procedure.
     """
-    from .recipe_submission import CASE_SCHEMA, _sync_directory, validate_bundle
+    from .submission import CASE_SCHEMA, _sync_directory, validate_bundle
     _require(bundle.get('schema') == CASE_SCHEMA and new_bundle.get('schema') == CASE_SCHEMA,
              'old submission execution retired')
     directory = Path(receipt_dir)
@@ -344,36 +344,50 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
         fences = []
         selected = 0
         selected_commands = []
-        for group in new_bundle['groups']:
+        for position, group in enumerate(new_bundle['groups']):
             stages = ['training', 'evaluation'] if group['stage'] == 'combined' else [group['stage']]
             for index in group['indices']:
                 case = new_bundle['cases'][index]
                 for stage in stages:
                     if stage in case['commands']:
-                        selected_commands.append((case, stage, case['commands'][stage]))
-        scheduled_keys = {(case['case_id'], stage) for case, stage, _ in selected_commands}
+                        attempt = f"{new_bundle['attempt']}-g{position}-i{index}"
+                        selected_commands.append((case, stage, case['commands'][stage], attempt))
+        scheduled_keys = {(case['case_id'], stage) for case, stage, _, _ in selected_commands}
         _require(len(new_bundle['cases']) == len(bundle['cases']), 'retry changes case set')
         for old_case, case in zip(bundle['cases'], new_bundle['cases'], strict=True):
-            _require({k: v for k, v in old_case.items() if k != 'commands'}
-                     == {k: v for k, v in case.items() if k != 'commands'}, 'retry changes retained effective science')
-            _require(old_case['commands'].keys() == case['commands'].keys(), 'retry changes retained stages')
+            _require({k: v for k, v in old_case.items() if k not in ('commands', 'requests')}
+                     == {k: v for k, v in case.items() if k not in ('commands', 'requests')},
+                     'retry changes retained effective science')
+            _require(old_case['commands'].keys() == case['commands'].keys()
+                     == old_case['requests'].keys() == case['requests'].keys(), 'retry changes retained stages')
             for stage, command in case['commands'].items():
                 if (case['case_id'], stage) not in scheduled_keys:
-                    _require(command == old_case['commands'][stage], 'retry changes retained training/checkpoint command')
-        for case, stage, command in selected_commands:
+                    _require(command == old_case['commands'][stage]
+                             and case['requests'][stage] == old_case['requests'][stage],
+                             'retry changes retained training/checkpoint request or command')
+        for case, stage, command, expected_attempt in selected_commands:
             selected += 1
             _require((case['case_id'], stage) in old_tasks, 'retry adds science')
             old_case, group = old_tasks[case['case_id'], stage]
             _require(group['status'] in ('not-accepted', 'not-attempted'), 'accepted groups cannot be retried')
             for key in ('path', 'effective_config_sha256'):
                 _require(case[key] == old_case[key], 'retry changes effective science')
-            def without_attempt(arguments):
-                result = list(arguments)
-                position = result.index('--attempt')
-                result[position+1] = '<fresh-attempt>'
+            def without_attempt(request):
+                from copy import deepcopy
+                result = deepcopy(request)
+                result['execution']['attempt'] = '<fresh-attempt>'
                 return result
-            _require(without_attempt(command) == without_attempt(old_case['commands'][stage]),
-                     'retry changes command/science/budget')
+            request = case['requests'][stage]
+            old_request = old_case['requests'][stage]
+            _require(without_attempt(request) == without_attempt(old_request),
+                     'retry changes request/science/budget')
+            _require(request['execution']['attempt'] == expected_attempt
+                     and request['execution']['attempt'] != old_request['execution']['attempt'],
+                     'retry requires deterministic fresh stage attempt')
+            for candidate, arguments in ((bundle, old_case['commands'][stage]), (new_bundle, command)):
+                request_path = str(Path(candidate['output'])/'requests'/f"{stage}-{case['index']}.yaml")
+                _require(arguments == [candidate['python'], candidate['source']['path']+'/experiment.py',
+                                       '--config', request_path], 'retry changes command/request ownership')
             path = Path(old_case['path'])/'scheduler-reservations'/(stage+'.json')
             archive = path.parent/(stage+'.retired-'+bundle['identity']+'.json')
             if path.exists():
@@ -409,7 +423,7 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
 def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -> dict[str, Any]:
     """Review-only subset of reconciled unaccepted groups, unchanged science."""
     from copy import deepcopy
-    from .recipe_submission import CASE_SCHEMA, normalize_path
+    from .submission import CASE_SCHEMA, normalize_path
     _require(bundle.get('schema') == CASE_SCHEMA, 'old submission execution retired')
     directory = Path(receipt_dir)
     with _locked(directory):
@@ -450,7 +464,10 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
                 for stage in stages:
                     command = new['cases'][index]['commands'].get(stage)
                     if command:
-                        command[command.index('--attempt')+1] = f'{attempt}-g{remap[old]}-i{index}'
+                        case = new['cases'][index]
+                        case['requests'][stage]['execution']['attempt'] = f'{attempt}-g{remap[old]}-i{index}'
+                        case['commands'][stage] = [new['python'], new['source']['path']+'/experiment.py',
+                            '--config', str(Path(new['output'])/'requests'/f'{stage}-{index}.yaml')]
         _require(attempt != bundle['attempt'], 'fresh attempt required')
         new['attempt'] = attempt
         new.pop('identity')

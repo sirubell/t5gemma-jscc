@@ -1,5 +1,14 @@
 # Original13 training integration contracts
 
+> **Historical contract — frozen-source-only.** The protocol, module names and
+> commands below preserve the original source and saved artifact identities.
+> They are not current execution interfaces or authorization to execute,
+> recover historical fronts or renew qualification.
+
+For current authoring, use `uv run --locked python experiment.py --config REQUEST`;
+see [experiment recipes](experiment-recipes.md) and
+[operation fields and effect boundaries](operations-workflow.md).
+
 This extends the retained six-encoder A/E/R implementation with a separate,
 versioned original13 plan. It does not change legacy `EncoderStagesPlan`.
 The final routing and evaluation consumers are integrated. The direct CLI loads
@@ -8,6 +17,8 @@ continuation and frozen-terminal scoring. GPU fit and scientific results require
 separate target qualification and execution.
 
 ## Plan and input binding
+
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
 
 `Original13Plan` in `jscc/encoder_stages_plan.py` binds ordered complete native16
 views, input and full development-panel identities, width and reconstruction
@@ -35,6 +46,8 @@ canonical identity `d83b0856429b508910fab8a42453490b9d4bce3c52e78e17291b64046116
 The object's historical panel digest is retained as a separate field.
 Preparation produces nine resolved plans, width configs, observation/terminal
 requests and source/input identities. It loads no backbone and launches nothing.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --locked python scripts/original13_training.py bind \
@@ -73,6 +86,8 @@ synthetic tiny CPU fixtures remain a separate software-validation path. The exis
 
 ## Routing consumer API
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
 `jscc/original13_routing.py` supplies the real universal routes and role objectives.
 The integration owner consumed both reviewed routing commits, including final
 idle-runtime validation, and the evaluation delivery without changing the recipe.
@@ -101,6 +116,8 @@ data, initialization, stream, protocol, prepared and model-revision identities.
 source inventory; the release receipt separately binds the full Git commit.
 
 ## Envelope, continuation and observations
+
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
 
 `Original13TrainingState` in `jscc/encoder_stages.py` owns save/restore/reset.
 `experiment_state.py` retains schema `experiment-state-v2`, adding kind
@@ -150,10 +167,14 @@ unmeasured.
 
 ## Direct execution after target qualification
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
 These commands are execution interfaces, not authorization to run them. Bind the
 exact source, target assets/UUID and finite caps in the experiment record first.
 Both training modes create a fresh output directory. Resume requires all three
 checkpoint reference fields; no best/latest selection or automatic retry occurs.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --locked python scripts/original13_training.py train \

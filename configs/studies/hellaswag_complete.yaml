@@ -1,6 +1,6 @@
 name: hellaswag-complete-native-inputs-20260919
 task_configs:
-- ../tasks/hellaswag_closeout.yaml
+- ../experiments/ordinary/hellaswag_closeout.yaml
 seeds:
 - 0
 experiments:

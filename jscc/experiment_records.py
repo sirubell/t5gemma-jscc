@@ -88,7 +88,7 @@ def observation_identity(request: dict[str, Any]) -> str:
     _count(request["step"], "step")
     _count(request["expected_items"], "expected_items")
     _require(request["expected_items"] > 0, "empty panel")
-    from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
+    from .checkpoint_readers import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
     long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL,
                                              'encoder-original6-native16-stages-v1')
                       and len(request["conditions"]) == 1 and request["conditions"][0] in CONDITIONS)
@@ -204,19 +204,19 @@ def _objective_value(components: dict[str, Any], kind: str) -> float:
     return k["weighted"]["value"] + r["weighted"]["value"]
 
 
-
-def _original13_objective_value(objective, site):
+def _original13_objective_value(objective, site, *, recipe_weights=None):
     """Validate the adopted per-role stream measures without importing models."""
     decoder = site.startswith('dec_')
-    weights = {'kl': float(objective['kind'] == 'combined'),
-               'hidden': .05 if decoder else .1, 'memory': .05 if decoder else 0.}
+    weights = (recipe_weights if recipe_weights is not None else
+               {'kl': float(objective['kind'] == 'combined'),
+                'hidden': .05 if decoder else .1, 'memory': .05 if decoder else 0.})
     _fields(objective['resolved_weights'], 'kl hidden memory', 'original13 weights')
     for value in objective['resolved_weights'].values():
         _number(value, 'original13 weight')
     _require(objective['resolved_weights'] == weights, 'original13 objective weights differ')
     total = 0.0
     for name, component in objective['components'].items():
-        required = name == 'hidden' or (name == 'memory' and decoder) or (name == 'kl' and weights['kl'] == 1)
+        required = name == 'hidden' or (name == 'memory' and decoder) or (name == 'kl' and objective['kind'] == 'combined')
         raw, weighted = component['raw']['value'], component['weighted']['value']
         if required:
             if raw is None or weighted is None:
@@ -229,7 +229,7 @@ def _original13_objective_value(objective, site):
                      'original13 uncomputed stream must remain unavailable')
     return total
 
-def _update(p: dict[str, Any]) -> None:
+def _update(p: dict[str, Any], *, recipe_weights=None) -> None:
     _fields({k: v for k, v in p.items() if k != "audit"}, "site_id attempted_step completed_step final_step phase_start_step site_step sweep exposure objective lr_used lr_next gradient nonfinite skipped update_l2 snr timing memory", "update")
     if "audit" in p:
         audit = p["audit"]
@@ -275,7 +275,7 @@ def _update(p: dict[str, Any]) -> None:
     for component in objective["components"].values():
         _component(component)
     if not p["skipped"] and not p["nonfinite"]:
-        expected_total = (_original13_objective_value(objective, p['site_id']) if original13 else
+        expected_total = (_original13_objective_value(objective, p['site_id'], recipe_weights=recipe_weights) if original13 else
                           _objective_value(objective["components"], objective["kind"]))
         _require(objective["total"]["value"] is not None and math.isclose(objective["total"]["value"], expected_total, rel_tol=1e-6, abs_tol=1e-9), "objective total mismatch")
         _require(exposure["sequences"] > 0 and exposure["source_tokens"] == exposure["valid_tokens"], "invalid successful exposure")
@@ -310,6 +310,19 @@ def _update(p: dict[str, Any]) -> None:
         if p["memory"][key]["value"] is not None:
             _count(p["memory"][key]["value"], key)
     _text(p["memory"]["reset_scope"], "reset_scope")
+
+
+def validate_recipe_update(payload: dict[str, Any], *, weights: dict[str, Any]) -> None:
+    """Check current recipe measures with its resolved coefficients.
+
+    Recipe-specific schedule fields are checked by the caller against its plan;
+    the common scalar, denominator, payload and failure contracts stay shared
+    with saved records without imposing their historical loss coefficients.
+    """
+    recipe_fields = {'recipe_identity', 'configured_counts', 'recipe_progress', 'channel'}
+    _require(recipe_fields <= payload.keys(), 'recipe update bindings required')
+    _update({key: value for key, value in payload.items() if key not in recipe_fields},
+            recipe_weights=weights)
 
 
 def validate_event(event: dict[str, Any]) -> None:
@@ -580,3 +593,9 @@ def completion_status(manifest: dict[str, Any], events: list[dict[str, Any]], in
     if missing_artifacts:
         reasons.append("missing mandatory artifacts")
     return {"schema": SCHEMA, "run_id": manifest["run_id"], "status": "incomplete" if reasons else "complete", "reasons": reasons, "missing_observations": missing_observations, "missing_artifacts": missing_artifacts, "inventory_mode": inventory["mode"], "tensor_bytes_verified": inventory["mode"] == "tensor-complete" and any(a["kind"] == "tensor" for a in inventory["artifacts"])}
+
+
+# Transferred from baseline_protocol; serialized meanings remain unchanged.
+def write_manifest(path, value):
+    """Durably publish JSON; any write failure stops the caller."""
+    write_json_atomic(path, value)

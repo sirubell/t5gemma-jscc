@@ -3,6 +3,7 @@ import copy
 from contextlib import nullcontext
 import json
 import hashlib
+import math
 import os
 import time
 from pathlib import Path
@@ -61,7 +62,7 @@ def coco_payload_records(events, emitted_lengths, stack):
     decoder_step = 0
     semantic_supported = True
     for event in events:
-        if len(event["allocated"]) != len(records):
+        if len(event["allocated"]) != len(records) or len(event["mask_valid"]) != len(records):
             raise ValueError("Payload observer batch differs from generated image batch")
         decoder_hidden = event["stream"] == "hidden" and stack == "dec"
         if decoder_hidden and event["shape"][1] != 1:
@@ -87,8 +88,16 @@ def score_coco_captions(references, captions):
     """Return CIDEr plus frozen PTB tokens, allowing recomputation without Java."""
     from pycocoevalcap.cider.cider import Cider
     from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
+    if not references or list(references) != list(captions):
+        raise ValueError("COCO scorer image membership/order differs")
     tokenizer = PTBTokenizer()
     reference_tokens, caption_tokens = tokenizer.tokenize(references), tokenizer.tokenize(captions)
+    if set(reference_tokens) != set(references) or set(caption_tokens) != set(references):
+        raise ValueError("COCO PTB image membership differs")
+    # CIDEr emits its scores in reference-map order. Rebind that order explicitly
+    # after PTB tokenization so each saved score belongs to the requested image.
+    reference_tokens = {key: reference_tokens[key] for key in references}
+    caption_tokens = {key: caption_tokens[key] for key in references}
     score, per_image = Cider().compute_score(reference_tokens, caption_tokens)
     return score, per_image, reference_tokens, caption_tokens
 
@@ -98,6 +107,9 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
     from importlib.metadata import version
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    for key in ("batch_size", "max_new_tokens"):
+        if type(settings[key]) is not int or settings[key] < 1:
+            raise ValueError("COCO generation batch/token count must be positive")
     parameter = next(model.base.parameters())
     references, captions, records, batch_records = {}, {}, [], []
     for start in tqdm(range(0, len(data.report), settings["batch_size"]), desc=str(condition)):
@@ -106,8 +118,11 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
         with model.observe_payload() as events:
             generated = model.generate(**kwargs, max_new_tokens=settings["max_new_tokens"],
                                        do_sample=False, num_beams=1, use_cache=True)
+        if (not torch.is_tensor(generated) or generated.ndim != 2
+                or generated.shape[0] != len(batch) or generated.shape[1] < 1):
+            raise ValueError("COCO generated batch cardinality differs from requested images")
         batch_ids, emitted_lengths = [], []
-        for index, (row, token_ids) in enumerate(zip(batch, generated)):
+        for index, (row, token_ids) in enumerate(zip(batch, generated, strict=True)):
             image_id = int(row["file_name"].rsplit("_", 1)[1].split(".")[0])
             if image_id in references:
                 raise ValueError(f"Duplicate COCO report image ID: {image_id}")
@@ -115,6 +130,8 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
             raw = processor.tokenizer.decode(token_ids, skip_special_tokens=True)
             caption = clean_caption(raw)
             reference_texts = list(row["answer"])
+            if not reference_texts or any(not isinstance(text, str) or not text.strip() for text in reference_texts):
+                raise ValueError("COCO image requires nonempty caption references")
             references[image_id] = [{"caption": text.lower().strip()} for text in reference_texts]
             captions[image_id] = [{"caption": caption.lower().strip()}]
             # Seq2seq output starts with decoder-start; EOS and padded tail are
@@ -136,14 +153,20 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
                             "eos": eos, "empty": not bool(caption),
                             "truncated": not eos and emitted_length >= settings["max_new_tokens"]})
         payloads = coco_payload_records(events, emitted_lengths, model.split["stack"])
-        for record, payload in zip(records[-len(batch):], payloads):
+        for record, payload in zip(records[-len(batch):], payloads, strict=True):
             record["payload"] = payload
         batch_records.append({"image_ids": batch_ids, "payload_events": events,
                               "input_shapes": {key: list(value.shape) for key, value in kwargs.items()}})
     if not records:
         raise ValueError("COCO report set is empty")
     score, per_image, reference_tokens, caption_tokens = score_coco_captions(references, captions)
-    for record, value in zip(records, per_image):
+    if (len(records) != len(data.report) or len(per_image) != len(records)
+            or not math.isfinite(float(score))
+            or any(not math.isfinite(float(value)) for value in per_image)):
+        raise ValueError("COCO CIDEr must have one finite score per requested image")
+    if set(reference_tokens) != set(references) or set(caption_tokens) != set(references):
+        raise ValueError("COCO PTB evidence image membership differs")
+    for record, value in zip(records, per_image, strict=True):
         image_id = record["image_id"]
         append_metrics(output / f"captions_{condition}.jsonl", {
             **record, "ptb_references": reference_tokens[image_id],
@@ -164,7 +187,11 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
     generation_valid = (None if any(row["payload"]["generation_valid"] is None for row in records)
                         else {stream: sum(row["payload"]["generation_valid"][stream] for row in records)
                               for stream in ("hidden", "memory")})
-    return {"cider": float(score), "num_samples": len(records),
+    return {"cider": float(score), "num_samples": len(records), "finite_scores": True,
+            "generation_requests": len(batch_records),
+            **{f"channel_uses_{key}": {stream: sum(row["payload"][key][stream] for row in records)
+                                      for stream in ("hidden", "memory")}
+               for key in ("allocated", "mask_valid")},
             "channel_uses_generation_valid": generation_valid,
             "generation_valid_policy": "per-row-observed-cached-decoder-through-first-eos-v1",
             "mask_valid_limitation": "Execution mask counts can include already-finished generation rows",
@@ -173,11 +200,33 @@ def evaluate_coco(model, processor, data, settings, output, condition, data_sett
                for key in ("eos", "empty", "truncated")}}
 
 
-def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str | float = "no_noise", data_settings=None):
+def _hellaswag_task_config(task_manager, data_settings):
+    from lm_eval.tasks._yaml_loader import load_yaml
+    recipe_path = task_manager.task_index["hellaswag"].yaml_path
+    if recipe_path is None:
+        raise RuntimeError("Installed harness has no HellaSwag YAML recipe")
+    config = copy.deepcopy(load_yaml(recipe_path, resolve_func=True))
+    if data_settings:
+        config["dataset_path"] = data_settings["name"]
+        if data_settings.get("revision") is not None:
+            config.setdefault("dataset_kwargs", {})["revision"] = data_settings["revision"]
+    return config
+
+
+def prepare_hellaswag_task(data_settings=None):
+    """Load one task dataset per resident worker, retaining its original recipe."""
+    from lm_eval.tasks import TaskManager
+    from lm_eval.api.task import ConfigurableTask
+    manager = TaskManager()
+    config = _hellaswag_task_config(manager, data_settings)
+    return {"task_manager": manager, "config": copy.deepcopy(config),
+            "task": ConfigurableTask(config=copy.deepcopy(config))}
+
+
+def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str | float = "no_noise", data_settings=None, *, prepared_task=None):
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.api.registry import get_model
     from lm_eval.tasks import TaskManager
-    from lm_eval.tasks._yaml_loader import load_yaml
     from lm_eval.utils import handle_non_serializable
     # Hooks live on the backbone. Passing it directly keeps HFLM's usual HF interface.
     # The registry is typed as base LM; its HF implementation accepts these HF kwargs.
@@ -195,20 +244,20 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
     else:
         adapter = harness_class(pretrained=model.base, tokenizer=tokenizer, backend="seq2seq",
                                 batch_size=settings["batch_size"], **adapter_kwargs)
-    task_manager = TaskManager()
-    # Resolve !function entries before passing an inline recipe back to the factory.
-    # The index .cfg deliberately contains strings, not executable preprocessing.
-    recipe_path = task_manager.task_index["hellaswag"].yaml_path
-    if recipe_path is None:
-        raise RuntimeError("Installed harness has no HellaSwag YAML recipe")
-    task_config = copy.deepcopy(load_yaml(recipe_path, resolve_func=True))
-    if data_settings:
-        task_config["dataset_path"] = data_settings["name"]
-        if data_settings.get("revision") is not None:
-            task_config.setdefault("dataset_kwargs", {})["revision"] = data_settings["revision"]
+    task_manager = TaskManager() if prepared_task is None else prepared_task['task_manager']
+    task_config = _hellaswag_task_config(task_manager, data_settings)
     fewshots = None
     task = task_config
-    if compact:
+    if prepared_task is not None:
+        if not compact:
+            raise ValueError('resident HellaSwag task requires compact evidence')
+        if prepared_task['config'] != task_config:
+            raise ValueError('resident HellaSwag original recipe/data settings differ')
+        # Each evaluation mutates instances/sampler state. Isolate those mutations
+        # while reusing the already loaded, preprocessed dataset.
+        task = copy.deepcopy(prepared_task['task'])
+        fewshots = record_fewshots(task)
+    elif compact:
         from lm_eval.api.task import ConfigurableTask
         task = ConfigurableTask(config=task_config)
         fewshots = record_fewshots(task)
@@ -262,7 +311,7 @@ def evaluate_hellaswag(model, tokenizer, settings, output=None, condition: str |
 def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=None, *,
              run_directory=None, expected_config=None, expected_checkpoint=None):
     if run_directory is not None:
-        from .ordinary_runs import validate_reserved_attempt
+        from .run_records import validate_reserved_attempt
         reserved_config = validate_reserved_attempt(run_directory, "evaluation")
         if expected_config != reserved_config:
             raise ValueError("evaluation configuration differs from its bound case")
@@ -384,7 +433,7 @@ def codec_observation_identity(request):
         raise ValueError(f"Observation request missing fields: {sorted(missing)}")
     if request["schema"] != "codec-observation-v1":
         raise ValueError("Unsupported observation schema")
-    from .sharing_schedule import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
+    from .checkpoint_readers import ENCODER_PILOT_PROTOCOL, NATIVE16_LONG_PROTOCOL
     long_condition = (request["protocol"] in (NATIVE16_LONG_PROTOCOL, ENCODER_PILOT_PROTOCOL,
                                              'encoder-original6-native16-stages-v1')
                       and len(request["conditions"]) == 1 and request["conditions"][0] in BASELINE_CONDITIONS)
@@ -489,7 +538,7 @@ def evaluate_checkpoint(validated_state, request, *, model, processor, data=None
             try:
                 snr = None if condition == "no_noise" else float(condition)
                 with state_isolated_rng(settings["noise_seed"]), model.channel.replay(
-                        settings["noise_seed"], request["noise"]["namespace"]), \
+                        settings["noise_seed"], request["noise"]["namespace"]),\
                         model.at_site(site, purpose="evaluate", authorization=authorization), model.transmission(snr):
                     if request["task"] == "coco":
                         metrics = evaluate_coco(model, processor, data, settings, condition_output,
@@ -622,7 +671,6 @@ def validate_evaluation_target(validated_state, request, model):
     return site, {"sites": {site.site_id: "heldout"}, "heldout_freeze_receipt": digest(freeze)}
 
 
-
 def observation_record_request(request):
     """Project execution inputs into the model-free records request schema.
 
@@ -729,7 +777,6 @@ def observation_event_payload(receipt):
     from .experiment_records import validate_observation
     validate_observation(payload)
     return payload
-
 
 
 def _state_payload_equal(left, right):

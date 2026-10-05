@@ -1,214 +1,44 @@
-# T5Gemma-2 JSCC
+# T5Gemma-2 JSCC research
 
-A research project for studying how compression and wireless channel noise affect T5Gemma-2 representations and downstream task performance. It supports COCO image captioning and HellaSwag multiple-choice evaluation with a frozen backbone and a trainable residual codec.
+A frozen T5Gemma-2 backbone sends transmitter representations through a trainable codec and channel. The project supports independent ordinary COCO captioning and HellaSwag selection, and a shared codec trained across ordered encoder/decoder sites. Decoder receiver memory crosses the communication boundary and counts toward traffic.
 
-Both tasks share the training loop, model design and codec implementation. A shared model YAML controls the split, bottleneck size, LayerNorm, SNR conditioning and channel; task YAMLs define data, training and evaluation. Training uses KL distillation plus normalized reconstruction MSE.
-
-```text
-hidden representation → codec encoder → power normalization → channel
-                      → codec decoder → downstream model computation
-```
-
-For a decoder split, receiver layers obtain encoder memory through a second codec/channel transmission. Transmitter layers retain original memory. See [architecture](docs/architecture.md) for signal paths and [terminology](CONTEXT.md) for the system definition.
-
-## Setup
-
-Use Python 3.13+ and uv. The research configurations use CUDA / bfloat16. COCO CIDEr scoring also requires Java. Model access and Hugging Face caches must be available on the machine that runs the experiment.
-
-The model code is ordinary PyTorch/CUDA, not an H200-specific implementation. A standalone RTX 5090 can use the same Python entry points without Slurm; its smaller memory budget may require smaller training/evaluation batches. See [the workstation guide](docs/running.md#standalone-gpu-workstations-including-rtx-5090) for compatibility checks and a conservative starting setup.
-
-From the project root:
+Use one public command with one YAML-selected operation per invocation:
 
 ```bash
-uv sync --locked
-
-uv run --locked python train.py --config configs/tasks/coco.yaml --check
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
+uv run --locked python experiment.py --config configs/experiments/ordinary/coco.yaml
+uv run --locked python experiment.py --config configs/experiments/ordinary/hellaswag.yaml
 ```
 
-The check commands parse and print the configuration without loading weights or data. Ordinary task loading uses its configured local/Hub cache behavior. Recipe execution requires explicitly acquired pinned registrations and never downloads missing assets implicitly. See [running on other machines](docs/running.md) for environment setup and Slurm.
+The supplied ordinary examples select `operation: check`. These commands compose and validate configuration without loading model/data, creating a run or downloading assets. To train, author a separate request selecting `operation: train` with an explicit fresh `execution.root` and `execution.attempt`. See [operations](docs/operations-workflow.md) for effect boundaries and examples of all operations.
 
-The supported recorded workflow selects an exact logical root with `train.py --config ... --output ...`, then evaluates that root with `evaluate.py --run ...`. See [operations commands and resumable examples](docs/operations-workflow.md). Actual training requires `--output`; output-free `--check` remains supported. `study.py` is an optional plan preview/export tool; ordinary experiments do not need a study directory or manifest. Scripts for historical experiment reproduction are indexed in [scripts/README.md](scripts/README.md).
+| Workflow/task | Current consumer | Authored example |
+|---|---|---|
+| Ordinary COCO | `ordinary_runs.train_task` → `training.train`; caption/CIDEr evaluation | [COCO](configs/experiments/ordinary/coco.yaml) |
+| Ordinary HellaSwag | Same ordinary engine with candidate scoring and training holdout | [HellaSwag](configs/experiments/ordinary/hellaswag.yaml) |
+| Shared HellaSwag | `shared_runs` → `shared_training`, recorded terminal/panel evaluation | [Reference](configs/experiments/shared/shared_hellaswag_reference.yaml), [changed example](configs/experiments/shared/shared_hellaswag_example.yaml) |
+| Shared COCO | Image-aware indexed views, clean targets and whole-panel caption/CIDEr scoring | [COCO check example](configs/experiments/shared/shared_coco_example.yaml) |
 
-## Train an experiment
+Shared checks require `execution.resolution.model_config` pointing to a local pinned backbone `config.json`. Shared acquisition attests existing complete local assets; registration binds exact cache/model/scorer receipts. Preparation and training are separate invocations. Missing assets fail with explicit requirements. No command implicitly downloads, resumes, retries, selects the latest checkpoint or trains an exported study.
 
-The configuration files have distinct responsibilities:
+Named model designs live in [configs/models](configs/README.md). Ordinary runtime and custom channels retain their existing consumers. Width-only authoring families share one design with an explicit `experiment.codec.bottleneck_dim`; q200/effective64, q400/local and native16-long remain separate protocols. A complete effective configuration is saved in each run. Declaring-file-relative paths make requests independent of shell cwd.
 
-| File | Contents |
+Ordinary runs preserve their own configured boundary, optional distinct receiver-memory codec, heldout selection and eligible best checkpoint. Shared runs preserve one canonical codec owner, deterministic paired views, ordered sites, durable state and their own frozen terminal. Shared support remains native batch16/accumulation1, direct-affine/native arithmetic, AWGN or identity, reconstruction followed by additive reconstruction+KL, and one optimizer/LR reset. Unsupported or inactive authored controls reject early. HellaSwag native source 2048/target 512 remain unchanged.
+
+| Responsibility | Modules |
 |---|---|
-| `configs/model.yaml` | Shared backbone, split, codec and channel design; FiLM off |
-| `configs/tasks/coco.yaml` | COCO data, training, evaluation and a reference to model.yaml |
-| `configs/tasks/hellaswag.yaml` | HellaSwag data, training, evaluation and the same reference |
-| `configs/tasks/hellaswag_diagnostic.yaml` | Five-setting short HellaSwag diagnostic recipe |
-| `configs/smoke/` | Small CPU/H200 task budgets; the same shared model design |
-| `configs/evaluation/` | Evaluation-only overrides for small checks or custom channels |
-| `configs/studies/` | Multi-experiment plans shared by both tasks |
+| Public request composition/operation dispatch | `experiment.py`, `jscc/experiment.py`, `config.py`, `shared_config.py` |
+| Frozen backbone, codec/channel precision, task losses and numerical runtime | `models/split_model.py`, `models/codec.py`, `models/channel.py`, `models/precision.py`, `losses.py`, `runtime.py` |
+| Ordinary training, continuation and scoring | `ordinary_runs.py`, `training.py`, `ordinary_continuation.py`, `data/`, `evaluation.py` |
+| Shared lifecycle, clock, state and registration | `shared_runs.py`, `shared_training.py`, `shared_plan.py`, `shared_state.py`, `shared_assets.py`, `shared_preparation.py` |
+| Indexed paired inputs, image/cache/processor/scorer binding, routing and clean targets | `shared_inputs.py`, `site_routing.py`, `reconstruction.py`, `data/coco.py`, `data/hellaswag.py` |
+| Recorded checkpoints, whole-panel task scoring and observations | `shared_evaluation.py`, `panel_evaluation.py`, `observation_policy.py` |
+| Isolated panel processes, device/output ownership, partial aggregates and linked retries | `panel_workers.py` |
+| Root/attempt/source/submission/result records | `run_records.py`, `experiment_records.py`, `submission.py`, `source_lifetime.py`, `result_collection.py` |
+| Immutable checkpoint eligibility, asset trust and scientific identity | `checkpoint_policy.py`, `asset_identity.py`, `asset_paths.py`, `identity_compatibility.py` |
+| Explicit historical reading and useful diagnostics | `checkpoint_readers.py`, `sharing_admission.py` (saved admission references only), `diagnostic_scoring.py`, `gradient_diagnostics.py`, `qualification.py` |
 
-Both task files contain `model_config: ../model.yaml`. The reference resolves relative to the task YAML, so copying a task into another directory requires adjusting that reference. There is one model/task composition level, not a recursive inheritance chain. Run either task with the same entry point:
+Shared COCO binds indexed image/caption/demo/reference inventories, processor assets and scorer bytes; it retains image-aware clean targets and receiver memory. CIDEr scores each complete image/reference panel. Isolated parallel evaluation distributes whole site/condition panels for one named shared case, with one model load per worker and one aggregate writer. A fresh linked retry inherits verified completed panels while retaining failed/missing/pending/interrupted evidence. See [parallel controls](docs/operations-workflow.md#parallel-panels-of-one-shared-case). Tiny CPU/mock checks establish mechanics; full-weight GPU execution and scientific quality remain separate.
 
-```bash
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
-```
+Study preview/export uses `operation: preview`, `execution.plan.kind: study`. Submission preview uses `kind: submission`; only an explicitly authorized `operation: submit` may invoke a scheduler. `scripts/submit_recipe.py` is CASE payload transport and reconciliation, not a second scientific authoring frontend. Slurm is optional. Collection is a separate operation and reports copied/verified/missing/failed status independently of science.
 
-Edit model.yaml to change the common design for both tasks. For a separate model experiment, copy it to a named model file and point that experiment's task YAML at the copy. Keep model/split/codec/channel sections in the model file rather than overriding them inside a task file.
-
-CPU smoke files use `runtime: {device: cpu, dtype: float32}` to override only execution settings. After loading, the run receives a complete resolved configuration with no dependency on the source YAML files. Legacy flat configurations remain readable.
-
-## Train shared codec recipes
-
-The [YAML recipe workflow](docs/experiment-recipes.md) trains one direct-affine
-codec across an ordered list of HellaSwag encoder/decoder locations. YAML controls
-per-location update budgets, cached-row subsets, optimizer phases, saves and fixed
-observation/terminal requests. The public `train.py --config <recipe.yaml> --output <root> --registrations <directory>`
-automatically prepares pinned acquired inputs. Stable named cases support sequential
-local execution or independent case jobs, with exact checkpoint continuation.
-See [public recipe commands and records](docs/experiment-recipes.md#public-training-command-and-independent-cases)
-and [recorded recipe evaluation](docs/experiment-recipes.md#public-recorded-evaluation).
-`evaluate.py --run runs/comparison` evaluates declared recipe cases through their
-exact recorded terminals; `--case`, `--scope supplemental` and explicit development
-checkpoints retain separate results. Missing/failed cases remain visible in saved
-case and panel counts. Start with
-[the retained original13 example](configs/recipes/original13.yaml) or
-[the changed recipe example](configs/recipes/changed.yaml); acquired model/data
-assets and explicit execution authority are required. COCO keeps the task workflow
-above.
-
-## Optionally plan multiple experiments
-
-Studies list task recipes, seeds and named model overrides. Both tasks use the same variation list. Previewing is the default and does not load a model or submit jobs:
-
-```bash
-uv run --locked python study.py --config configs/studies/baseline.yaml
-uv run --locked python study.py --config configs/studies/splits.yaml --task coco
-uv run --locked python study.py --config configs/studies/bottleneck.yaml
-```
-
-Only when a multi-run plan is needed, use `--output runs/studies/NEW_NAME` to write complete YAMLs and a train/eval index manifest. This `runs/studies/` layer is a chosen export location, not a prerequisite for `train.py` or `evaluate.py`. Export uses a new directory and never starts training. Prepared plans can be moved to the execution host before use. See [config layout](configs/README.md) and [study execution](docs/studies.md) for counts, paths and separate Slurm train/eval arrays.
-
-| Setting | Meaning |
-|---|---|
-| `run.name`, `run.output_dir` | Experiment name and output directory; relative output paths resolve from the YAML directory |
-| `split.stack`, `split.where`, `split.index` | Encoder/decoder insertion point; layer indices are zero-based |
-| `codec.bottleneck_dim` | Dimension of the transmitted representation |
-| `codec.layernorm` | `none`, `pre`, `post`, or `both` |
-| `codec.snr_film` | Receiver-side SNR conditioning |
-| `channel.type`, `channel.kwargs` | Built-in AWGN/identity or a custom Python module |
-| `training.batch_size`, `gradient_accumulation` | Microbatch size and number of accumulated microbatches |
-| `training.max_steps`, `schedule_steps`, `eval_every` | Stop budget, optional LR schedule horizon and validation interval |
-| `training.monitor`, `patience` | Checkpoint metric and early stopping; null patience disables early stopping |
-| `training.save_steps` | Additional checkpoint steps |
-| `training.max_minutes` | Optional training time budget, checked between updates; reserve time for final validation and evaluation |
-
-The current COCO default uses batch 16 with accumulation 4 for 500 updates; HellaSwag uses batch 64 with accumulation 1 for 10,000 updates. Both have effective batch 64. HellaSwag training uses five-shot prompts. These are the completed September recipes adopted by the owner; see [current defaults](docs/current-defaults.md) for exact lineage and evaluation settings.
-
-External LayerNorm `pre` is before codec encoding, and `post` is after decoding; residual blocks retain their internal LayerNorm. Both tasks now start from the completed September `enc_l9` design and residual codec with external LayerNorm `none`. A decoder experiment may add `codec.memory` overrides to hold the receiver-memory codec's settings fixed while varying the main hidden codec. SNR-FiLM is disabled in all default and smoke recipes. Task data, training budgets and evaluation methods remain task-specific. See [the shared baseline](docs/architecture.md#shared-baseline) for the design and compatibility limits.
-
-W&B is optional: set `run.wandb_project` and add `--extra wandb` to `uv run --locked`.
-
-## Read results and evaluate
-
-Current training requires an explicit logical root and saves authoritative training files under `attempts/training-0001/`; complete settings and checkpoint ancestry are bound at that root. See [ordinary run records](docs/ordinary-runs.md). Older timestamped engine directories retain this historical layout and remain exact evaluation inputs:
-
-```text
-runs/<time>-<name>-<id>/
-  config.yaml          # Resolved experiment configuration
-  data_ids.json        # Selected dataset rows/IDs
-  run.json             # Runtime and budget metadata
-  metrics.jsonl        # Training/validation metrics and logged timing/memory
-  best.pt              # Best checkpoint under the configured improvement rule
-  last.pt              # Most recent validation checkpoint
-  step_002000.pt       # Optional extra checkpoint
-  completion.json      # Written when training returns normally
-  evaluations/         # Separate settings and results for each evaluation
-```
-
-Checkpoints contain codec/channel and optimizer state, configuration and data IDs. The backbone is reloaded from its model revision.
-
-```bash
-uv run --locked python evaluate.py --run runs/<coco-run>
-uv run --locked python evaluate.py --run runs/<hellaswag-run>
-```
-
-The checkpoint identifies the task. Recorded ordinary runs default to their uniquely recorded eligible best checkpoint, with exact role/step/hash/size and attempt ancestry. Explicit `--checkpoint last.pt` selects a supplemental saved target. Recipe runs instead require their recorded frozen terminal. No route selects the newest file.
-
-COCO writes captions, CIDEr and EOS/empty/truncation rates. HellaSwag uses lm-eval to report accuracy and normalized accuracy. Default evaluations cover no-noise, -6, +6 and +18 dB with the codec active; the adopted historical recipes evaluated vanilla separately. No-noise retains the codec; vanilla bypasses both codec and channel.
-
-Pass `--config` an evaluation-only YAML to adjust sample count, batch size or SNRs. Fields are top-level, for example:
-
-```yaml
-snrs: [no_noise, 0, 18]
-num_samples: 32
-batch_size: 4
-mode: all
-vanilla: true
-```
-
-Exact ordinary continuation requires `data.num_workers: 0` **before binding** the run, a finalized parent attempt and a valid durable checkpoint. Use the [resumable YAML examples and explicit continuation commands](docs/operations-workflow.md#ordinary-training-evaluation-and-continuation). The supported `--output` route restores optimizer, schedule, scaler, RNG, data cursor and checkpoint-time selection state. A checkpoint after update 1000 resumes with update 1001; unsaved work is repeated. Unsupported loaders or incompatible state fail explicitly. Historical calls without `--output` retain iterator restart behavior and cannot consume new exact state. A forced timeout does not save the unsaved current step.
-
-## Development and tests
-
-| Area | Files |
-|---|---|
-| Shared model and task recipes | `configs/model.yaml`, `configs/tasks/coco.yaml`, `configs/tasks/hellaswag.yaml` |
-| Codec, channel and split hooks | `jscc/models/` |
-| Functional training orchestration | `jscc/training.py` |
-| Shared objective accounting and numerical losses | `jscc/training_objectives.py`, `jscc/losses.py` |
-| Local reconstruction and activation replay | `jscc/local_reconstruction.py`, `jscc/activation_replay.py` |
-| Task data | `jscc/data/coco.py`, `jscc/data/hellaswag.py` |
-| Task evaluation | `jscc/evaluation.py` |
-| COCO and HellaSwag coverage | `tests/test_coco.py`, `tests/test_hellaswag.py` |
-| Shared training/codec coverage | `tests/test_core.py`, `tests/test_training.py` |
-| All supplied sweep routes | `tests/test_sweep_routes.py` |
-
-```bash
-uv sync --locked --extra dev
-uv run --locked --extra dev pyright
-uv run --locked --extra dev ruff check .
-uv run --locked --extra dev python -m pytest -q
-uv run --locked --extra dev python -m pytest -q tests/test_coco.py
-uv run --locked --extra dev python -m pytest -q tests/test_hellaswag.py
-uv run --locked --extra dev python -m pytest -q tests/test_sweep_routes.py
-```
-
-These tests use CPU tensors and tiny real Transformers modules, without downloading pretrained weights. Full-weight smoke recipes are available for both tasks in `configs/smoke/coco_cpu.yaml` and `configs/smoke/hellaswag_cpu.yaml`; use a machine with enough RAM.
-
-Pyright and Ruff are project dev dependencies with locked versions, installed in .venv by uv. Pyright's Node runtime is also included through its nodejs extra. The commands above do not depend on an editor's Mason/global installations. Editors may use their own server binaries, but should select this project's .venv for Python imports; the uv commands are the reproducible project checks. Pyright configuration uses Python 3.13 and the project-local .venv. Optional W&B is loaded only when enabled; core development does not require that extra.
-
-The sweep-route tests exercise all supplied split and bottleneck variants on small CPU Transformers models. They check actual forward/backward/generation paths, not only YAML expansion. They do not measure full-model GPU memory or prove convergence; a full research sweep is separate from software validation.
-
-For a quick H200 check, both `configs/smoke/*_h200.yaml` recipes use four optimizer updates, accumulation two, validation every two updates, and two evaluation samples across no-noise, 0 dB and vanilla. `configs/studies/smoke_h200.yaml` groups them into one plan. These checks cover the main train/checkpoint/evaluation paths, not every configuration or convergence.
-
-Earlier full-weight checks completed HellaSwag training/evaluation and COCO small-scale generation/CIDEr; the older long COCO run timed out. The subsequent receiver-memory and HellaSwag holdout corrections have CPU regression coverage and still need full-weight validation before a new research sweep. See [validation scope](docs/validation.md) for the exact versions and limits.
-
-## Documentation and collaboration
-
-For local research, start with `docs/local/research/HANDOFF.md` when present. It records current session state and points to the local Markdown Wayfinder tracker at `docs/local/research/wayfinder/codec-research/map.md`. For one task in a fresh session, follow that tracker’s `SESSION-GUIDE.md` and the assigned ticket. The tracker owns research decisions; experiment reports own evidence. These local files are ignored by Git and are not required for a fresh clone.
-
-- [Current operations commands and experiment-ticket guidance](docs/operations-workflow.md)
-- [Current defaults and historical recipe lineage](docs/current-defaults.md)
-- [COCO query/endpoint helpers and saved receipts](docs/coco-query-endpoint-diagnostic.md)
-- [COCO saved trajectories and comparison helpers](docs/coco-trajectory-diagnostic.md)
-- [Shared encoder capture and replay acceptance](docs/shared-encoder-atlas.md)
-- [HellaSwag enc_l9 two-stage preparation and execution](docs/hellaswag-two-stage.md)
-- [Architecture, data, objectives and checkpoint semantics](docs/architecture.md)
-- [Configuration directory guide](configs/README.md)
-- [Study preview, export and train/eval jobs](docs/studies.md)
-- [Research synthesis, evidence gaps and future ablations](docs/research-roadmap.md)
-- [Execution environments, uv and Slurm](docs/running.md)
-- [Validation coverage](docs/validation.md)
-- [Migration decisions and compatibility](docs/migration.md)
-- [Custom wireless channel integration](docs/channel-integration.md)
-- [Environment template](docs/environment.example.md)
-- [Script catalog and historical reproduction tools](scripts/README.md)
-- [Portable main-weight regression fixtures](tests/fixtures/main_weight_screen/README.md)
-
-Source, tests, portable regression fixtures, YAML, uv.lock and portable documentation belong in Git. `docs/local/` is ignored local working state; historical research evidence and source snapshots live in the separate MTK archive outside this project. Personal machine/account settings and experiment paths belong in `docs/local/`; credentials stay in their existing SSH or authentication tools. Model weights, datasets, run outputs and virtual environments are also ignored.
-
-A collaborator can clone the repository and use the standard commands above. Machine-specific setup is optional until remote execution is needed; copy the environment template locally and fill in your own details. Channel collaboration has its own guide and does not change the project's normal research workflow.
-
-`run.json` records the Git revision and dirty state when Git information is available. Bind uncommitted file contents separately when exact source reproduction is required; the commit and dirty flag alone do not identify those bytes. Use branches and pull requests for shared changes; publishing a GitHub remote is a separate step from local version control.
-
-## Collect recorded results
-
-[Compact collection](docs/result-collection.md) exports all recorded scalar rows, final and intermediate result tables, and small identity/status companions from ordinary COCO/HellaSwag or recipe roots. One local action retains snapshot verification, missing-file accounting and retry receipts; large artifacts keep exact retrieval references.
+See [architecture](docs/architecture.md), [transmission vocabulary](CONTEXT.md), [running and Colab](docs/running.md), [ordinary roots](docs/ordinary-runs.md), [shared authoring](docs/experiment-recipes.md), [studies](docs/studies.md), [channels](docs/channel-integration.md), [source lifetime](docs/source-lifetime.md), [collection](docs/result-collection.md), and [validation](docs/validation.md). Historical protocol documents refer to their frozen source and immutable records. Refactor CPU/mock acceptance does not establish full-weight GPU fit, speed or scientific quality.

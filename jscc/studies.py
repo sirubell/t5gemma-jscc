@@ -112,7 +112,11 @@ def export_study(plan, output):
         # The prepared directory can be moved to another host before execution.
         config["run"]["output_dir"] = "../runs"
         relative = f"configs/{index:04d}-{config['run']['name']}.yaml"
-        save_config(config, output / relative)
+        from .experiment import SCHEMA
+        request = {'schema': SCHEMA, 'workflow': 'ordinary', 'operation': 'train',
+                   'experiment': config, 'execution': {'root': '../runs/'+config['run']['name'],
+                   'attempt': '0001', 'success_link': '../links/'+f'{index:04d}.txt'}}
+        save_config(request, output / relative)
         entries.append({"index": index, "task": run.task, "experiment": run.experiment,
                         "seed": run.seed, "config": relative, "run_link": f"links/{index:04d}.txt"})
     manifest = output / "manifest.json"

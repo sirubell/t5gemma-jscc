@@ -65,11 +65,11 @@ Success only permits reviewing a separately scoped shared-versus-specialist trai
 
 ```bash
 uv run --locked --no-sync --extra dev ruff check \
-  scripts/shared_encoder_atlas.py tests/test_shared_encoder_atlas.py
+  scripts/shared_encoder_atlas.py tests/shared/test_shared_encoder_atlas.py
 uv run --locked --no-sync --extra dev pyright \
-  scripts/shared_encoder_atlas.py tests/test_shared_encoder_atlas.py
+  scripts/shared_encoder_atlas.py tests/shared/test_shared_encoder_atlas.py
 uv run --locked --no-sync --extra dev python -m pytest -q \
-  tests/test_shared_encoder_atlas.py
+  tests/shared/test_shared_encoder_atlas.py
 ```
 
 Tests use a real tiny20-layer Transformers backbone, not fabricated hook outputs. They cover all three clean sites, all six parity conditions, masks/traffic, actual replay noise, local gradients, unchanged weights, exception/deadline cleanup, finite checks, frozen native view preparation, incomplete/corrupt artifacts and unchanged production enc_l9 rejection. CPU acceptance is not a full-weight CUDA result.

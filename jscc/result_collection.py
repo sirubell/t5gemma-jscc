@@ -25,6 +25,7 @@ COMPANIONS = {
     'run.json', 'campaign.json', 'freeze.json', 'checkpoints.json', 'publication.json',
     'eligibility.json', 'gate.json', 'request.json', 'result.json', 'results.json',
     'overrides.yaml', 'checkpoint_timing.jsonl', 'reconciliation.json',
+    'plan.json', 'aggregate.json', 'final.json', 'worker-start.json', 'worker-terminal.json',
 }
 # These bulk fields have exact original-file references, never an inferred value.
 REMOTE_DIRECTORIES = {'cache', 'data', 'model', 'models', 'assets', 'debug'}
@@ -175,6 +176,18 @@ def prepare_snapshot(root: Path, snapshot: Path, *, selected: Iterable[str] = ()
                     if known[absolute]['sha256'] != ref['sha256']:
                         raise ValueError(f'recorded selected identity differs: {path}')
                 else:
+                    # Core terminal snapshots/receipts have arbitrary digest filenames.
+                    # Copy only JSON evidence beneath the explicit worker-attempt boundary.
+                    if path.suffix == '.json' and 'worker-attempts' in path.relative_to(root).parts:
+                        entry = {'path': 'files/' + path.relative_to(root).as_posix(),
+                                 'source': absolute, 'sha256': ref['sha256'],
+                                 'bytes': ref.get('bytes', ref.get('size', ref.get('size_bytes'))),
+                                 'kind': 'companion', 'retrieval_ref': _reference(path, root, source_uri)}
+                        if path.exists() and _digest(path)[0] != ref['sha256']:
+                            raise ValueError(f'recorded panel evidence identity differs: {path}')
+                        artifacts.append(entry)
+                        known[absolute] = entry
+                        continue
                     row = remote_by_path.get(absolute)
                     if row is None:
                         row = {'path': path.relative_to(root).as_posix(), 'bytes': ref.get('size', ref.get('size_bytes')),
@@ -205,19 +218,19 @@ def prepare_snapshot(root: Path, snapshot: Path, *, selected: Iterable[str] = ()
                 config = path.parent / 'config.yaml'
                 if not config.is_file() or _digest(config)[0] != value.get('config_sha256'):
                     raise ValueError(f'bound case config missing or changed: {config}')
-            if path.name in {'attempt.json', 'campaign.json', 'completion.json', 'gate.json', 'training.json', 'checkpoint.json', 'publication.json'}:
+            if path.name in {'attempt.json', 'campaign.json', 'completion.json', 'gate.json', 'training.json', 'checkpoint.json', 'publication.json', 'plan.json', 'aggregate.json', 'final.json', 'worker-start.json', 'worker-terminal.json'}:
                 status_rows.append({**context, 'record': _compact(value)})
-            if path.name in {'result.json', 'results.json'}:
+            if path.name in {'result.json', 'results.json', 'aggregate.json'}:
                 # Actual panel/condition rows, plus aggregate accounting with all
                 # missing/failed/pending cases. No fabricated metric rows.
-                for key in ('panels', 'conditions', 'cases'):
+                for key in ('panels', 'conditions', 'cases', 'rows'):
                     if isinstance(value.get(key), list):
                         for row in value[key]:
                             result_rows.append({**context, 'table': key, 'scope': value.get('scope', value.get('request', {}).get('scope')),
                                 'status': value.get('status'), 'checkpoint': value.get('checkpoint'),
                                 'policy': value.get('request'), 'counts': value.get('counts'),
                                 'result_identity': next(a for a in artifacts if a['source'] == str(path)),
-                                'result_record': _compact({k: v for k, v in value.items() if k not in ('panels', 'conditions', 'cases')}),
+                                'result_record': _compact({k: v for k, v in value.items() if k not in ('panels', 'conditions', 'cases', 'rows')}),
                                 'row': _compact(row)})
                 if 'error' in value:
                     errors.append({**context, 'error': value['error']})

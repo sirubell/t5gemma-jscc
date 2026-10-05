@@ -1,5 +1,6 @@
 # Fixed source preview and consumer lifetime
 
+Current public calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). Earlier CLI snippets below describe their frozen-source records and are not current commands.
 Current `recipe-case-submission-v1` submissions bind a clean ordinary checkout/worktree at a full
 Git SHA, the tracked `uv.lock` digest, and the selected Python interpreter and
 installed distribution versions. Preparation, submission and launch check that
@@ -144,7 +145,7 @@ preparation or a mock result supplies no live authority.
 
 ```yaml
 schema: recipe-case-submission-v1
-recipe: /host/source/configs/recipes/changed.yaml
+recipe: /host/source/configs/experiments/shared/shared_hellaswag_example.yaml
 registrations: /host/assets/registrations
 run_output: /host/runs/new-comparison
 root: /host
@@ -343,3 +344,7 @@ proof matches its current file. Malformed bytes alone and another attempt's
 empty fence never permit retirement. Approval/group claims precede individual
 retirements, so interruption resumes only the same exact child recovery and
 keeps archived bytes unchanged.
+
+## Local parallel panels within a CASE evaluation
+
+Optional CASE `evaluation.parallel` is copied into the frozen public evaluation request, covered by its request bytes and existing stage/launch fence. The scheduler task retains its original case index and training dependency. That task owns its local process workers and their outputs; there are no worker scheduler groups or panel-index dependencies. Existing source consumers remain held until all authoritative CASE task evidence is terminal and an explicit release is recorded. Scientific linked retries preserve prior bytes and use fresh attempt/output identities; they do not authorize another scheduler submission or release a source hold.

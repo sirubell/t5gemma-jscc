@@ -1,5 +1,14 @@
 # HellaSwag enc_l9 local-reconstruction pilot
 
+> **Historical contract — frozen-source-only.** The protocol, module names and
+> commands below preserve the original source and saved artifact identities.
+> They are not current execution interfaces or authorization to execute,
+> recover historical fronts or renew qualification.
+
+For current authoring, use `uv run --locked python experiment.py --config REQUEST`;
+see [experiment recipes](experiment-recipes.md) and
+[operation fields and effect boundaries](operations-workflow.md).
+
 This software prepares and runs a four-arm, single-site pilot under the pinned
 five-shot corrected-baseline-v2 recipe. The historical 10,000-update result is
 context, not the A control. A new plan requires explicit positive U, L and F
@@ -7,9 +16,13 @@ with U = L + F. No command in this workflow schedules a job.
 
 ## Prepare without loading a model
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
+
 ```bash
 uv run --locked python scripts/hellaswag_two_stage.py prepare \
-  --base configs/tasks/hellaswag.yaml --output-dir /path/to/fresh-plan \
+  --base configs/experiments/ordinary/hellaswag.yaml --output-dir /path/to/fresh-plan \
   --u U --l L --f F
 uv run --locked python scripts/hellaswag_two_stage.py plan \
   --a /path/to/fresh-plan/a.yaml --b /path/to/fresh-plan/b.yaml \
@@ -33,6 +46,8 @@ or a GPU-hour budget.
 
 ## Execute only under a separately approved experiment budget
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
 Each command below is independent. `--max-seconds` is mandatory and applies to
 setup plus its operation. It is a soft wall deadline checked between bounded
 operations; a long model load, kernel or serialization call cannot be
@@ -47,6 +62,8 @@ upper bound from declared presentations, source token cap, input width and
 backbone dtype; that bound excludes tokens/masks and serialization overhead.
 The manifest records actual shard bytes. A full padded cache can be very large
 and its first-use capture/storage/I/O cost may outweigh local replay savings.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --locked python scripts/hellaswag_two_stage.py capture \
@@ -95,6 +112,8 @@ C's exact phase-two data/noise stream and fresh LR horizon. Both functional
 phases use the existing full teacher/student training loop.
 
 Evaluate each terminal checkpoint with the same evaluator and fixed panel:
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --locked python evaluate.py --run /path/to/arm-run --checkpoint last.pt

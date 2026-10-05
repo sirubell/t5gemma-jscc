@@ -1,6 +1,7 @@
 # Current research defaults
 
-On September 29, 2026 the owner adopted the latest completed September comparison recipes as the current defaults. `configs/tasks/coco.yaml` and `configs/tasks/hellaswag.yaml` now resolve the shared `configs/model.yaml` to encoder layer 9 (zero-based), H1152/B512 residual codec, external LayerNorm none and FiLM off. Receiver-memory LayerNorm remains both for explicitly selected decoder variants. Smoke recipes share this model design with their own tiny budgets and data policies.
+Current public calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). Earlier CLI snippets below describe their frozen-source records and are not current commands.
+On September 29, 2026 the owner adopted the latest completed September comparison recipes as the current defaults. `configs/experiments/ordinary/coco.yaml` and `configs/experiments/ordinary/hellaswag.yaml` now resolve the shared `configs/models/default.yaml` to encoder layer 9 (zero-based), H1152/B512 residual codec, external LayerNorm none and FiLM off. Receiver-memory LayerNorm remains both for explicitly selected decoder variants. Smoke recipes share this model design with their own tiny budgets and data policies.
 
 | Setting | COCO | HellaSwag |
 |---|---|---|
@@ -38,8 +39,8 @@ The owner has authorized local implementation of the COCO query/endpoint diagnos
 Both ordinary task checks remain available without loading models or data:
 
 ```bash
-uv run --locked --no-sync python train.py --config configs/tasks/coco.yaml --check
-uv run --locked --no-sync python train.py --config configs/tasks/hellaswag.yaml --check
+uv run --locked --no-sync python experiment.py --config configs/experiments/ordinary/coco.yaml
+uv run --locked --no-sync python experiment.py --config configs/experiments/ordinary/hellaswag.yaml
 ```
 
 For two-stage comparisons, create a separately named plan with explicit U/L/F budgets. Do not silently substitute the 10,000-update historical score for a new shorter A arm, and do not treat the tentative 2,000-update or 80/20 proposal as execution approval.

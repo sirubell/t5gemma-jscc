@@ -17,7 +17,7 @@ import torch
 from .evaluation_policy import file_digest
 from .experiment_records import write_json_atomic
 from .experiment_state import parameter_map
-from .ordinary_runs import runtime_identity
+from .run_records import runtime_identity
 from .presentation import tensor_digest, training_source_digest
 from .runtime import source_state
 from .models.channel import AWGNChannel, IdentityChannel

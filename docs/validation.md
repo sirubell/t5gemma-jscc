@@ -1,5 +1,6 @@
 # Validation coverage
 
+Current public calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). Earlier CLI snippets below describe their frozen-source records and are not current commands.
 Earlier real-environment checks established execution for the recipes recorded below. The later receiver-only decoder-memory correction and HellaSwag training-holdout selection are covered by CPU regression tests; full-weight checks of these changes are still required before a new research sweep. Historical execution does not establish current model quality or convergence.
 
 ## Automated tests
@@ -9,9 +10,9 @@ uv sync --locked --extra dev
 uv run --locked --extra dev pyright
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev python -m pytest -q
-uv run --locked --extra dev python -m pytest -q tests/test_coco.py
-uv run --locked --extra dev python -m pytest -q tests/test_hellaswag.py
-uv run --locked --extra dev python -m pytest -q tests/test_sweep_routes.py
+uv run --locked --extra dev python -m pytest -q tests/ordinary/test_coco.py
+uv run --locked --extra dev python -m pytest -q tests/ordinary/test_hellaswag.py
+uv run --locked --extra dev python -m pytest -q tests/contracts/test_sweep_routes.py
 ```
 
 The suite uses CPU tensors and tiny real T5Gemma-2 modules without pretrained downloads. Coverage includes shared-design composition, runtime overrides, saved flat-config independence, task alignment with FiLM off, study expansion/export, train/eval pairing, and the absence of FiLM parameters when disabled. New tests verify sender-clean/receiver-transmitted memory, shared memory realizations, cached generation without repeated memory transmission, gradients to both codecs, checkpoint/resume, and disjoint HellaSwag training/selection rows with legacy-ID compatibility.
@@ -55,7 +56,7 @@ AddedToken and torch dtype values retain their previous string encoding. This is
 source provenance under the pinned software environment; it does not certify
 arbitrary runtime mutation of module globals or external dependencies.
 
-`tests/test_evaluation_identity.py` reproduces the old mismatch and verifies v2
+`tests/ordinary/test_evaluation_identity.py` reproduces the old mismatch and verifies v2
 stability across fresh Python processes using the installed HellaSwag YAML and
 TaskConfig serialization, without data downloads, pretrained weights, or GPU
 work. It also checks that helper implementation and evaluation protocol changes
@@ -136,7 +137,9 @@ CPU coverage includes residual checkpoint-key/initialization compatibility, one-
 
 Integrated local validation on September29:558 tests passed, Ruff/Pyright passed, and both task configuration checks passed. This is CPU/software evidence. Full-weight GPU fit, cache/full BF16 numerical results, shared task quality and iteration speed remain separately measured experimental outcomes.
 
-## Connected encoder-final baseline CPU gate
+## Historical connected encoder-final baseline CPU evidence
+
+> **Historical frozen-source evidence.** The following records the original baseline producer and its original test names/cadence. These references are retained evidence, not current commands or a requirement to recover the retired executor. Interpret them under their saved source identity.
 
 The versioned pipeline tests perform actual tiny CPU forward/backward updates,
 immutable checkpoint recovery, six-condition evaluation, strict durable records,
@@ -157,7 +160,11 @@ scientific quality. Those checks must bind the final source package on its
 authorized runtime. Existing ordinary COCO/HellaSwag and receiver-memory tests
 remain part of the full suite.
 
-`tests/test_numerical_policy.py` exercises actual tiny BF16 T5Gemma2 computation
+Current updater checks use `tests/compatibility/test_baseline_protocol.py` and `tests/shared/test_recipe_training.py`; exact continuation uses `tests/shared/test_recipe_resume.py`. Terminal request/receipt and changed-policy guards use `tests/shared/test_recipe_observations.py` and `tests/shared/test_recipe_evaluation.py`. Saved baseline readers/fixtures retain their historical meanings. The current `tests/compatibility/test_current_baseline_obligations.py` covers ordinary BF16 objective metrics and exact continuation, numerical-policy targets, shared mask/noise/audit bindings, event/optimizer/resource failures, and damaged saved-arm comparisons. It does not reproduce the retired four-arm training/report producer or its historical event payload schema.
+
+## Numerical policy CPU contracts
+
+`tests/contracts/test_numerical_policy.py` exercises actual tiny BF16 T5Gemma2 computation
 for all four direct/residual and outer-LayerNorm none/both cases. It checks
 native/split reduction, finite codec gradients and frozen backbone storage,
 actual AdamW updates and state-restored next updates, exact diagnostic boundary
@@ -165,3 +172,9 @@ R casting, local replay R, direct-base evaluator calls, cached generation and
 cache/full logits, cache refresh and preserved parameter hierarchy, and config
 rejection. These are CPU software tests, not full-weight GPU acceptance or
 scientific evidence for the opt-in `codec_receiver_fp32` runtime.
+
+## Shared COCO tiny CPU contracts
+
+`tests/shared/test_shared_coco_inputs.py`, `tests/shared/test_shared_coco_capture_resume.py`, `tests/shared/test_shared_coco_scoring.py` and `tests/shared/test_shared_coco_entry.py` exercise the new task-aware path without downloads or GPU work. They cover immutable local image/processor/Karpathy/scorer bindings; deterministic indexed caption/pixel views and masks; native encoder/decoder clean capture after vision scatter; forbidden suffix execution and failure cleanup; receiver-only reconstructed memory; finite nonzero canonical FP32 codec gradients; exact resumed view/site, phase/reset, optimizer/LR/scaler, RNG and exposure; generation/CIDEr image cardinality; and scoring success/failure restoration. Existing ordinary COCO processing and HellaSwag identities remain separate contracts.
+
+Caption tests run real tiny generation and actual CIDEr mathematics with a mocked PTB tokenization boundary. They do not claim Java/PTB execution or full-weight caption quality. The acquisition receipt attests installed scorer Python and jar bytes, which is asset evidence rather than execution qualification. Positive final clean-source admission remains an integration gate; no source guard is relaxed for these fixtures.

@@ -1,10 +1,5 @@
 """Proportional logical roots and retained ordinary-task execution attempts."""
 import copy
-import hashlib
-import importlib.metadata
-import json
-import platform
-import re
 import time
 from pathlib import Path
 
@@ -16,120 +11,26 @@ from .evaluation_policy import file_digest
 from .experiment_records import write_json_atomic
 from .runtime import source_state
 
-SCHEMA = "experiment-run-v1"
 
 
-def _name(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError("case/attempt identifier must be a plain nonempty name")
-    return value
 
 
-def _read(path):
-    return json.loads(Path(path).read_text())
 
 
-def _digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
-def runtime_identity():
-    root = Path(__file__).resolve().parents[1]
-    return {"python": platform.python_version(), "platform": platform.platform(),
-            "packages": {name: importlib.metadata.version(name)
-                         for name in ("torch", "transformers", "datasets")},
-            "uv_lock_sha256": file_digest(root / "uv.lock")}
 
 
-def reserve_root(output, *, kind="ordinary-task", context=None):
-    """Atomically claim a fresh logical root. Existing roots are never retries."""
-    root = Path(output).expanduser().absolute()
-    root.mkdir(parents=True, exist_ok=False)
-    write_json_atomic(root / "experiment.json", {"schema": SCHEMA, "kind": kind,
-                      "root": str(root.resolve()), "context": context or {},
-                      "source": source_state(), "runtime": runtime_identity()})
-    return root.resolve()
 
 
-def bind_case(root, config, *, authored_config=None, case_id=None):
-    """Freeze effective settings at the singleton root or a fresh named child."""
-    root = Path(root).resolve()
-    if _read(root / "experiment.json")["schema"] != SCHEMA:
-        raise ValueError("unsupported experiment root schema")
-    case = root
-    if case_id is not None:
-        case = root / "cases" / _name(case_id)
-        case.mkdir(parents=True, exist_ok=False)
-    # Exclusive reservation also prevents a second singleton binding.
-    with (case / "case.json").open("x"):
-        pass
-    effective = copy.deepcopy(config)
-    context = []
-    if authored_config is not None:
-        authored = Path(authored_config).resolve()
-        text = authored.read_text()
-        context.append({"path": str(authored), "text": text, "sha256": file_digest(authored)})
-        reference = yaml.safe_load(text).get("model_config")
-        if reference is not None:
-            design = (authored.parent / Path(reference).expanduser()).resolve()
-            context.append({"path": str(design), "text": design.read_text(), "sha256": file_digest(design)})
-    save_config(effective, case / "config.yaml")
-    write_json_atomic(case / "case.json", {"schema": SCHEMA, "case_id": case_id,
-                      "experiment": str(root), "config_sha256": file_digest(case / "config.yaml"),
-                      "effective_identity": _digest(effective), "authored": context,
-                      "inputs": {"model": effective["model"], "data": effective["data"],
-                                 "initializer": {"seed": effective["seed"], "codec": effective["codec"]}},
-                      "budget": {"optimizer_updates": effective["training"]["max_steps"],
-                                 "batch_size": effective["training"]["batch_size"],
-                                 "gradient_accumulation": effective["training"]["gradient_accumulation"]}})
-    return case
 
 
-def bound_config(case):
-    """Read the bound complete config, never reload authored references."""
-    case = Path(case).resolve()
-    record = _read(case / "case.json")
-    if record["schema"] != SCHEMA or file_digest(case / "config.yaml") != record["config_sha256"]:
-        raise ValueError("bound effective configuration changed or has unsupported schema")
-    return yaml.safe_load((case / "config.yaml").read_text())
 
 
-def reserve_attempt(case, stage, *, attempt_id="0001", request=None):
-    """Reserve one explicitly identified stage attempt before invoking its engine."""
-    if stage not in ("training", "evaluation", "collection"):
-        raise ValueError("unsupported execution stage")
-    bound_config(case)
-    output = Path(case).resolve() / ("evaluations" if stage == "evaluation" else "attempts") / f"{stage}-{_name(attempt_id)}"
-    output.mkdir(parents=True, exist_ok=False)
-    write_json_atomic(output / "attempt.json", {"schema": SCHEMA, "case": str(Path(case).resolve()),
-                      "stage": stage, "attempt_id": attempt_id, "status": "running",
-                      "source": source_state(), "runtime": runtime_identity(),
-                      "request": request or {}})
-    return output
 
 
-def validate_reserved_attempt(output, stage):
-    """Protect the engine seam against reuse of an already populated attempt."""
-    output = Path(output).resolve()
-    record = _read(output / "attempt.json")
-    if (record.get("schema") != SCHEMA or record.get("stage") != stage
-            or record.get("status") != "running" or (output / "config.yaml").exists()):
-        raise ValueError("engine requires a fresh reserved attempt for its stage")
-    config = bound_config(record["case"])
-    # This one-way reservation excludes concurrent engine calls and remains on failure.
-    (output / ".engine-started").mkdir(exist_ok=False)
-    return config
 
 
-def finish_attempt(output, status, *, details=None):
-    if status not in ("completed", "failed", "interrupted", "partial"):
-        raise ValueError("unsupported attempt outcome")
-    path = Path(output) / "attempt.json"
-    record = _read(path)
-    if record["status"] != "running":
-        raise ValueError("attempt already has a final outcome")
-    record.update(status=status, details=details or {})
-    write_json_atomic(path, record)
 
 
 def _checkpoint(path, *, role, expected_config):
@@ -142,16 +43,33 @@ def _checkpoint(path, *, role, expected_config):
             "sha256": file_digest(path), "size_bytes": path.stat().st_size}
 
 
+def prepare_task(config, output, *, authored_config=None):
+    """Reserve and bind an ordinary root without loading model/data or training."""
+    root = reserve_root(output)
+    effective = copy.deepcopy(config)
+    effective['run']['output_dir'] = str(root)
+    bind_case(root, effective, authored_config=authored_config)
+    write_json_atomic(root/'prepared.json', {'schema': 'ordinary-prepared-v1', 'config': effective})
+    return root
+
+
 def train_task(config, output, *, authored_config=None, resume=None, attempt_id=None):
     """Train one ordinary task at exactly output; no implicit retry or resume."""
     if resume is not None:
         return _continue_task(config, output, resume, attempt_id=attempt_id)
     if config.get("task") not in ("coco", "hellaswag") or config.get("schema"):
         raise ValueError("ordinary roots support COCO/HellaSwag task configs only")
-    root = reserve_root(output)
-    effective = copy.deepcopy(config)
-    effective["run"]["output_dir"] = str(root)
-    case = bind_case(root, effective, authored_config=authored_config)
+    root = Path(output).resolve()
+    if root.exists():
+        effective = copy.deepcopy(config)
+        effective['run']['output_dir'] = str(root)
+        if (not (root/'prepared.json').is_file() or (root/'training.json').exists()
+                or _read(root/'prepared.json') != {'schema': 'ordinary-prepared-v1', 'config': effective}
+                or bound_config(root) != effective):
+            raise FileExistsError('occupied root is not this exact unconsumed ordinary preparation')
+    else:
+        root = prepare_task(config, root, authored_config=authored_config)
+    case = root
     effective = bound_config(case)
     attempt = reserve_attempt(case, "training", attempt_id=attempt_id or "0001")
     write_json_atomic(case / "training.json", {"path": str(attempt)})
@@ -184,7 +102,6 @@ def train_task(config, output, *, authored_config=None, resume=None, attempt_id=
                                 "elapsed_seconds": time.perf_counter() - started})
         raise
     return root
-
 
 
 def _continue_task(config, output, resume, *, attempt_id=None):
@@ -347,3 +264,16 @@ def evaluate_run(root, checkpoint_name=None, overrides_path=None, expected_step=
                                 "elapsed_seconds": time.perf_counter() - started})
         raise
     return attempt
+
+# Transitional providers until stages100/101 caller closure.
+from .run_records import _name as _name  # noqa: F401, E402
+from .run_records import _read as _read  # noqa: F401, E402
+from .run_records import _digest as _digest  # noqa: F401, E402
+from .run_records import runtime_identity as runtime_identity  # noqa: F401, E402
+from .run_records import reserve_root as reserve_root  # noqa: F401, E402
+from .run_records import bind_case as bind_case  # noqa: F401, E402
+from .run_records import bound_config as bound_config  # noqa: F401, E402
+from .run_records import reserve_attempt as reserve_attempt  # noqa: F401, E402
+from .run_records import validate_reserved_attempt as validate_reserved_attempt  # noqa: F401, E402
+from .run_records import finish_attempt as finish_attempt  # noqa: F401, E402
+from .run_records import SCHEMA as SCHEMA  # noqa: F401, E402

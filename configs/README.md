@@ -1,109 +1,16 @@
-# Configuration layout
+# Authored configuration
 
-```text
-configs/
-  model.yaml                   # One shared backbone/split/codec/channel design
-  tasks/
-    coco.yaml                  # Data, training and evaluation defaults
-    hellaswag.yaml
-    hellaswag_diagnostic.yaml  # Five-setting pre-H200 HellaSwag diagnostic
-    hellaswag_corrected.yaml   # Three-route corrected-protocol baseline
-  smoke/
-    coco_cpu.yaml              # Tiny budgets on CPU / float32
-    hellaswag_cpu.yaml
-    coco_h200.yaml             # Tiny budgets on CUDA / bfloat16
-    hellaswag_h200.yaml
-  evaluation/
-    smoke.yaml                 # Small evaluation-only overrides, either task
-    wireless.yaml              # Custom-channel evaluation example
-  studies/
-    baseline.yaml
-    splits.yaml
-    bottleneck.yaml
-    hellaswag_diagnostic.yaml  # 5 settings, WS/5090 only before formal H200
-    hellaswag_corrected.yaml   # 3 routes, prepared before H200 submission
-    smoke_h200.yaml
-```
+Public requests use `experiment.py --config FILE` and `jscc-experiment-v1`. Supplied ordinary/science examples select check; a shared check needs a local pinned backbone config.json. Use [operations](../docs/operations-workflow.md) to author explicit prepare/train/resume/evaluate/collect/preview/submit requests.
 
-Current defaults follow the completed September enc_l9 recipes: COCO 500 updates at 16×4, HellaSwag five-shot training for 10,000 updates at 64×1, external LayerNorm none and FiLM off. See [default lineage and portability](../docs/current-defaults.md). Named historical study recipes retain their own explicit overrides; a study definition is not execution authorization.
+| Directory | Purpose |
+|---|---|
+| models | Reusable named model/split/codec/channel designs, including default and shared direct-affine |
+| experiments/ordinary | COCO/HellaSwag ordinary science with data, clock, selection and scoring |
+| experiments/shared | Dedicated effective shared base and ordered-site/quota/objective/panel science |
+| requests | Recorded evaluation/collection requests; task-specific evaluation options remain separate files |
+| studies | Nonexecuting study/protocol plans; historical protocol schemas are not generic studies |
+| smoke | Explicit bounded check examples and their preserved CPU/H200 runtime settings |
 
-## Which file should change?
+Paths are declaring-file-relative. A complete effective science configuration is recorded at binding. `execution.root` owns the operation output; inherited `run.output_dir` is not an implicit root. Width-only families share `shared_direct_affine.yaml` and explicit `experiment.codec.bottleneck_dim`; q200/effective64, q400/local-files-only and native16-long retain their distinct protocol values. Historical saved config and evidence bytes are immutable.
 
-- Change the shared architecture in model.yaml, or copy it to a named model design for an explicit variation.
-- Change task data/budgets/metrics in tasks/coco.yaml or tasks/hellaswag.yaml. They both reference ../model.yaml.
-- Use smoke/ for execution checks. CPU and H200 have different execution precision/budgets but share the model design. FiLM is off.
-- Pass evaluation/ files to evaluate.py with --config. They override evaluation settings from a checkpoint, not the checkpoint's model architecture.
-- Use studies/ to list a set of experiments without duplicating model/task configurations. Study model_overrides apply equally to both tasks.
-
-`codec.memory` is an optional nested override for the receiver-memory codec. It inherits the main codec design and can pin a memory-specific boundary norm; a flat codec configuration keeps the historical shared setting.
-
-The *_h200.yaml files are ordinary CUDA/bfloat16 smoke recipes, not H200-only model implementations. A compatible RTX 5090 can try the same small recipes directly with Python; see [standalone GPU execution](../docs/running.md#standalone-gpu-workstations-including-rtx-5090). Keep task-specific batch/resource adjustments in task recipes and record the actual hardware used.
-
-## Supplied study plans
-
-| Plan | Variations per task | Seeds | Training configurations |
-|---|---:|---|---:|
-| baseline | Shared model | 0 | 2 |
-| splits | 13 encoder/decoder locations | 0 | 26 |
-| bottleneck | 256, 512, 1024 | 0 | 6 |
-| smoke_h200 | Shared model, H200 smoke budgets | 0 | 2 |
-| hellaswag_diagnostic | Five HellaSwag split/norm settings | 0 | 5 |
-| hellaswag_corrected | Corrected protocol: enc_fn, enc_l9, dec_l8 | 0 | 3 |
-
-Each training configuration can have a separate evaluation job. Evaluation SNRs do not multiply the number of trained models. All supplied plans keep FiLM off.
-
-The split plan lists the 13 historical locations under the current shared codec design with boundary-aware normalization: `post` at `enc_emb`, `both` at `enc_fn`, and `none` at raw encoder/decoder residual streams. Internal residual-block LayerNorm and FiLM-off remain shared. Decoder receiver layers use a second memory codec, so count both streams and their parameters. This is not a reproduction of historical clean-memory or globally memory-coded results. `hellaswag_diagnostic.yaml` is a five-setting, 4,000-update pre-H200 plan; it keeps a 20,000-update schedule horizon and fixes decoder memory normalization while varying the main decoder codec. Plans are editable definitions, not evidence that choices are optimal or requests to execute them. Before a fixed-budget research comparison, settle the training budget and selection protocol. The current HellaSwag default and two-stage plan use fixed terminal steps (`patience: null`); older diagnostic studies may have different stopping rules.
-
-The `hellaswag_diagnostic` plan is the gate before a formal H200 study. It is HellaSwag-only, stops after 4,000 optimizer updates while retaining a 20,000-update schedule, uses effective batch 32 (`16 x 2`), validates the full fixed 512-row selection holdout, and evaluates a fixed 512-example panel at `no_noise`, `-6`, `18`, plus `vanilla`. Its five rows change only the split and main codec boundary norm; `codec.memory.layernorm: both` is held constant for decoder rows.
-
-`hellaswag_diagnostic` is legacy diagnostic evidence. The corrected baseline is a
-separate protocol and must be reported separately from both the historical
-`hellaswag.yaml` runs and the five-row diagnostic. Use
-`configs/tasks/hellaswag_corrected.yaml` with
-`configs/studies/hellaswag_corrected.yaml` for the three planned routes:
-`corrected_enc_fn` (`enc_fn` / main `both`), `corrected_enc_l9`
-(`enc_l9` / main `none`), and `corrected_dec_l8`
-(`dec_l8` / main `none`, memory `both`). All three use T5Gemma 2,
-B512/H1152, FiLM off, seed 0, batch `16 x 2`, 4,000 optimizer updates,
-a 20,000-step schedule horizon, a 512-row validation holdout, and
-`no_noise`/`-6`/`18` plus vanilla evaluation. The checked-in plan is a reusable
-definition; job IDs and completion evidence belong in ignored local research
-notes for each execution. Its resolved task config carries the explicit
-`protocol: corrected-baseline-v1` label for run manifests and downstream
-result indexing.
-
-## Examples
-
-```bash
-uv run --locked python train.py --config configs/tasks/coco.yaml --check
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
-uv run --locked python study.py --config configs/studies/splits.yaml
-uv run --locked python study.py --config configs/studies/splits.yaml --task hellaswag
-uv run --locked python study.py --config configs/studies/smoke_h200.yaml --output runs/studies/smoke-h200
-uv run --locked python study.py --config configs/studies/hellaswag_diagnostic.yaml --task hellaswag
-uv run --locked python study.py --config configs/studies/hellaswag_corrected.yaml --task hellaswag
-uv run --locked python study.py --config configs/studies/hellaswag_corrected.yaml --task hellaswag --output runs/studies/hellaswag-corrected-h200
-```
-
-References inside a task/study YAML are relative to that file. Actual task training, including smoke runs, requires `--output` at an exact logical experiment root; `--check` works without `--output`. Exported studies instead collect artifacts beneath their prepared directory. See [study execution](../docs/studies.md) for the manifest and job workflow.
-
-The corrected HellaSwag plan's export command only prepares three resolved
-configs and a manifest. The expected future H200 entry point is the exported
-manifest with matching train/evaluate arrays, for example
-`--array=0-2%3` for one GPU per route and an `aftercorr` dependency for the
-evaluation array. Site-specific partition/account/QOS options still belong at
-submission time. Do not infer job status from the plan alone; inspect the
-recorded execution manifest and Slurm evidence for the specific run.
-
-## Codec architecture designs
-
-The named model files `models/enc_l9_residual.yaml`, `models/enc_l9_zero_block.yaml`, and `models/enc_l9_direct_affine.yaml` specify architecture experiments while keeping task data/evaluation settings in task recipes. The shared `model.yaml` remains the residual baseline. See [architecture semantics](../docs/architecture.md#explicit-codec-architecture-experiments) for direct-affine restrictions and checkpoint compatibility. Preparing a model design does not execute a sweep.
-
-For the explicit encoder-final mixed arithmetic experiment, set
-`model.numerical_policy: codec_receiver_fp32` in a named model design, with
-`dtype: bfloat16`, `sdpa_backend_policy: auto`, and
-`split: {stack: enc, where: after_final_norm}`. A task `runtime.numerical_policy`
-override is also accepted and validated after composition. `native` or omission
-preserves the existing runtime. This policy is restricted to T5Gemma2 and checks
-actual stored backbone and codec dtypes at execution; see the
-[arithmetic contract](../docs/architecture.md#opt-in-codec-and-receiver-fp32-arithmetic).
+Shared native source 2048/target 512, batch16/accumulation1, direct-affine/native arithmetic, two phases and one optimizer/LR reset remain supported. Unsupported or inactive shared overrides reject; ordinary selection/stopping keys are not shared controls. Shared COCO uses `coco_base.yaml` and its check example, with acquired image, caption, demo, reference, processor and scorer identities. Checks do not load assets or launch training. Shared COCO and HellaSwag use whole-panel single-case parallel evaluation through `evaluation.parallel`; exact controls and retry/failure semantics are in the operations guide.

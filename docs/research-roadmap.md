@@ -24,7 +24,7 @@ The September report and project cleanup are complete. This document records res
 
 ## Current working baseline
 
-The [shared baseline](architecture.md#shared-baseline) lives in configs/model.yaml, referenced by both task YAMLs. It aligns COCO and HellaSwag model design and disables SNR-FiLM, providing a consistent starting point for development and physical-channel integration. The September 29 default adoption follows the completed enc_l9 recipes; [current defaults](current-defaults.md) records their training and evaluation lineage. Historical results must retain the exact architecture and protocol that produced them.
+The [shared baseline](architecture.md#shared-baseline) lives in configs/models/default.yaml, referenced by both task YAMLs. It aligns COCO and HellaSwag model design and disables SNR-FiLM, providing a consistent starting point for development and physical-channel integration. The September 29 default adoption follows the completed enc_l9 recipes; [current defaults](current-defaults.md) records their training and evaluation lineage. Historical results must retain the exact architecture and protocol that produced them.
 
 An initial architecture can be a research prototype without being an optimized design. Rigor comes from a clear system model, justified comparisons, controlled protocols and conclusions bounded by the evidence. Exhaustively testing every hyperparameter is not required.
 

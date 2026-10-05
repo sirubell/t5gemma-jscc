@@ -110,7 +110,7 @@ def training_source_digest():
     for path in sorted(root.rglob("*.py")):
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
-    for name in ("train.py", "uv.lock", "pyproject.toml"):
+    for name in ("experiment.py", "uv.lock", "pyproject.toml"):
         digest.update(name.encode())
         digest.update((root.parent / name).read_bytes())
     return digest.hexdigest()

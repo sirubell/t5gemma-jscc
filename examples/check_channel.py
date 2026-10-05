@@ -1,6 +1,6 @@
 """Check a channel without downloading a model or dataset.
 
-uv run --locked python -m examples.check_channel --config configs/evaluation/wireless.yaml
+uv run --locked python -m examples.check_channel --config configs/requests/wireless-options.yaml
 """
 import argparse
 from pathlib import Path

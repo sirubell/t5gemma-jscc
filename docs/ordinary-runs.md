@@ -1,100 +1,17 @@
-# Ordinary tasks at explicit experiment roots
+# Ordinary roots and exact continuation
 
-Populate pinned caches in a separately authorized setup step, then set `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1` for the recorded commands below. This uses the existing ordinary loader's cache-only environment support; missing bytes fail rather than trigger acquisition. [Operations setup and commands](operations-workflow.md) describe the same shell configuration.
+Ordinary COCO and HellaSwag use `experiment.py --config REQUEST` with `workflow: ordinary`. They retain their own data/model/loss/scoring implementations; they do not inherit shared sites, native16 quotas or frozen-terminal semantics. See [operation fields](operations-workflow.md) for complete requests.
 
-Both supported tasks accept an exact fresh output root:
+Authored science composes a declaring-file-relative named `model_config`, task/data/training/evaluation settings and optional supported runtime overrides. Routine width choices may specify only `codec.bottleneck_dim` alongside the named design. Other architectural changes select a named model design. Supported custom channels retain their `module:Class` and kwargs consumers.
 
-```bash
-uv run --locked python train.py --config configs/tasks/coco.yaml --output runs/coco-case
-uv run --locked python evaluate.py --run runs/coco-case
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
-uv run --locked python evaluate.py --run runs/hellaswag-case
-```
+`operation: check` composes without model/data loading or output. `prepare` uses an explicit fresh root and empty preparation mapping to bind science without training. `train` uses explicit root/attempt; a previously prepared root must match exactly and have no previous training. No occupied failure is implicitly retried.
 
-These commands execute training/evaluation and require the applicable experiment authorization. `--check` still prints the composed task/model YAML without creating outputs or loading a model. The explicit output replaces `run.output_dir` in the bound effective configuration. Task/model-design references remain relative to the declaring YAML. Task objectives, channel support, CUDA/Colab device behavior and scoring adapters retain their existing policies.
+The singleton case lives at its logical root. Science is fully resolved in config.yaml and hashed by case.json. Attempts own runtime/input records, metrics and checkpoints. A training request may publish a fresh success_link only after returning; its destination must be disjoint from the logical root. Link publication failure preserves the completed scientific attempt.
 
-A root is reserved atomically before model construction. An existing path fails, even after an interrupted attempt. There is no automatic retry, overwrite or checkpoint copy. Training saves its authoritative artifacts in `attempts/training-0001/`; the root retains their links. The singleton layout is:
+COCO preserves image/data/demo partition guards, image-aware teacher targets, caption/CIDEr scoring, receiver-only reconstructed memory and valid stream-mask/gradient denominators. HellaSwag preserves disjoint optimization/selection membership and candidate scoring. Both preserve ordinary max/schedule/save/selection/stopping controls and the recorded eligible best checkpoint.
 
-```text
-runs/coco-case/
-  experiment.json              # source, runtime, lock, logical root and context
-  case.json                    # effective identity, authored texts/references, budget/input declarations
-  config.yaml                  # complete effective task/model settings
-  training.json                # current training-attempt link; default checkpoint owns its ancestry
-  checkpoint.json              # eligible default checkpoint path/role/step/hash/size
-  attempts/training-0001/
-    attempt.json               # independent outcome and retained failure details
-    config.yaml, data_ids.json, run.json, completion.json
-    best.pt, last.pt, step_*.pt, metrics.jsonl, ...
-  evaluations/evaluation-0001/
-    attempt.json, config.yaml, results.json, ...
-```
+`resume` requires the bound root, explicit new attempt and a continuation mapping containing exact checkpoint path, owning parent_attempt, role, step, size_bytes and sha256. Ordinary role is `ordinary-post-update`. The underlying loader also restores deterministic data position, optimizer/LR/scaler/RNG, counters and selection state. Repeat work since the last valid save; do not combine an older state with later counters. Source/runtime/config/channel and durable byte guards remain unchanged. Legacy weight-only files are not exact continuation states.
 
-All small JSON writes use the existing atomic durable writer. A crash can leave a reservation with a `running` outcome; this is unresolved evidence and never permits automatic retry. Case binding can leave an unfinished reservation if preparation fails. Retain it and diagnose the failure. Later edits to authored task/model YAML have no effect: evaluation reads the hashed complete effective configuration and the checkpoint's saved config, requiring them to match. Changing the bound configuration itself fails.
+`evaluate` requires a recorded root and new attempt. Its empty evaluation mapping selects recorded eligible best; explicit checkpoint filename and expected_step select an exact supplemental target. Evaluation-only overrides select existing task-correct settings. Distinct codec/vanilla requests retain separate attempt/output identities. Mutable authored training YAML is never consulted to find a newer checkpoint.
 
-Default evaluation uses the recorded `best.pt` required by ordinary selection, with its exact saved step, digest and training-attempt ancestry from the checkpoint path. It never searches for newest or falls back to `last.pt`. A training time limit or an incomplete fixed-presentation budget has a partial outcome and no default target. Missing, changed or mismatched checkpoints fail before model construction. Fixed-presentation ordinary training retains its full-budget gate. Existing fixed-step callers remain supported through explicit checkpoint selection:
-
-```bash
-uv run --locked python evaluate.py --run runs/coco-case \
-  --checkpoint step_000500.pt --expected-step 500 --attempt step500
-```
-
-Explicit checkpoint selections and evaluation overrides are supplemental requests. A supported partial attempt can be evaluated by an explicit checkpoint filename; it cannot become the default result. Overrides stay restricted to the existing evaluation settings and are frozen within that evaluation attempt. Each evaluation has its own outcome; completed condition results survive a later scoring failure. A second evaluation needs an explicit fresh `--attempt` identifier, while the default `0001` reservation prevents an accidental repeated invocation. Training/evaluation/collection records are separate, so failed collection cannot alter successful training or evaluation.
-
-The recorded ordinary route supports explicit exact continuation under the policy below. Actual training requires `--output`; output-free `--check` remains supported. Older timestamped engine directories retain their historical iterator restart behavior and saved layout; their bytes are not upgraded to exact continuation. Recipe dispatch, automatic assets, scientific multi-case execution, scheduler/source preflight and collection commands belong to their respective owners.
-
-## Callable record/API release
-
-`jscc.ordinary_runs` exposes these interfaces. Paths returned by reservation/binding are absolute. Identifiers are plain names without separators. The JSON schema marker is `experiment-run-v1`.
-
-| Callable | Contract |
-|---|---|
-| `reserve_root(output, *, kind="ordinary-task", context=None)` | Exclusive fresh logical root; saves source/runtime/lock identity. No reused root or inferred retry. |
-| `bind_case(root, config, *, authored_config=None, case_id=None)` | Exclusive singleton binding at root, or fresh `cases/<case_id>` child. Saves complete config, authored/reference text and identity, declared model/data/initializer settings and update/batch/accumulation budget. Does not execute a case. |
-| `bound_config(case)` | Reads complete saved config after checking its bound hash/schema. Does not read authored YAML. |
-| `reserve_attempt(case, stage, *, attempt_id="0001", request=None)` | Exclusive named stage attempt; `training`, `evaluation` or `collection`; persists request/source/runtime before engine invocation. Returns `evaluations/evaluation-<id>` or `attempts/<stage>-<id>`. |
-| `validate_reserved_attempt(output, stage)` | Requires running matching-stage reservation and no engine config output yet; atomically claims `.engine-started` and returns the bound config. Engines use this before setup to reject repeated/concurrent execution. |
-| `finish_attempt(output, status, *, details=None)` | Atomic final outcome: `completed`, `failed`, `interrupted`, `partial`. An already finalized attempt cannot be rewritten. |
-| `train_task(config, output, *, authored_config=None, resume=None, attempt_id=None)` | Fresh ordinary singleton, or explicit continuation into a new retained attempt at the same bound case. Returns the logical root. Fresh defaults to `0001`; continuation defaults to `resume-<parent-id>-<saved-step>`, with exclusive reservation. An explicit callable `attempt_id` selects another fresh name. |
-| `evaluate_run(root, checkpoint_name=None, overrides_path=None, expected_step=None, *, attempt_id="0001")` | Consumes an ordinary bound case; returns exact evaluation attempt. Default target verified through one open checkpoint descriptor; explicit checkpoint/override retained as supplemental. |
-| `publish_continuation(attempt)` | Explicitly finish a pending continuation publication plan without optimizer/model execution; checks case/source/runtime/target and refuses a superseded or already published plan. |
-| `is_recorded_root(path)` | Detects root/case markers for public CLI dispatch. |
-
-The existing engines add keyword-only `run_directory` (and evaluation `expected_config`/`expected_checkpoint`) for a caller-owned reserved attempt; they validate the reservation/config before setup. Ordinary data membership/prompt evidence stays authoritative in `data_ids.json`/`prompt_evidence.json`. `run.json` adds setup identity with actual model/processor metadata, selected row count when available and communication-state tensor shape/dtype/digests (including scalar state); non-tensor custom-module extra state is explicitly marked unavailable in the small identity summary and remains authoritative in the checkpoint; it does not hash immutable full backbone weights. Completion records retain actual optimizer updates/presentations, separately from declared budgets. Unavailable metadata is `null`, not guessed.
-
-Downstream owners consume these commits before editing shared CLI/engine files. Recipe consumers may reuse root/case/attempt reservations, but own their scientific input/count/checkpoint contracts and execution policy. Continuation consumers must retain the durable cursor/state compatibility checks and focused tests below. Fixed-source launch checks and lifetime coordination remain with their owner; the recorded source/runtime alone is provenance, not a launch authorization or source-lifetime guarantee.
-
-
-## Exact ordinary continuation
-
-Use the [named resumable examples](../configs/operations/README.md) **before binding a fresh root**. COCO sets `data.num_workers: 0` and adds an explicit nonterminal save at100, preserving selection and the500-update budget. HellaSwag's supplied default already uses zero workers but its fixed-presentation loader is fresh-only; the named example sets `training.presentation_stream: null`, declaring an ordinary map-loader sampling policy and fresh scientific identity while preserving prompts/objective/budget. Supplied task defaults remain unchanged. Normal fresh training remains supported with multiple workers, fixed-presentation studies and other custom channels, but their metadata states the concrete unsupported-continuation reason. Their checkpoints do not qualify for this exact route. A previously created unsupported run cannot acquire a cursor by changing its YAML later.
-
-```bash
-# Bind each complete named YAML, then separately continue its durable nonterminal save:
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case
-uv run --locked python train.py --config configs/operations/coco-resumable.yaml --output runs/coco-case \
-  --resume runs/coco-case/attempts/training-0001/step_000100.pt
-
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case
-uv run --locked python train.py --config configs/operations/hellaswag-resumable.yaml --output runs/hellaswag-case \
-  --resume runs/hellaswag-case/attempts/training-0001/step_001000.pt
-```
-
-These are separate explicitly requested operations, not experiment launch receipts. Continuation requires an existing bound case and a finalized parent training attempt (`interrupted`, `failed`, `partial` or `completed`), with an explicitly selected checkpoint from that case. A crashed attempt still marked `running` needs its outcome reconciled before continuation. A checkpoint that already reached max_steps or terminal early-stop patience cannot execute more updates under unchanged settings; an earlier checkpoint remains selectable even if its parent later completed. There is no latest-file search, automatic retry, overwrite or budget extension. Changed scientific settings, source or runtime require a separate case/revision. `train_task(..., resume=path, attempt_id="0002")` provides an explicit fresh attempt name for callers; the public existing `--resume` interface uses the deterministic default name and rejects its reuse.
-
-`ordinary-continuation-v1` checkpoints restore communication weights including memory codec/channel extra state, AdamW, scheduler, scaler, Python/NumPy/Torch/CUDA RNG, best-selection/early-stop state, cumulative presentation/token/channel counters and `ordinary-epoch-batches-v1` data cursor together. The cursor saves one realized epoch's ordered batch indices and the next consumed batch; no tokenized batches or per-update tensor packages are needed. Fresh shuffle draws and short final batches retain the prior PyTorch policy. A restored iterator consumes no extra training RNG draw; after its saved epoch finishes, the next epoch draws its ordinary fresh permutation. COCO's sampled target and HellaSwag's dynamic padding remain unchanged. Gradient accumulation restarts at the next optimizer update, with gradients cleared before processing its microbatches. Completion distinguishes cumulative `optimizer_updates`/`presentations` from `attempt_optimizer_updates`/`attempt_presentations` actually processed by that successful or time-budget attempt.
-
-If a valid durable checkpoint is after update1000 and interruption occurs after unsaved1500, the new attempt restores1000 weights, optimizer, RNG, counters and data cursor and next performs1001. Later metrics and later `best.pt` state in the parent attempt cannot override the explicitly selected checkpoint's training state. Best-selection references preserve the best that existed at that checkpoint, even if a later unsaved prefix published a different best. Invalid selection scores/steps/failure counts and incomplete counters are rejected at load. Newly tagged exact checkpoint state cannot silently pass through the legacy iterator-restart route without the bound `--output` root.
-
-Each existing scheduled save publishes one immutable `checkpoint_<step>.pt` with a durable `.pt.json` digest/size/step/role receipt. `last.pt`, `best.pt` and existing `step_<step>.pt` names are hardlink aliases to that save; this retains checkpoint-time best identity without duplicating tensor bytes. Checkpoint writes use a temporary file, flush/fsync and atomic replacement. The receipt is published before aliases; a failed/partial write or unpublished file cannot qualify for continuation. Earlier attempts/checkpoints/results retain their bytes and path identities. No emergency save or new checkpoint cadence is introduced. Local filesystems must support hardlinks within the attempt directory.
-
-Continuation checks full effective config, source revision/code digest, runtime/packages/lock/numerical policy, device/CUDA topology, ordered data membership/size/cache fingerprint and prompt evidence, model/tokenizer metadata, initial communication identity, custom channel source and optimizer parameter mapping. Pinned immutable large model/data bytes remain under the existing acquisition/receipt contract; continuation does not add a full-backbone or full-dataset hash pass. Missing required continuation identities and unsupported loaders fail rather than claim exactness. The supported loader is the ordinary map-style zero-worker, non-dropping RandomSampler/SequentialSampler route with default global RNG. Multi-worker/prefetch/persistent-worker state, custom samplers/generators and fixed-presentation studies are unsupported. Legacy checkpoints without a valid cursor/receipt are retained but cannot be upgraded implicitly.
-
-Built-in AWGN/identity and the supplied deterministic attenuation example support exact continuation. Another custom channel may opt in with class attribute `supports_exact_continuation = True` only when all mutable runtime state is in `state_dict` (including JSON-compatible `get_extra_state`/`set_extra_state`) and randomness comes from the captured global generators. Private generators, external simulator state and mutable hidden attributes require their own complete supported state representation; absent the explicit declaration, continuation is rejected. Validation and feature observations restore communication/channel state, RNG and model mode even on failure; they do not advance the training simulator. Weight-only initialization/phase transfer remains a separate API and cannot be combined with exact continuation.
-
-CPU tiny interrupted/uninterrupted tests cover both tasks, data cycles/short tails/accumulation, isolated validation/features, custom channel extra state and NumPy randomness, the actual1000/1500 scenario, checkpoint-time best ancestry and failed saves/mismatch rejection. These establish the supported local fixture contract. They do not establish GPU performance, cross-environment bitwise equality, full-weight scientific quality or historical checkpoint compatibility.
-
-
-A partial continuation becomes the current `training.json` attempt for explicit supplemental checkpoint selection. A previous eligible default remains recorded in `checkpoint.json` and derives its own training ancestry, so it remains evaluable even when the current attempt is partial. Default and supplemental requests retain exact paths/steps/digests; they never substitute a parent filename for a child's checkpoint.
-
-Continuation saves `publication.json` with the exact proposed root records before publication. If publication fails after scientific completion, that completed/partial training outcome and checkpoint bytes remain truthful; the publication plan remains `pending`. Default evaluation derives ancestry from its verified target and remains consistent across the split-record window. After diagnosing the failure, an explicitly requested `publish_continuation(Path("runs/hellaswag-case/attempts/training-0002"))` finishes the pending small-record writes without training. It requires the same source/runtime and refuses a superseded plan. Reusing a training attempt never retries it implicitly. An abrupt process crash may also leave the exclusive `.training-update` reservation: verify the worker is stopped and reconcile that reservation before a later explicit publication/continuation call.
+Training, evaluation and collection each preserve their own completion/failure records. Missing scoring or copy evidence cannot erase completed training. A failed or interrupted attempt remains retained. Publication/reconciliation of an already completed continuation preserves its previous checkpoint/run ancestry without repeating optimizer work.

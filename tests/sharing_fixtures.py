@@ -3,8 +3,8 @@ from model_helpers import tiny_backbone
 from jscc.models.channel import AWGNChannel
 from jscc.models.codec import Codec
 from jscc.models.split_model import SplitModel
-from jscc.sharing_protocol import batch_view
-from jscc.sharing_schedule import SharingPlan
+from jscc.shared_inputs import batch_view
+from jscc.checkpoint_readers import SharingPlan
 
 
 def sharing_model(cell='D-LN'):

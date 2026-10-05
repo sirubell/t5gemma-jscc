@@ -1,4 +1,3 @@
-# Explicit enc_l9 architecture comparison; preparing this design launches no runs.
 model:
   name: google/t5gemma-2-1b-1b
   revision: dd0a2683227859151b1730ca3a63087df5b5f39b

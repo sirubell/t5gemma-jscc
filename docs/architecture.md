@@ -1,6 +1,7 @@
 # Architecture and experiment semantics
 
-This describes the current implementation. Both task entry points and common configuration fields are in the [README](../README.md).
+Current public calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). Earlier CLI snippets below describe their frozen-source records and are not current commands.
+This describes the current implementation. The ordinary/shared task routes and common configuration fields are in the [README](../README.md).
 
 ## Split model
 
@@ -30,7 +31,7 @@ At D1152/B512, main-codec parameter counts including biases are 14,473,088 for t
 
 ## Shared baseline
 
-COCO and HellaSwag reference `configs/model.yaml` for the same backbone revision, encoder-layer-9 split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
+COCO and HellaSwag reference `configs/models/default.yaml` for the same backbone revision, encoder-layer-9 split, codec architecture and channel defaults. This also applies to paired CPU and H200 smoke recipes; device/dtype vary by execution environment, not by task. Task YAMLs own data, training and evaluation. The loader composes them once and saves the complete result in each run/checkpoint.
 
 | Component | Baseline |
 |---|---|
@@ -95,7 +96,7 @@ New HellaSwag runs reserve num_validation rows from the official training split 
 
 best.pt is replaced only when the monitored metric improves by the configured relative min_delta. It need not be the checkpoint with the smallest floating-point loss across every validation. last.pt is updated after validation, with optional extra save_steps.
 
-A checkpoint includes hidden codec, optional receiver-memory codec, channel, optimizer, scheduler, scaler, configuration and data IDs; the frozen backbone is reconstructed from its pinned identity. The supported recorded `--output` ordinary route, bound with `data.num_workers: 0`, restores complete captured RNG, counters, checkpoint-time selection state and data cursor along with training state. See [exact ordinary continuation](ordinary-runs.md#exact-ordinary-continuation) for loader/channel compatibility and durable receipt requirements. Current actual training requires `--output`; checks remain output-free. Historical engine directories retain iterator restart behavior; unsupported or incompatible exact continuation fails explicitly.
+A checkpoint includes hidden codec, optional receiver-memory codec, channel, optimizer, scheduler, scaler, configuration and data IDs; the frozen backbone is reconstructed from its pinned identity. The supported recorded ordinary route, bound through explicit YAML `execution.root` and `execution.attempt` with `data.num_workers: 0`, restores complete captured RNG, counters, checkpoint-time selection state and data cursor along with training state. See [exact ordinary continuation](ordinary-runs.md#exact-ordinary-continuation) for loader/channel compatibility and durable receipt requirements. Current actual training uses `experiment.py --config REQUEST` with `operation: train` and explicit root/attempt; `operation: check` does not train. Historical engine directories retain iterator restart behavior; unsupported or incompatible exact continuation fails explicitly.
 
 Changing current YAML defaults does not alter historical checkpoints. Encoder checkpoints retain their saved design. Old decoder checkpoints requiring receiver memory but lacking a memory codec cannot load into the corrected boundary; evaluate them with archived historical source for diagnostics, or train a new corrected checkpoint. Do not initialize a random memory codec and report it as the old model.
 
@@ -144,13 +145,15 @@ HellaSwag harness adapters call the backbone directly and do not yet scope this
 policy. An `auto` wrapper preserves any explicitly supplied outer SDPA context,
 which lets diagnostics force math-only execution without changing dispatch globally.
 
-### Explicit functional phase reset
+### Historical explicit functional phase reset
+
+> **Frozen-source-only interface.** The following planner/command example belongs to its original source and saved phase-transfer records; it is not a current public operation.
 
 The HellaSwag two-stage planner can opt into `--include-reset-control`, adding fresh functional E1 and weight-only child E to A/B/C/D. E1 uses the local-stage recipe with functional execution; E uses C's phase-two recipe. The E command requires its exact terminal parent checkpoint and `--parent-sha256`. Functional-parent transfer validates complete native functional receipts, current source, saved recipe, data IDs, exact presentation boundary and checkpoint bytes. It creates fresh optimizer/scheduler/scaler state rather than resuming training. Historical B-local transfer stays separate and unchanged. CPU lifecycle tests establish these semantics; full-weight GPU acceptance is recorded separately.
 
 ## Code responsibilities
 
-`losses.py` contains numerical KL/reconstruction reductions. `training_objectives.py` owns the shared batch-statistics type, explicit/legacy objective weighting, and effective-batch aggregation used by functional and local reconstruction training. `training.py` owns teacher/student forwards, validation, optimizer-loop orchestration and checkpoint lifecycle. `local_reconstruction.py` owns cached reconstruction and phase-parent validation. This separation does not change objective formulas, stream masks, reduction order or schedules.
+`losses.py` contains numerical KL/reconstruction reductions. `training_objectives.py` owns the shared batch-statistics type, explicit/legacy objective weighting, and effective-batch aggregation used by functional and local reconstruction training. `training.py` owns teacher/student forwards, validation, optimizer-loop orchestration and checkpoint lifecycle. `reconstruction.py` owns clean target capture and cached local reconstruction batch values; `shared_training.py` owns the active canonical shared updater. Retained ordinary weight-only transfer interpretation uses `training.py` with `checkpoint_readers.validate_phase_transfer` and its functional-parent validator. That internal retained helper is separate from exact ordinary continuation and does not add a public phase-transfer operation. This separation does not change objective formulas, stream masks, reduction order or schedules.
 
 The existing public objective helpers remain re-exported from `training.py` for historical scripts and top-level instrumentation; new shared-objective code should import from `training_objectives.py`. Functional training still invokes its imported aggregate/scaled-loss names so existing instrumentation can wrap those entry points. Private globals inside moved helpers belong to the objective module.
 
@@ -188,7 +191,11 @@ observations must match it in checkpoint `metadata.numerical_policy` and request
 Objective requests and HellaSwag evaluation identities include the compute
 policy. No task-quality or GPU-fit improvement follows from selecting it.
 
-## Original13 universal codec experiment
+## Historical original13 universal codec experiment
+
+> **Frozen-source-only records.** This section preserves the original cohort, objectives and stream meanings under their original source identity. Its runner is not a current execution interface.
+
+Current shared COCO/HellaSwag authoring uses `experiment.py --config REQUEST` and the [shared recipe contract](experiment-recipes.md): canonical direct-affine/native arithmetic, batch 16/accumulation 1, reconstruction then additive reconstruction+KL, and one optimizer/LR reset. Effective YAML settings select current cases; the historical cohort below is not a current fixed-validator requirement.
 
 The opt-in original13 runner shares one direct-affine codec body across six
 encoder hidden boundaries, seven decoder hidden boundaries and receiver-memory
@@ -201,3 +208,13 @@ hidden and memory by0.05 each, with independent valid-sample denominators.
 Functional training adds valid-target-token KL with weight1.0. The durable update
 records keep each stream's raw/weighted value and numerator/denominator;
 uncomputed reconstruction KL and unneeded encoder memory stay unavailable.
+
+## Shared COCO within the current envelope
+
+Shared COCO uses the same canonical direct-affine codec and ordered native16 site lifecycle as shared HellaSwag. The two ordinary learners retain their own cursor, channel and best-selection behavior. COCO acquisition binds local Arrow, Karpathy membership, embedded or external image bytes, processor/tokenizer assets, demo/reference order and installed CIDEr/PTB code and jar. Registration and preparation reuse those checksum-bound inputs; startup does not acquire data from the hub.
+
+`CocoCachedData` exposes indexed complete views. An explicit caption policy and seed choose one nonempty reference per image presentation; the presentation index, actual choice, pixels, expanded source tokens/mask, target validity and demos all contribute to the view identity. The native processor owns image expansion and crops. The shared view/site cursor restores from durable state, including phase/reset, optimizer/LR/scaler, RNG and exposure. COCO uses a distinct state protocol; old HellaSwag receipt meanings remain unchanged.
+
+Clean targets are captured through the native multimodal backbone after image scatter, under frozen eval/no-grad bypass, and execution unwinds at the selected boundary before unused receiver computation. Encoder hidden and memory reductions use source validity; decoder hidden uses target validity. Decoder transmitter layers keep clean memory, while every receiver layer uses reconstructed memory from the canonical codec. Both hidden and memory payloads count. Temporary hooks and activations clear even on failure.
+
+Caption panels call ordinary greedy cached generation, caption cleaning and whole-panel PTB/CIDEr with ordered image/reference evidence. COCO controls are generation batch size and max new tokens; HellaSwag retains candidate batch and fewshot policy. Panel receipts distinguish actual image denominators, allocated/mask-valid/EOS-aware generation-valid payloads and unavailable semantic counts. Scoring restores training weights, gradients, routes, counters and RNG; the training observation owner also restores optimizer, scheduler, scaler and exposure. Full-weight fit, task quality and GPU qualification remain separate from tiny CPU correctness.

@@ -23,14 +23,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jscc.activation_replay import canonical_digest, capture_encoder_microbatch
 from jscc.config import load_config
-from jscc.local_reconstruction import local_batch_values, paired_snr
+from jscc.reconstruction import local_batch_values, paired_snr
 from jscc.losses import reconstruction_loss_stats
 from jscc.models.channel import AWGNChannel
 from jscc.models.split_model import stack_module
 from jscc.presentation import training_source_digest
 from jscc.runtime import (autocast_for, configure_training_determinism,
                           prepare_trainable_parameters, seed_everything, source_state)
-from scripts.hellaswag_two_stage import check_recipe
+from jscc.qualification import check_reconstruction_recipe as check_recipe
 
 
 # Declared before any target data or result is observed. Activation capture uses
@@ -39,7 +39,7 @@ from scripts.hellaswag_two_stage import check_recipe
 TOLERANCES = {"activation_atol": 0.0, "activation_rtol": 0.0,
               "nmse_atol": 1e-5, "nmse_rtol": 1e-4,
               "gradient_atol": 1e-5, "gradient_rtol": 1e-3}
-BASELINE_PATH = Path(__file__).resolve().parents[1] / "configs/tasks/hellaswag.yaml"
+BASELINE_PATH = Path(__file__).resolve().parents[1] / "configs/experiments/ordinary/hellaswag.yaml"
 SCIENTIFIC_FIELDS = ("task", "protocol", "seed", "model", "split", "codec",
                      "channel", "data", "evaluation")
 ALLOWED_TRAINING_CHANGES = {"max_steps", "schedule_steps", "eval_every", "min_steps",

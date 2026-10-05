@@ -1,24 +1,31 @@
 # Compact result collection
 
-Use one model-free local action for an ordinary COCO/HellaSwag experiment root
-or a public recipe root (including singleton, multiple cases and retained
-interrupted attempts):
+Use one model-free local `operation: collect` request for an ordinary COCO/HellaSwag root or a shared root, including multiple cases and interrupted attempts. Copy [collect.yaml](../configs/requests/collect.yaml), set the recorded workflow/root and fresh snapshot/destination paths, then invoke:
 
 ```bash
-uv run --locked python scripts/collect_results.py --run runs/coco-case \
-  --snapshot collection-snapshots/coco-01 --output collected/coco-01
-uv run --locked python scripts/collect_results.py --run runs/hellaswag-case \
-  --snapshot collection-snapshots/hellaswag-01 --output collected/hellaswag-01
-uv run --locked python scripts/collect_results.py --run runs/comparison \
-  --snapshot collection-snapshots/comparison-01 --output collected/comparison-01
+uv run --locked python experiment.py --config /path/to/collection-request.yaml
 ```
+
+```yaml
+schema: jscc-experiment-v1
+workflow: shared
+operation: collect
+execution:
+  root: /absolute/recorded/comparison
+  collection:
+    snapshot: /absolute/new/snapshots/paired-01
+    destination: /absolute/results/paired-01
+    select: []
+```
+
+Choose `workflow: ordinary` for ordinary roots. Declaring-file-relative paths and strict fields follow [operations](operations-workflow.md).
 
 Snapshot and destination must be outside the scientific source root and separate
 from each other. A snapshot is exclusive and binds the selected bytes. Repeat
 the exact command to retry that snapshot. Use new snapshot/output names to collect
 new results or newly grown scalar streams. A separate authorized mount/staging
-operation may expose remote bytes as `--run`; this action itself makes no network
-connection. `--source-uri ssh://host/absolute/run` records their exact retrieval
+operation may expose remote bytes as `execution.root`; this action itself makes no network
+connection. `execution.collection.source_uri: ssh://host/absolute/run` records their exact retrieval
 root without connecting to it.
 
 Default output contains `exports/results.jsonl` (actual final, supplemental and
@@ -51,13 +58,14 @@ exact retrieval references and observed byte sizes, with recorded hashes when
 available, explicitly marked as unverified metadata. There is no byte ceiling,
 bulk default, deletion or expiry policy. Select additional files explicitly:
 
-```bash
-uv run --locked python scripts/collect_results.py --run runs/comparison \
-  --snapshot collection-snapshots/paired-01 --output collected/paired-01 \
-  --select cases/width-32-ratio-50/evaluations/evaluation-0001/panels/enc_l2_no_noise/items.jsonl
+Set `execution.collection.select` to exact source-relative files recorded in the root, for example:
+
+```yaml
+select:
+  - cases/RECORDED_CASE/evaluations/RECORDED_ATTEMPT/panels/RECORDED_PANEL/items.jsonl
 ```
 
-`--select` takes source-relative files, not directory patterns. If a selected
+`execution.collection.select` takes source-relative files, not directory patterns. If a selected
 file is absent when binding, its unknown bytes/hash remain missing; acquire it
 and use a new snapshot. If a known selected file disappears later, retry may
 restore/copy the original exact bytes. A source with changed bytes fails the
@@ -90,3 +98,7 @@ Python consumers can call `prepare_snapshot(root, snapshot, selected=(),
 source_uri=None)`, `collect_snapshot(snapshot, destination)`, or the combined
 `collect_results(root, destination, snapshot=..., selected=(), source_uri=None)`
 from `jscc.result_collection`. None loads models or changes scientific records.
+
+## Isolated panel evidence
+
+Default companion collection includes panel plans, aggregate/terminal records, worker lifecycle records and their referenced JSON evidence below `worker-attempts`. Exports retain each ordered aggregate row and its exact retry/checkpoint/source identity without averaging task metrics. Linked parent snapshots and missing evidence remain visible. Large captions, per-item predictions and tensors remain referenced unless explicitly selected. A collection pass verifies its selected artifacts; its copy status does not establish scientific final eligibility.

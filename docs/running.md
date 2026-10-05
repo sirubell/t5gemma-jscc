@@ -1,5 +1,6 @@
 # Execution environments
 
+Current public calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md).
 Run the same project and YAML entry points on a workstation or a scheduled GPU server. Connection details belong to each user's environment.
 
 ## Personal configuration
@@ -24,8 +25,8 @@ uv sync --locked --extra dev
 uv run --locked --extra dev pyright
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python train.py --config configs/tasks/coco.yaml --check
-uv run --locked python train.py --config configs/tasks/hellaswag.yaml --check
+uv run --locked python experiment.py --config configs/experiments/ordinary/coco.yaml
+uv run --locked python experiment.py --config configs/experiments/ordinary/hellaswag.yaml
 ```
 
 The project pins Python dependencies in uv.lock. Each machine creates its own .venv; do not copy an environment between machines. Prepare model access and Hugging Face datasets before offline jobs. Use a login shell if a remote non-interactive command lacks uv or Slurm in PATH.
@@ -51,15 +52,14 @@ When CUDA is available, inspect the selected GPU and BF16 support:
 uv run --locked python -c "import torch; print(torch.cuda.get_device_name(), torch.cuda.is_bf16_supported())"
 ```
 
-The *_h200.yaml smoke filenames record where those CUDA/bfloat16 recipes were validated. Their contents do not test for an H200 or request Slurm resources. They can be used for an initial small check on another compatible CUDA GPU:
+The *_h200.yaml smoke filenames retain the bounded CUDA/BF16 science used for historical checks. Their current requests select `operation: check`; they do not request Slurm resources or launch training:
 
 ```bash
-uv run --locked python train.py --config configs/smoke/coco_h200.yaml --output runs/coco-smoke
-# Evaluate the run directory printed above.
-uv run --locked python evaluate.py --run runs/coco-smoke
-uv run --locked python train.py --config configs/smoke/hellaswag_h200.yaml --output runs/hellaswag-smoke
-uv run --locked python evaluate.py --run runs/hellaswag-smoke
+uv run --locked python experiment.py --config configs/smoke/coco_h200.yaml
+uv run --locked python experiment.py --config configs/smoke/hellaswag_h200.yaml
 ```
+
+For an authorized target smoke, copy the complete request, select `operation: train`, and set a fresh explicit root and attempt. Evaluate that exact recorded root with a separate `operation: evaluate` request and new attempt. Check examples and historical smoke observations do not qualify the current runtime.
 
 Run sequentially on one GPU. These recipes already use batch size 1 for training/evaluation, but memory fit still depends on available VRAM, the model build and the selected split. The historical enc_fn / external LayerNorm-both recipe passed full-weight training/checkpoint/evaluation smoke on a Linux RTX 5090 using PyTorch 2.10.0+cu128 and BF16. That observation does not establish acceptance of the current enc_l9 defaults or the new two-stage paths on a rebuilt workstation. At batch 1, recorded training peak allocated memory was about 4.80 GiB for COCO and 4.34 GiB for HellaSwag. These are PyTorch training peaks, not total driver-reserved memory or a guarantee for larger batches/other splits.
 
@@ -75,13 +75,13 @@ Replace the placeholders using your local environment notes:
 
 ```bash
 mkdir -p runs/slurm
-sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS --job-name=coco --output=runs/slurm/%x-%j.out --error=runs/slurm/%x-%j.err scripts/slurm_job.sh configs/tasks/coco.yaml
-sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS --job-name=hellaswag --output=runs/slurm/%x-%j.out --error=runs/slurm/%x-%j.err scripts/slurm_job.sh configs/tasks/hellaswag.yaml
+sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS --job-name=coco --output=runs/slurm/%x-%j.out --error=runs/slurm/%x-%j.err scripts/slurm_job.sh /absolute/approved/coco-request.yaml
+sbatch --partition=YOUR_PARTITION --account=YOUR_ACCOUNT --qos=YOUR_QOS --job-name=hellaswag --output=runs/slurm/%x-%j.out --error=runs/slurm/%x-%j.err scripts/slurm_job.sh /absolute/approved/hellaswag-request.yaml
 ```
 
-The script uses uv run --locked --no-sync. Sync dependencies before submitting concurrent jobs. It expects NVIDIA/CUDA and Java, prints environment information, trains, and evaluates the returned run only when training succeeds. Its offline flags require existing model/data caches.
+The script uses `uv run --locked --no-sync python experiment.py --config REQUEST` for each supplied request in order and stops on a nonzero exit. Prepare the environment before submitting concurrent jobs. It sets offline cache flags and requires existing model/data assets. It does not infer evaluation after training; supply a separate evaluation request for the exact bound root and a new attempt when the approved plan requires it.
 
-The same wrapper accepts either H200 smoke YAML in configs/smoke/. Override the Slurm time limit for small checks; a smoke YAML's training time budget does not include the subsequent evaluation. For multi-experiment plans with separate training and evaluation allocations, use the [study workflow](studies.md) and scripts/slurm_study.sh.
+The same wrapper accepts copied smoke requests with explicit operations. The supplied check examples perform checks only; training and evaluation have separate declared operations and budgets. For multi-experiment plans with separate training and evaluation allocations, use the [study workflow](studies.md) and scripts/slurm_study.sh.
 
 ## Read results
 
@@ -91,7 +91,7 @@ sacct -j JOBID --format=JobID,State,Elapsed,MaxRSS,AllocTRES,ExitCode
 scontrol show job JOBID
 ```
 
-Inspect the configured stdout/stderr paths. The Run line identifies the artifact directory. Each original config argument has its own ordinal, starting at `0001`: its logical root is `runs/jobs/JOB_ID/training-0001` and its success link is `runs/jobs/JOB_ID/links/0001.run.txt`. Identical arguments and duplicate basenames remain distinct. The adapter requires a job identifier, preflights all selected roots/links, and creates only parent infrastructure; training reserves the final roots. Same-job replay rejects used roots/links, including retained failed roots. Links are written only after training returns successfully and do not prove scientific budget completion. Evaluation uses the returned logical root. MaxRSS measures host RAM, not GPU VRAM; GPU allocation is reported by the training metric peak_memory_gib or nvidia-smi inside an allocation.
+Inspect the configured stdout/stderr paths and the request's exact root/attempt. The wrapper does not invent job-number roots or success links. A supplied `execution.success_link` is published only after that operation returns and cannot substitute for scientific completion. Optional study transport records its training link and generates separate evaluation attempts; see [studies](studies.md). Retained failed roots and occupied attempt/link paths require explicit fresh identities, not replay over existing outputs. MaxRSS measures host RAM, not GPU VRAM; GPU allocation is reported by training telemetry or nvidia-smi inside an allocation.
 
 ## Time limits and recovery
 
@@ -99,7 +99,7 @@ Slurm time limits and YAML training.max_minutes are separate. The main task YAML
 
 Forced scheduler termination does not save the current step or proceed to evaluation. last.pt records the last completed save, and completion.json is only written when the Python training loop returns normally.
 
-Changing a script affects future submissions, not running allocations. Whether users can extend a running job is site-dependent. If a future experiment needs recovery, inspect the actual checkpoint step before using the README's resume commands. Do not infer that a timeout requires an automatic continuation.
+Changing a script affects future submissions, not running allocations. Whether users can extend a running job is site-dependent. If a future experiment needs recovery, inspect the actual checkpoint step before authoring a separate `operation: resume` request with the exact durable checkpoint/role/step/parent/size/hash in [operations](operations-workflow.md). Do not infer that a timeout requires an automatic continuation.
 
 ## Performance work
 

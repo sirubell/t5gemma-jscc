@@ -94,7 +94,7 @@ class ResolvedDecoderSite:
 
 
 def resolve_original13_site(base, site_id, model_revision):
-    from ..encoder_stages_plan import ORIGINAL13_SITES
+    from ..checkpoint_readers import ORIGINAL13_SITES
     if site_id not in ORIGINAL13_SITES:
         raise ValueError("site is outside the approved original13 cohort")
     return resolve_training_site(base, site_id, model_revision)

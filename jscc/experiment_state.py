@@ -114,11 +114,11 @@ def _validate(payload):
     count = metadata["completed_updates"]
     phase_count = count
     if payload['kind'] == 'recipe_v1':
-        from .original13_state import validate_recipe_state
+        from .shared_state import validate_recipe_state
         validate_recipe_state(payload)
         phase_count = payload['stream']['phase_local_completed']
     if payload['kind'] == 'original13_v1':
-        from .encoder_stages_plan import validate_original13_state
+        from .checkpoint_readers import validate_original13_state
         validate_original13_state(payload)
         phase_count = payload['stream']['phase_local_completed']
     if metadata.get('protocol_identity') == 'encoder-original6-native16-stages-v1':
@@ -126,7 +126,7 @@ def _validate(payload):
     if payload['kind'] in {'original13_v1', 'recipe_v1'}:
         pass  # Validated by the original13 trust-boundary validator above.
     elif payload["kind"] == "shared_encoder_v2" or "sharing" in metadata:
-        from .sharing_state import validate_sharing_state
+        from .checkpoint_readers import validate_sharing_state
         validate_sharing_state(payload)
     else:
         if type(count) is not int or not 0 <= count <= 400:

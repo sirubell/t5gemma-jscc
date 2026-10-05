@@ -1,5 +1,14 @@
 # Native16 long encoder-sharing validation
 
+> **Historical contract — frozen-source-only.** The protocol, module names and
+> commands below preserve the original source and saved artifact identities.
+> They are not current execution interfaces or authorization to execute,
+> recover historical fronts or renew qualification.
+
+For current authoring, use `uv run --locked python experiment.py --config REQUEST`;
+see [experiment recipes](experiment-recipes.md) and
+[operation fields and effect boundaries](operations-workflow.md).
+
 This ticket 21 study validates three encoder positions before the separately
 planned all-split expansion. It changes neither the shared default model nor
 COCO, decoder or memory behavior. Use `scripts/sharing_long_study.py`, with an
@@ -64,6 +73,8 @@ is no best-checkpoint fallback or automatic retry. This makes 42 codec panels pl
 reference uses the same source, scorer and runtime; a 256-row baseline or a
 reference from a different runtime cannot substitute.
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
 Prepare real batches with the existing CPU-only script, supplying the audited
 full-validation JSON with `--final-task FINAL_TASK.json --final-task-sha256 SHA256`.
 The script validates and retains that exact request as `final_task_request`;
@@ -73,6 +84,8 @@ long task through `jscc.sharing_binding.bind_production`, using the explicit
 `K+0.1R-native-effective16-fresh-v1` recipe. The raw input manifest retains its
 preparation provenance; the bound learner protocol declares the changed cadence.
 The binding must include the immutable `final_task_request` reference.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --locked --no-sync python scripts/sharing_long_study.py preview --prepared PREPARED/prepared.json

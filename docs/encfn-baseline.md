@@ -1,5 +1,14 @@
 # Versioned encoder-final baseline capability
 
+> **Historical contract — frozen-source-only.** The protocol, module names and
+> commands below preserve the original source and saved artifact identities.
+> They are not current execution interfaces or authorization to execute,
+> recover historical fronts or renew qualification.
+
+For current authoring, use `uv run --locked python experiment.py --config REQUEST`;
+see [experiment recipes](experiment-recipes.md) and
+[operation fields and effect boundaries](operations-workflow.md).
+
 This is an opt-in software capability. It does not change the adopted residual
 enc_l9 baseline, authorize a scientific run, or establish numerical acceptance
 on full-weight BF16 hardware. COCO and HellaSwag retain their ordinary
@@ -14,6 +23,10 @@ the student suffix stays in the autograd graph.
 
 ## Preview and prepared execution
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
+
 ```bash
 uv run --offline --no-sync python scripts/encfn_baseline.py
 uv run --offline --no-sync python scripts/encfn_baseline.py --output /tmp/baseline-plan.json
@@ -26,6 +39,8 @@ or constitute owner approval. The YAML `configs/studies/encfn_baseline_v2.yaml`
 is a protocol description, not an input to the legacy study expander.
 
 A later accepted package can execute exactly one prepared segment:
+
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
 
 ```bash
 uv run --offline --no-sync python scripts/encfn_baseline.py \
@@ -70,6 +85,8 @@ conditions and actual complete item/source-family counts. There is no automatic
 conditional launch or automatic failed-job retry.
 
 ## APIs and artifacts
+
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
 
 - `models.split_model.resolve_encoder_site` resolves post-final-norm `enc_fn`
   separately from raw last-block output. `SplitModel.at_site` moves one insertion
@@ -148,6 +165,8 @@ memory remain runtime acceptance requirements.
 After all four explicitly named initial arms complete, create comparisons and
 render saved evidence without model loading:
 
+> **Frozen-source-only commands.** The following examples belong to the original recorded source; they are not commands for the current checkout.
+
 ```bash
 uv run --offline --no-sync python scripts/encfn_baseline.py --comparisons /campaign
 uv run --offline --no-sync python scripts/render_experiment_report.py \
@@ -162,6 +181,8 @@ The baseline task grid remains distinct from separately acquired vanilla bypass
 observations supported by the ordinary task evaluation/reporting workflow.
 
 ## Verification boundaries
+
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
 
 Focused tests exercise tiny real Transformers routes, disk replay parity,
 online gradients and unequal microbatch reductions, finite schedules, corrupt

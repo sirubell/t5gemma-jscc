@@ -1,19 +1,41 @@
-# Protocol description for the versioned encoder-final baseline, not a CLI or generic-study input.
 schema: baseline-plan-v2
 site: enc_fn
 bottleneck_dim: 512
 seed: 0
 cells:
-  D-none: {architecture: direct_affine, layernorm: none}
-  D-LN: {architecture: direct_outer_ln, layernorm: both}
-  R-none: {architecture: residual_mlp, layernorm: none}
-  R-LN: {architecture: residual_mlp, layernorm: both}
+  D-none:
+    architecture: direct_affine
+    layernorm: none
+  D-LN:
+    architecture: direct_outer_ln
+    layernorm: both
+  R-none:
+    architecture: residual_mlp
+    layernorm: none
+  R-LN:
+    architecture: residual_mlp
+    layernorm: both
 updates_per_cell: 400
 effective_batch: 64
-objective: {K: 1.0, R: 0.1}
-conditions: [no_noise, -6, 0, 6, 12, 18]
+objective:
+  K: 1.0
+  R: 0.1
+conditions:
+- no_noise
+- -6
+- 0
+- 6
+- 12
+- 18
 objective_items: 128
 development_items: 256
-checkpoint_steps: [100, 200, 300, 400]
-task_steps: [0, 200, 400]
+checkpoint_steps:
+- 100
+- 200
+- 300
+- 400
+task_steps:
+- 0
+- 200
+- 400
 conditional_strategies: owner_decision_required

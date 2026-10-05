@@ -2,6 +2,7 @@
 import copy
 import math
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -57,19 +58,38 @@ def resolve_codec_configs(codec):
     return main, resolved_memory
 
 
-def load_config(path):
+def load_config(path, *, validate=True) -> dict[str, Any]:
     path = Path(path).resolve()
-    config = yaml.safe_load(path.read_text())
+    from .experiment import strict_yaml
+    config = strict_yaml(path)
+    request = isinstance(config, dict) and config.get("schema") == "jscc-experiment-v1"
+    if request:
+        if config.get("workflow") != "ordinary":
+            raise ValueError("ordinary config requires ordinary workflow")
+        from .experiment import ordinary_fields
+        config = copy.deepcopy(config["experiment"])
+        ordinary_fields(config)
+    width = None
+    if request and "model_config" in config and set(config.get("codec", {})) == {"bottleneck_dim"}:
+        width = config.pop("codec")["bottleneck_dim"]
+        if type(width) is not int or width < 1:
+            raise ValueError("codec.bottleneck_dim requires a positive integer")
     model_file = config.pop("model_config", None)
     if model_file is not None:
         model_path = (path.parent / Path(model_file).expanduser()).resolve()
-        design = yaml.safe_load(model_path.read_text())
+        design = strict_yaml(model_path)
         sections = {"model", "split", "codec", "channel"}
         if set(design) != sections:
             raise ValueError("model_config must contain model, split, codec and channel sections only")
         if sections & config.keys():
             raise ValueError("Put model/split/codec/channel settings in model_config, not in the task YAML")
+        if request:
+            from .experiment import fields, FIELDS
+            for section in sections:
+                fields(design[section], FIELDS[section], section)
         config.update(design)
+        if width is not None:
+            config["codec"]["bottleneck_dim"] = width
     runtime = config.pop("runtime", {})
     if set(runtime) - {"device", "dtype", "sdpa_backend_policy", "numerical_policy"}:
         raise ValueError("runtime overrides are limited to device, dtype, sdpa_backend_policy and numerical_policy")
@@ -79,7 +99,11 @@ def load_config(path):
         value = config[section].get(key)
         if value:
             config[section][key] = str((path.parent / Path(value).expanduser()).resolve())
-    validate_config(config)
+    if request:
+        from .experiment import ordinary_fields
+        ordinary_fields(config)
+    if validate:
+        validate_config(config)
     return config
 
 

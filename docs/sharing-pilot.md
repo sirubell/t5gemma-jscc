@@ -1,5 +1,14 @@
 # Finite shared-codec pilot
 
+> **Historical contract — frozen-source-only.** The protocol, module names and
+> commands below preserve the original source and saved artifact identities.
+> They are not current execution interfaces or authorization to execute,
+> recover historical fronts or renew qualification.
+
+For current authoring, use `uv run --locked python experiment.py --config REQUEST`;
+see [experiment recipes](experiment-recipes.md) and
+[operation fields and effect boundaries](operations-workflow.md).
+
 The explicit `D-N` candidate uses the retained `direct_affine` implementation:
 one biased Linear from D1152 to B and one biased Linear from B to D1152,
 with identity outer boundaries, no residual blocks, no FiLM and no dropout.
@@ -28,6 +37,8 @@ post-freeze geometry observations. Layer14 remains excluded until trained-state
 freeze. A full10,042-document evaluation is separate work, not the development
 panel or evidence of convergence.
 
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
+
 `jscc.sharing_binding.bind_production` creates a fresh immutable package from
 the reviewed `sharing-production-inputs-v1` input manifest. The chosen model
 snapshot path, width, recipe/pairing/decision identities and cap must be explicit.
@@ -36,6 +47,8 @@ external GNU timeout command; `--controller` additionally requires exact-source
 qualification/measurement, an existing task-7 reservation, live exclusive lease
 and idle admission. Production contracts and owner proposals must bind the
 same `finish_before_epoch`; a late allocation is rejected before its claim.
+
+> **Frozen-source-only contract.** This section records historical behavior and API names under their original source identity.
 
 `scripts/sharing_qualification.py` supplies the separate bounded D-N diagnostic.
 Its `--preflight` mode is CPU-only and its `--preview` mode launches nothing.

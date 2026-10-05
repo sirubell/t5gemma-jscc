@@ -1,0 +1,8 @@
+schema: jscc-experiment-v1
+workflow: shared
+operation: collect
+execution:
+  root: /explicit/bound/run
+  collection:
+    snapshot: /explicit/new/snapshot
+    destination: /explicit/results-copy

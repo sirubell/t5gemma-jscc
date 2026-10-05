@@ -1,0 +1,77 @@
+# Shared COCO example; check resolves only and does not authorize training.
+schema: jscc-experiment-v1
+workflow: shared
+operation: check
+execution:
+  resolution:
+    model_config: /explicit/local/pinned-backbone/config.json
+experiment:
+  task_config: coco_base.yaml
+  locations:
+  - dec_l3
+  - enc_l2
+  - enc_emb
+  updates_per_location: 80
+  widths:
+  - 32
+  reconstruction_percentages:
+  - 50
+  overrides:
+    training:
+      batch_size: 16
+      gradient_accumulation: 1
+      lr: 0.001
+      weight_decay: 0.02
+      warmup_ratio: 0.1
+      min_lr_ratio: 0.2
+      betas:
+      - 0.8
+      - 0.95
+      eps: 1.0e-07
+    data:
+      num_train: 12
+      caption_policy: indexed-reference-v1
+      caption_seed: 23
+      selection_seed: 23
+  objectives:
+    encoder:
+      hidden: 0.1
+      memory: 0.0
+    decoder:
+      hidden: 0.05
+      memory: 0.05
+    functional_kl: 1.0
+  save:
+    reconstruction_fractions:
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1
+    functional_fractions:
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1
+    functional_observation_fraction: 0.5
+  observation:
+    items: 16
+    sites:
+    - enc_l9
+    - enc_fn
+    - dec_l0
+    - dec_l24
+    conditions:
+    - no_noise
+    - -6
+  evaluation:
+    items: 2000
+    conditions:
+    - no_noise
+    - -6
+    supplemental_conditions:
+    - 0
+    - 6
+    - 18
+    batch_size: 16
+    max_new_tokens: 64
+    scoring_policy: coco-cider-v1

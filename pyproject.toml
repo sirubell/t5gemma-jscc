@@ -32,4 +32,4 @@ extend-exclude = ["docs/local", "._*"]
 pythonVersion = "3.13"
 venvPath = "."
 venv = ".venv"
-include = ["jscc", "examples", "tests", "train.py", "evaluate.py", "study.py"]
+include = ["jscc", "examples", "tests", "experiment.py"]

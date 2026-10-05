@@ -1,4 +1,3 @@
-# Explicit enc_fn direct-plus-outer-LayerNorm design; preparing this design launches no runs.
 model:
   name: google/t5gemma-2-1b-1b
   revision: dd0a2683227859151b1730ca3a63087df5b5f39b
@@ -9,7 +8,6 @@ split:
   where: after_final_norm
 codec:
   architecture: direct_outer_ln
-  # hidden_dim and activation are retained metadata; direct affine does not use them.
   hidden_dim: 1152
   bottleneck_dim: 512
   n_res_blocks: 0

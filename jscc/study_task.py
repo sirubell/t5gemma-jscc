@@ -66,30 +66,41 @@ def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, e
     directory = manifest_path.parent
     link = links[index]
     root = Path(__file__).resolve().parents[1]
-    if phase == "train":
+    import yaml
+    from .experiment import SCHEMA
+    if phase == 'train':
         if link.exists() or link.is_symlink() or outputs[index].exists() or outputs[index].is_symlink():
-            raise FileExistsError("This study entry already has a completed training run; export a new plan for a new run")
-        command = [sys.executable, str(root / "train.py"), "--config", str(directory / entry["config"]),
-                   "--output", str(outputs[index]), "--run-path-file", str(link)]
-    elif phase == "evaluate":
-        # The train command writes this only after it returns successfully.
+            raise FileExistsError('This study entry already has a completed training run; export a new plan')
+        authored = yaml.safe_load((directory/entry['config']).read_text())
+        if authored.get('schema') == SCHEMA:
+            from .config import load_config
+            science = load_config(directory/entry['config'])
+        else:
+            science = authored
+        request = {'schema': SCHEMA, 'workflow': 'ordinary', 'operation': 'train', 'experiment': science,
+                   'execution': {'root': str(outputs[index]), 'attempt': '0001', 'success_link': str(link)}}
+    else:
         run = link.read_text().strip()
         if not run:
-            raise ValueError("Training run link is empty")
-        command = [sys.executable, str(root / "evaluate.py"), "--run", run, "--checkpoint", checkpoint]
-        if attempt is not None:
-            command += ["--attempt", attempt]
+            raise ValueError('Training run link is empty')
+        evaluation = {'checkpoint': checkpoint}
         if expected_step is not None:
-            command += ["--expected-step", str(expected_step)]
+            evaluation['expected_step'] = expected_step
         if evaluation_config:
-            command += ["--config", str(Path(evaluation_config).resolve())]
-        if entry.get("evaluation_link"):
-            result_link = _contained(directory, entry["evaluation_link"])
+            evaluation['overrides'] = str(Path(evaluation_config).resolve())
+        request = {'schema': SCHEMA, 'workflow': 'ordinary', 'operation': 'evaluate',
+                   'execution': {'root': run, 'attempt': attempt or '0001', 'evaluation': evaluation}}
+        if entry.get('evaluation_link'):
+            result_link = _contained(directory, entry['evaluation_link'])
             if result_link.exists() or result_link.is_symlink():
-                raise FileExistsError("This study entry already has a completed evaluation")
-            command += ["--output-path-file", str(result_link)]
-    else:
-        raise ValueError("phase must be train or evaluate")
+                raise FileExistsError('This study entry already has a completed evaluation')
+            request['execution']['success_link'] = str(result_link)
+    requests = directory/'requests'
+    requests.mkdir(exist_ok=True)
+    filename = requests/f'{manifest_path.name}-{index:04d}-{phase}-{attempt or "0001"}.yaml'
+    with filename.open('x') as handle:
+        yaml.safe_dump(request, handle, sort_keys=False)
+    command = [sys.executable, str(root/'experiment.py'), '--config', str(filename)]
     print(f"{phase}: index={index} task={entry['task']} experiment={entry['experiment']} seed={entry['seed']}", flush=True)
     subprocess.run(command, cwd=root, check=True)
 

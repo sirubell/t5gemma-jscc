@@ -1,25 +1,31 @@
 # Script catalog
 
-Run commands from the repository root with the locked uv environment. The primary experiment interface is `train.py --config <task.yaml> --output <fresh-root>` for one COCO or HellaSwag run and `evaluate.py --run runs/<run-directory>` for its checkpoint. `study.py` can preview or export a multi-run plan when needed; it does not run the plan. No study manifest is required for an individual run.
+Scripts provide concrete diagnostics, local input preparation, scheduler transport and saved-evidence tools. The public scientific request migration is owned by the single-entry workflow: `experiment.py --config REQUEST.yaml`, with one YAML-selected operation per invocation. The entry dispatches the current ordinary/shared COCO and HellaSwag consumers; retaining a diagnostic here does not authorize a scientific run.
 
 | Scripts | Purpose |
 |---|---|
-| [`benchmark_speed.py`](benchmark_speed.py) | Measure bounded reference/streamed throughput from one fixed communication checkpoint, with restored optimizer state and effective batch 32. Reports checkpoint SHA-256 and the effective checkpoint configuration after batch/accumulation and fixed CUDA/BF16 overrides, including update-setting defaults. |
-| [`shared_encoder_atlas.py`](shared_encoder_atlas.py) | Prepare fixed HellaSwag views, then explicitly capture encoder-site activations and verify local replay. Zero optimizer updates; this is not shared-codec training. See the [atlas guide](../docs/shared-encoder-atlas.md). |
-| [`hellaswag_two_stage.py`](hellaswag_two_stage.py) | Prepare/check an enc_l9 A/B/C/D plan, optionally adding the functional reset control; separate explicit capture, local reconstruction and functional phase commands. See the [two-stage guide](../docs/hellaswag-two-stage.md). No command submits a job. |
-| [`hellaswag_replay_preflight.py`](hellaswag_replay_preflight.py) | Check one unchanged 64-example enc_l9 batch against local replay, with no-noise/fixed AWGN, explicit parity gates and zero optimizer updates. Config-only mode loads no model/data; [guide](../docs/hellaswag-replay-preflight.md). GPU execution requires a separately bounded allocation. |
-| `compare_evidence_json.py`, `recompute_coco.py` | Reusable offline evidence comparison and COCO CIDEr recomputation utilities. The latter consumes exported per-image JSONL evidence. |
-| `index_*.py`, `extract_compact_samples.py`, `verify_manifest.py`, `recompute_*.py` | Evidence indexing, extraction, verification and recomputation for specific saved artifact formats. Check each script's inputs before reuse. |
-| Other retained diagnostic, policy and Slurm scripts | Inspect or explicitly execute their documented bounded work. Their old source bindings and approvals remain historical evidence, not current execution authorization. |
-| [`experiments/`](experiments/README.md) | Retained evening scientific helpers and main-weight screen modules, with historical module names and explicit evening executor retirement. |
+| `benchmark_speed.py`, `benchmark_evaluation.py` | Bounded throughput or evaluation-capacity measurements for exact recorded inputs/checkpoints. Preserve effective configuration, optimizer restoration, payload and telemetry evidence. |
+| `shared_encoder_atlas.py`, `hellaswag_replay_preflight.py` | Explicit zero-update activation/replay diagnostics with input identities, masks, paired noise and gradient parity. |
+| `objective_optimizer_equivalence.py`, `split_wiring_smoke.py` | Controlled objective/optimizer equivalence and small split wiring diagnostics. Their restored hooks and raw parameter/payload evidence remain part of their contracts. |
+| `ordering_score_diagnostic.py`, `backbone_anomaly_probe.py` | Historical ordering/companion scoring and anomaly localization. Original captures and source identities retain their saved meanings. |
+| `coco_*diagnostic.py`, `coco_capacity_check.py`, `coco_native_preflight.py`, `coco_route_smoke.py` | Bounded image, route, cache, precision, memory and replay/scorer diagnostics. They do not establish full-weight shared COCO acceptance. |
+| `five_shot_preflight.py`, `exact64_preflight.py`, `prompt_alignment_benchmark.py`, `payload_precision_probe.py` | Purpose-specific capacity, gradient, prompt and saved payload/precision checks. |
+| `prepare_shared_inputs.py`, `prepare_native16_inputs.py` | Explicit local input preparation with exact source, cache, membership, initializer and panel bindings. No training or submission. |
+| `evaluate_historical_weight_screen.py` | Historical saved-checkpoint evaluator restricted to dec_l20 step500/1000 and its frozen fixture, source and global request budget. It is not an ordinary/shared authoring frontend. |
+| `render_shared_terminal_report.py`, `render_experiment_report.py` | Offline bound terminal/scalar/pairing reports and verified local PNG/CSV/HTML evidence. |
+| `index_*.py`, `extract_compact_samples.py`, `verify_manifest.py`, `compare_evidence_json.py`, `recompute_*.py` | Offline indexing, containment/hash verification, comparison and recomputation of named saved artifact formats. |
+| `submit_recipe.py`, `slurm_job.sh`, `slurm_study.sh`, `slurm_outer_ln.sh` | Optional CASE/study transport and reconciliation. All current scientific commands use experiment.py and explicit one-operation YAML requests; acquire/register/prepare/collect use the same entry. |
+| Other `slurm_*.sh` | Optional transport around concrete diagnostics. The obsolete rejection-only COCO/exact64/five-shot group wrappers are retired; frozen bundles retain their exact original source wrappers. |
 
-For a reusable offline recomputation, for example:
+Scoring/intervention helpers now live in `jscc/diagnostic_scoring.py`; VJP, feature and pooled gradient helpers in `jscc/gradient_diagnostics.py`; codec family/role initialization in the existing `jscc/models/codec.py`. Indexed collation is in `jscc/shared_inputs.py`, trainable-gradient admission in `jscc/qualification.py`, and named saved prompt/COCO/reconstruction/baseline readers in `jscc/checkpoint_readers.py`. Historical finite-update configuration/order instrumentation is a test fixture provider in `tests/model_helpers.py`.
+
+The campaign-specific original13, staged/pilot, sharing, native-policy and baseline execution fronts have retired. Their useful readers, helper bodies and scientific assertions transfer to the providers above; historical schemas, noise strings, parameter keys, checkpoint/data/evidence bytes and frozen source holds are preserved. A moved provider creates a new source identity and does not relabel an old result.
+
+For offline COCO recomputation:
 
 ```bash
 uv run --locked python scripts/recompute_coco.py path/to/captions_no_noise.jsonl
 ```
-
-Keep historical manifests, source hashes and result paths with their archived evidence. A new execution needs a fresh recipe and source binding; moving a script does not revise an earlier result or authorize another run.
 
 For a separately authorized speed benchmark:
 
@@ -27,20 +33,4 @@ For a separately authorized speed benchmark:
 uv run --locked python scripts/benchmark_speed.py --checkpoint path/to/checkpoint.pt --output path/to/benchmark --variant streamed --batch-size 16 --accumulation 2
 ```
 
-The checkpoint supplies the configuration and data IDs; there is no authored
-`--config` input. Each repeat reports `effective_config` and
-`effective_config_hash` (SHA-256 of UTF-8 JSON with sorted keys, compact
-separators and no nonfinite values). This identifies the configuration actually
-used, including `grad_clip`, `kl_weight` and `mse_weight` defaults, rather than an
-unused YAML file. `checkpoint_hash` separately binds the saved model and
-optimizer state; checkpoint LR/weight-decay state is restored unchanged. Saved
-historical `config_hash`/`config_path` records retain their original meaning.
-
-## Versioned baseline and local records
-
-- `encfn_baseline.py` previews the finite four-cell plan, executes one explicitly prepared segment, or writes exact comparisons for a complete campaign. See [baseline guide](../docs/encfn-baseline.md).
-- `render_experiment_report.py` verifies saved scalar/artifact inventories and creates local PNG/CSV/HTML reports. See [records guide](../docs/experiment-records.md). It does not load models or launch jobs.
-
-## Retired training surfaces
-
-The closeout production harness and prompt-alignment pair executor are retired from current source. Native preflight retains only imported indexing/collation and gradient-check helpers; prompt-policy retains strict `sha`/`validate_run` readers. Their module training executors are unsupported. The prompt-alignment shell retains its independent benchmark branch, and the prompt-policy shell retains exact64 preflight. Standalone `evaluate_prompt_alignment.py`, fixed prompt YAMLs and historical plans/results/source packages remain available. These validators retain source gates and may require the matching historical source environment. Future training uses explicit ordinary roots and exact recorded checkpoints; retirement does not rewrite scientific receipts or release held sources.
+The checkpoint supplies configuration and data IDs. Each repeat reports effective configuration and its hash separately from checkpoint identity; restored optimizer LR/weight-decay state retains its original meaning. A diagnostic result is not GPU fit, throughput, quality or scientific acceptance for another workflow.

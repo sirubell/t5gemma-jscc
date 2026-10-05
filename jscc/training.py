@@ -234,7 +234,7 @@ def train(config, resume: str | Path | None = None,
           expected_resume: dict | None = None):
     setup_started = time.monotonic()
     if run_directory is not None:
-        from .ordinary_runs import validate_reserved_attempt
+        from .run_records import validate_reserved_attempt
         if initial_checkpoint is not None:
             raise ValueError("reserved ordinary attempts do not accept weight-only transfer")
         if resume is not None and expected_resume is None:
@@ -262,7 +262,7 @@ def train(config, resume: str | Path | None = None,
         raise ValueError("versioned state requires the baseline lifecycle, not legacy resume")
     transfer = None
     if initial_checkpoint is not None:
-        from .local_reconstruction import validate_phase_transfer
+        from .checkpoint_readers import validate_phase_transfer
         transfer = validate_phase_transfer(initial_checkpoint, config)
     if state and run_directory is None:
         # Resume the saved recipe. The supplied YAML chooses output location/device only.

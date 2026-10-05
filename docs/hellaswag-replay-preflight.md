@@ -5,7 +5,7 @@ fixed-stream training microbatch. It keeps the configured 64×1 batch, pinned
 model/data and BF16 CUDA precision. It makes **zero optimizer updates** and
 does not write an activation cache or evaluate task accuracy. A passing probe
 does not establish B→C transfer, memory fit for training, quality or speed.
-The resolved recipe must match `configs/tasks/hellaswag.yaml` in task,
+The resolved recipe must match `configs/experiments/ordinary/hellaswag.yaml` in task,
 protocol, seed, model, split, codec, channel, data and evaluation settings.
 Only training step/selection/logging caps and the run output may differ; the
 batch policy, objective, learning rate, data/prompt policy and noise seeds
@@ -19,7 +19,7 @@ First inspect the recipe without loading model weights, data or CUDA:
 
 ```bash
 uv run --locked python scripts/hellaswag_replay_preflight.py \
-  --config configs/tasks/hellaswag.yaml \
+  --config configs/experiments/ordinary/hellaswag.yaml \
   --output /path/to/fresh/check.json --max-seconds 60 --check-only
 ```
 
@@ -31,7 +31,7 @@ not a measured runtime or execution authorization:
 
 ```bash
 uv run --locked python scripts/hellaswag_replay_preflight.py \
-  --config configs/tasks/hellaswag.yaml \
+  --config configs/experiments/ordinary/hellaswag.yaml \
   --output /path/to/fresh/parity.json --max-seconds 900
 ```
 
