@@ -508,7 +508,7 @@ def _coco_membership(raw, fixed, karpathy):
         values = fixed[key]
         if not isinstance(values, list) or any(type(value) is not int or value < 0 for value in values):
             raise ValueError('COCO fixed membership requires integer image IDs')
-        if not values or not set(values) <= set(positions):
+        if (key != 'demo_ids' and not values) or not set(values) <= set(positions):
             raise ValueError('COCO fixed membership is empty or absent from acquired rows')
     validate_ids(fixed, set(karpathy['validation']), set(karpathy['test']))
     if not set(fixed['demo_ids']) <= set(karpathy['restval']):

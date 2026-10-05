@@ -199,3 +199,69 @@ def test_coco_selection_seed_is_effective_and_compatibility_bound(acquired):
     second = CocoCachedData(value,raw=raw,processor=processor,model_config=model,receipt=receipt)
     assert first.data_ids['train_ids'] != second.data_ids['train_ids']
     assert first.compatibility_identity != second.compatibility_identity
+
+
+
+def test_acquired_zero_demo_cached_views_are_query_only_and_ordered(acquired):
+    raw, _, _, kwargs = acquired
+    zero = deepcopy(kwargs)
+    zero['fixed_data_ids']['demo_ids'] = []
+    zero['output'] = kwargs['output'].with_name('zero-demo-receipt.json')
+    bind_coco_data_cache(**zero)
+    receipt = json.loads(zero['output'].read_text())
+    validate_recipe_cache(receipt)
+    assert receipt['fixed_data_ids']['demo_ids'] == []
+    assert receipt['training_corpus']['demo_ids'] == []
+    assert receipt['training_corpus']['demo_captions'] == []
+    seen = []
+    class QueryProcessor(Processor):
+        def __call__(self, text=None, **settings):
+            if 'images' in settings:
+                seen.append((text, [image.getpixel((0, 0))[0] for image in settings['images']]))
+            return super().__call__(text, **settings)
+    processor = QueryProcessor(kwargs['assets'])
+    model_config = SimpleNamespace(decoder=SimpleNamespace(bos_token_id=2, pad_token_id=0))
+    value = description()
+    value['config']['data']['num_demos'] = 0
+    value['identity'] = canonical_digest({key: item for key, item in value.items() if key != 'identity'})
+    data = CocoCachedData(value, raw=raw, processor=processor, model_config=model_config, receipt=receipt)
+    first = data[0]
+    assert first['pixel_values'].shape == (16, 3, 2, 2)
+    assert first['pixel_counts'] == [1] * 16
+    assert first['demo_ids'] == [[] for _ in range(16)]
+    assert first['demo_captions'] == []
+    assert all(view['demo_ids'] == [] for view in first['source_views'])
+    image_ids = first['coco_image_id'].tolist()
+    assert seen == [('<start_of_image>', [image_id]) for image_id in image_ids]
+    assert first['pixel_values'][:, 0, 0, 0].tolist() == image_ids
+    assert first['source_family_ids'] == image_ids
+    assert data.data_ids['train_ids'] == [1, 2]
+    assert data.data_ids['selection_ids'] == [5, 6]
+    assert data.data_ids['report_ids'] == [7, 8]
+    assert first['presentation_offsets'] == list(range(16))
+    assert batch_identity(first) == batch_identity(data[0])
+    assert data[1]['presentation_offsets'] == list(range(16, 32))
+
+
+@pytest.mark.parametrize('key', ['train_ids', 'selection_ids', 'report_ids'])
+def test_zero_demo_does_not_allow_empty_scientific_partitions(acquired, key):
+    _, _, _, kwargs = acquired
+    invalid = deepcopy(kwargs)
+    invalid['fixed_data_ids']['demo_ids'] = []
+    invalid['fixed_data_ids'][key] = []
+    invalid['output'] = kwargs['output'].with_name(f'empty-{key}.json')
+    with pytest.raises(ValueError, match='empty or absent'):
+        bind_coco_data_cache(**invalid)
+    assert not invalid['output'].exists()
+
+
+@pytest.mark.parametrize('demos,match', [([True], 'integer image IDs'), ([999], 'absent'),
+                                       ([1], 'disjoint'), ([5], 'disjoint')])
+def test_demo_membership_guards_remain_with_zero_demo_support(acquired, demos, match):
+    _, _, _, kwargs = acquired
+    invalid = deepcopy(kwargs)
+    invalid['fixed_data_ids']['demo_ids'] = demos
+    invalid['output'] = kwargs['output'].with_name('invalid-demo-membership.json')
+    with pytest.raises(ValueError, match=match):
+        bind_coco_data_cache(**invalid)
+    assert not invalid['output'].exists()

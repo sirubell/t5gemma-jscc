@@ -117,6 +117,8 @@ def graph_job(case_job, monkeypatch):
     Path(job['recipe']).write_text('fixture recipe\n')
     Path(job['registrations']).mkdir()
     (Path(job['registrations'])/'assets.json').write_text('{}')
+    monkeypatch.setattr(submission, '_declared_case_ids',
+                        lambda *args: [f'width-8-ratio-{ratio}' for ratio in (25, 50, 75)])
     monkeypatch.setattr(submission, '__file__', job['source']['path']+'/jscc/recipe_submission.py')
 
     def prepare(recipe, output, *, registrations):
@@ -433,3 +435,63 @@ def test_yaml_entry_submission_preview_and_mocked_submit_requests(graph_job, mon
             assert saved == payload
             assert saved['execution']['root'] == bundle['run_output']
             assert saved['execution']['case'] == case['case_id']
+
+
+@pytest.mark.parametrize("changes", [
+    {"cases": []}, {"cases": ["unknown"]},
+    {"cases": ["width-8-ratio-25", "width-8-ratio-25"]},
+    {"evaluation_cases": ["unknown"]},
+    {"cases": ["width-8-ratio-25"], "evaluation_cases": ["width-8-ratio-50"]},
+    {"evaluation_cases": ["width-8-ratio-50", "width-8-ratio-50"]},
+])
+def test_invalid_declared_selectors_precede_preparation(graph_job, monkeypatch, changes):
+    path, limits, job = graph_job
+    job.update(changes)
+    write_yaml(path, job)
+    monkeypatch.setattr('jscc.shared_runs.prepare_recipe_run',
+                        lambda *a, **k: pytest.fail('invalid selectors prepared root'))
+    with pytest.raises(ValueError):
+        submission.prepare_case_job(path, limits)
+    assert not Path(job['run_output']).exists()
+    assert not Path(job['output']).exists()
+
+
+def test_array_limit_precedes_preparation(graph_job, monkeypatch):
+    path, limits, job = graph_job
+    policy = yaml.safe_load(limits.read_text())
+    policy['max_array_tasks'] = 2
+    write_yaml(limits, policy)
+    monkeypatch.setattr('jscc.shared_runs.prepare_recipe_run',
+                        lambda *a, **k: pytest.fail('over-limit selectors prepared root'))
+    with pytest.raises(ValueError, match='invalid array size'):
+        submission.prepare_case_job(path, limits)
+    assert not Path(job['run_output']).exists()
+    assert not Path(job['output']).exists()
+
+
+def test_generated_requests_synced_before_scheduler(graph_job, monkeypatch):
+    bundle = prepare_graph(graph_job)
+    output = Path(bundle['output'])
+    synced = set()
+    real_fsync = submission.os.fsync
+
+    def fsync(fd):
+        stat = os.fstat(fd)
+        requests = output / 'requests'
+        if requests.exists():
+            for path in [requests, *requests.glob('*.yaml')]:
+                if path.stat().st_ino == stat.st_ino and path.stat().st_dev == stat.st_dev:
+                    if path.is_file():
+                        assert yaml.safe_load(path.read_text()) == bundle['cases'][int(path.stem.split('-')[-1])]['requests'][path.stem.rsplit('-', 1)[0]]
+                    synced.add(path.name)
+        real_fsync(fd)
+
+    monkeypatch.setattr(submission.os, 'fsync', fsync)
+    expected = {'requests', 'training-0.yaml', 'training-1.yaml', 'training-2.yaml', 'evaluation-1.yaml'}
+
+    def scheduler(command):
+        assert expected <= synced
+        return subprocess.CompletedProcess(command, 0, '101;cluster\n', '')
+
+    submission.submit_job(bundle, output, scheduler=scheduler)
+    assert expected <= synced

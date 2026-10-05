@@ -259,6 +259,19 @@ def _case_inputs(job_path, job):
                           for p in sorted(registrations.glob('*.json'))}}
 
 
+def _declared_case_ids(recipe, registrations):
+    """Resolve declared science without reserving or preparing an output root."""
+    from .shared_assets import discover_recipe_assets
+    from .shared_preparation import _read_reference
+    from .shared_config import resolve_recipe
+    from .asset_paths import asset_file_path
+    from .shared_runs import case_id
+    acquired = discover_recipe_assets(recipe, registrations)
+    binding = json.loads(_read_reference(acquired['model_binding']).read_text())
+    resolved = resolve_recipe(recipe, model_config_path=asset_file_path(binding['path'], 'config.json'))
+    return [case_id(row) for row in resolved['trajectories']]
+
+
 def prepare_case_job(job_path, limits_path):
     """Prepare a bound public recipe root and freeze its selected case graph."""
     from .shared_runs import prepare_recipe_run, recipe_run_record
@@ -324,6 +337,15 @@ def prepare_case_job(job_path, limits_path):
     output = normalize_path(job['output'], root)
     require(run_output != output and PurePosixPath(run_output) not in PurePosixPath(output).parents
             and PurePosixPath(output) not in PurePosixPath(run_output).parents, 'run and submission outputs overlap')
+    ids = _declared_case_ids(recipe, registrations)
+    selected = ids if job['cases'] is None else job['cases']
+    require(isinstance(selected, list) and selected and len(set(selected)) == len(selected)
+            and all(i in ids for i in selected), 'explicit declared training cases required')
+    evaluation = job['evaluation_cases']
+    require(isinstance(evaluation, list) and len(set(evaluation)) == len(evaluation)
+            and all(i in selected for i in evaluation), 'evaluations require selected declared cases')
+    indices = [i for i, name in enumerate(ids) if name in selected]
+    require(len(indices) <= array_limit, 'invalid array size')
     input_binding = {**inputs, 'source': source, 'source_binding': binding}
     run = Path(run_output)
     if run.exists():
@@ -336,15 +358,7 @@ def prepare_case_job(job_path, limits_path):
     record = recipe_run_record(run)
     manifest = json.loads(Path(record['prepared']['path']).read_text())
     require(manifest['source_commit'] == source['commit'], 'prepared source commit differs')
-    ids = [row['case_id'] for row in record['cases']]
-    selected = ids if job['cases'] is None else job['cases']
-    require(isinstance(selected, list) and selected and len(set(selected)) == len(selected)
-            and all(i in ids for i in selected), 'explicit declared training cases required')
-    evaluation = job['evaluation_cases']
-    require(isinstance(evaluation, list) and len(set(evaluation)) == len(evaluation)
-            and all(i in selected for i in evaluation), 'evaluations require selected declared cases')
-    indices = [i for i, name in enumerate(ids) if name in selected]
-    require(len(indices) <= array_limit, 'invalid array size')
+    require([row['case_id'] for row in record['cases']] == ids, 'prepared case inventory differs')
     eval_indices = [i for i in indices if ids[i] in evaluation]
     groups = [{'stage': 'combined' if job['combined'] else 'training', 'indices': indices,
                'concurrency': concurrency, 'aftercorr': None}]
@@ -471,6 +485,9 @@ def _submit_case_job(bundle, receipt_dir, *, scheduler, authorization):
                         'request output ownership differs')
                     with request_path.open('x') as handle:
                         yaml.safe_dump(case['requests'][stage], handle, sort_keys=False)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+        _sync_directory(directory/'requests')
         write_json(directory/'bundle.json', bundle)
         with (directory/'job.sbatch').open('x') as stream:
             stream.write(render_payload(bundle, directory/'bundle.json'))

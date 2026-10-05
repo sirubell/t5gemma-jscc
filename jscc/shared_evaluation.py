@@ -200,7 +200,7 @@ def _case_evaluation(attempt, eligibility, request, state, config, initial, mani
                      timeout_seconds, device_uuid, parallel=None, root=None, attempt_id=None, checkpoint=None, expected_step=None):
     started = time.perf_counter()
     result = {'schema': SCHEMA, 'case_id': eligibility['case_id'], 'scope': eligibility['scope'],
-              'status': 'incomplete', 'eligibility': eligibility,
+              'status': 'incomplete', 'final_eligible': False, 'eligibility': eligibility,
               'request': request, 'panels': _counts(request), 'panel_receipt': None}
     try:
         write_json_atomic(attempt/'eligibility.json', eligibility)
@@ -229,6 +229,8 @@ def _case_evaluation(attempt, eligibility, request, state, config, initial, mani
             else:
                 engine.run_recipe_evaluation(model, processor, request=request, output=attempt/'panels', guard=guard)
         result['status'] = 'complete'
+        result['final_eligible'] = (eligibility['scope'] == 'initial'
+                                    and engine.verified_observations(eligibility, state))
     except BaseException as error:
         result.update(status='interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed',
                       error={'type': type(error).__name__, 'message': str(error)})
@@ -358,7 +360,7 @@ def evaluate_recipe_run(root, *, selected=None, attempt_id='0001', checkpoint=No
                       for row in results['cases']]})
         write_json_atomic(output/'gate.json', {'schema': SCHEMA, 'scope': scope,
             'final_eligible': scope == 'initial' and results['status'] == 'complete'
-                and (parallel is None or all(row.get('final_eligible') is True for row in results['cases'])),
+                and all(row.get('final_eligible') is True for row in results['cases']),
             'status': results['status'], 'counts': results['counts'],
             'results': {'path': str(output/'results.json'), 'sha256': file_digest(output/'results.json')},
             'observations': 'Retained separately; pending prior obligations are not completed by evaluation.'})

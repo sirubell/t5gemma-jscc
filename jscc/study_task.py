@@ -43,6 +43,8 @@ def _manifest_paths(manifest_path, entries, phase):
 def run_task(manifest_path, index, phase, checkpoint=None, expected_step=None, evaluation_config=None, *, attempt=None):
     if phase not in ("train", "evaluate"):
         raise ValueError("phase must be train or evaluate")
+    if phase == "train" and checkpoint is not None:
+        raise ValueError("checkpoint is only supported for evaluate")
     if attempt is not None and phase != "evaluate":
         raise ValueError("attempt is only supported for evaluate")
     if evaluation_config and phase != "evaluate":

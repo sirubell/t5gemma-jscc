@@ -67,7 +67,9 @@ def bind_case(root, config, *, authored_config=None, case_id=None):
         authored = Path(authored_config).resolve()
         text = authored.read_text()
         context.append({"path": str(authored), "text": text, "sha256": file_digest(authored)})
-        reference = yaml.safe_load(text).get("model_config")
+        document = yaml.safe_load(text)
+        science = document["experiment"] if document.get("schema") == "jscc-experiment-v1" else document
+        reference = science.get("model_config")
         if reference is not None:
             design = (authored.parent / Path(reference).expanduser()).resolve()
             context.append({"path": str(design), "text": design.read_text(), "sha256": file_digest(design)})

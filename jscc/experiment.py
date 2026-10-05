@@ -85,7 +85,7 @@ def ordinary_fields(science):
         fields(science['codec']['memory'], FIELDS['codec']-{'memory'}, 'codec.memory')
     data, training, evaluation = science['data'], science['training'], science['evaluation']
     inactive = ({'karpathy_name', 'karpathy_revision', 'num_report', 'num_demos', 'max_prompt_length', 'max_target_length'}
-                if science['task'] == 'hellaswag' else {'prompt_policy', 'max_length', 'row_ids'})
+                if science['task'] == 'hellaswag' else {'prompt_policy', 'max_length', 'row_ids', 'selection_seed'})
     inactive.add('row_ids')
     if set(data) & inactive:
         raise ValueError('inactive task data fields: '+str(sorted(set(data) & inactive)))
@@ -256,7 +256,13 @@ def read_request(filename) -> tuple[Path, dict[str, Any]]:
         a = fields(ex.get('continuation'), {'path', 'sha256', 'size_bytes', 'role', 'step', 'parent_attempt', 'finalize_terminal', 'reconcile_interrupted'}, 'continuation', ('path', 'sha256', 'size_bytes', 'role', 'step', 'parent_attempt'))
         a['path'] = str(path(a['path'], filename))
         a['parent_attempt'] = str(path(a['parent_attempt'], filename))
-        positive(a['step'], 'continuation.step')
+        if workflow == 'shared':
+            if type(a['step']) is not int or a['step'] < 0:
+                raise ValueError('shared continuation.step requires a nonnegative integer')
+            if a['step'] == 0 and a['role'] != 'initialization':
+                raise ValueError('shared step0 continuation requires initialization role')
+        else:
+            positive(a['step'], 'continuation.step')
         positive(a['size_bytes'], 'continuation.size_bytes')
         if 'finalize_terminal' in a and type(a['finalize_terminal']) is not bool:
             raise ValueError('finalize_terminal requires boolean')
@@ -491,7 +497,7 @@ def execute(filename) -> Any:
                 link.parent.mkdir(parents=True, exist_ok=True)
             value = train_task(config, ex['root'], authored_config=filename, resume=resume, attempt_id=ex['attempt'])
         else:
-            from .shared_runs import train_recipe_case, recipe_run_record, reconcile_recipe_attempt
+            from .shared_runs import train_recipe_case, recipe_run_record, reconcile_recipe_attempt, preflight_recipe_cases
             record = recipe_run_record(ex['root'])
             choices = ex.get('cases', [ex['case']] if 'case' in ex else [r['case_id'] for r in record['cases']])
             if operation == 'resume' and len(choices) != 1:
@@ -502,12 +508,17 @@ def execute(filename) -> Any:
                 case_path = Path(ex['root'])/'cases'/choices[0]
                 checkpoint_index = json.loads((Path(ex['continuation']['parent_attempt'])/'checkpoints.json').read_text())
                 matches = [row for row in checkpoint_index['checkpoints'] if row['path'] == resume]
-                if (len(matches) != 1 or matches[0]['step'] != ex['continuation']['step']
+                if (len(matches) != 1 or type(matches[0]['step']) is not int
+                        or matches[0]['step'] != ex['continuation']['step']
                         or matches[0]['role'] != ex['continuation']['role']
+                        or matches[0]['sha256'] != ex['continuation']['sha256']
+                        or matches[0]['size'] != ex['continuation']['size_bytes']
                         or Path(ex['continuation']['parent_attempt']).parent != case_path/'attempts'):
                     raise ValueError('continuation checkpoint role/step/attempt differs')
                 if ex['continuation'].get('reconcile_interrupted'):
                     reconcile_recipe_attempt(ex['root'], choices[0], ex['continuation']['reconcile_interrupted'])
+            preflight_recipe_cases(ex['root'], choices, attempt_id=ex['attempt'], resume=resume,
+                finalize_terminal=ex.get('continuation', {}).get('finalize_terminal', False))
             if link is not None:
                 link.parent.mkdir(parents=True, exist_ok=True)
             for case in choices:

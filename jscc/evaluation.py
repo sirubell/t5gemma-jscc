@@ -15,7 +15,7 @@ import yaml
 from tqdm import tqdm
 
 from .evaluation_policy import (
-    EVALUATION_OPTIONS, evaluation_conditions, evaluation_identity, file_digest,
+    evaluation_conditions, evaluation_identity, file_digest,
     record_fewshots, scoring_kwargs, write_compact_evidence,
 )
 from .experiment_records import write_json_atomic
@@ -347,10 +347,14 @@ def evaluate(run_path, checkpoint_name=None, overrides_path=None, expected_step=
     settings = config["evaluation"]
     if overrides_path:
         overrides = yaml.safe_load(Path(overrides_path).read_text())
-        unknown = set(overrides) - (set(settings) | EVALUATION_OPTIONS | {"channel", "device"})
-        if unknown:
-            raise ValueError(f"Unknown evaluation options: {sorted(unknown)}")
         settings.update(overrides)
+        # Reuse authored task ownership for merged scoring settings. Device and
+        # channel remain supported operational overrides, outside this mapping.
+        from .experiment import ordinary_fields
+        ordinary_fields({"task": config["task"], "seed": 0, "run": {},
+                         "data": {}, "training": {},
+                         "evaluation": {key: value for key, value in settings.items()
+                                        if key not in {"device", "channel"}}})
     if "device" in settings:
         config["model"]["device"] = settings["device"]
     conditions = evaluation_conditions(settings)

@@ -15,7 +15,7 @@ Invoke `uv run --locked python experiment.py --config FILE`. Every new public re
 | preview | `plan.kind: study` expands/optionally exports; `kind: submission` binds/renders a CASE plan. Neither invokes a scheduler. Study is a plan kind, not an operation. |
 | submit | Existing CASE plan, limits, fresh exact receipt directory and source-bound authorization. Uses existing scheduler/dependency/resource/source-consumer guards. A request file is not live launch authorization. |
 
-Unknown, inactive, conflicting and unsupported fields reject before their effects. Acquire/register/collect/preview/submit reject authored science. Check rejects preparation/acquisition/registration. Prepare selects exactly one destination and one assets path. No command selects a scientific recipe, resource budget or report deadline for you.
+Unknown, inactive, conflicting and unsupported fields reject before their effects. Ordinary COCO partition selection uses `experiment.seed`; `data.selection_seed` is rejected for that route. Plain referenced shared task files also reject unknown and inactive controls; named historical compatibility values do not provide alternate stopping or scoring policies. Acquire/register/collect/preview/submit reject authored science. Check rejects preparation/acquisition/registration. Prepare selects exactly one destination and one assets path. No command selects a scientific recipe, resource budget or report deadline for you.
 
 A fresh ordinary request copies the scientific `experiment` from the supplied COCO or HellaSwag check example and changes only its operation/execution:
 
@@ -47,7 +47,7 @@ execution:
 
 Set `evaluation.checkpoint` to a recorded filename and `expected_step` for an exact supplemental target. An `overrides` file contains evaluation controls only. COCO generation batch/max tokens differ from HellaSwag candidate batch/fewshot/scoring policy; they are not interchangeable. Ordinary configured custom channels still reach the model/channel consumers.
 
-For shared COCO cache acquisition, `execution.acquisition` declares `kind: coco-cache`, `dataset_path`, `assets`, `dataset_name`, `dataset_revision`, `model_revision`, `karpathy_path`, `karpathy_name`, `karpathy_revision`, `fixed_data_ids` and fresh `output`. Paths identify existing local Arrow/image and processor assets plus the exact Karpathy membership; `fixed_data_ids` requires unique disjoint `train_ids`, `demo_ids`, `selection_ids` and `report_ids`; optional `development` and `final_validation` each carry matching `input_ids` and `source_family_ids`. Selection/report IDs belong to Karpathy validation; demos belong to restval; train/demo IDs exclude validation/test. The acquired receipt binds complete image/reference/demo inventories and local PTB/CIDEr scorer assets. It is separate from model acquisition and does not train or download. Registration/preparation consume its exact checksum-bound cache reference. COCO caption policy/seed and image-aware targets stay in effective science; no HellaSwag token-only fixture stands in for multimodal acceptance.
+For shared COCO cache acquisition, `execution.acquisition` declares `kind: coco-cache`, `dataset_path`, `assets`, `dataset_name`, `dataset_revision`, `model_revision`, `karpathy_path`, `karpathy_name`, `karpathy_revision`, `fixed_data_ids` and fresh `output`. Paths identify existing local Arrow/image and processor assets plus the exact Karpathy membership; `fixed_data_ids` requires unique disjoint `train_ids`, `demo_ids`, `selection_ids` and `report_ids`; optional `development` and `final_validation` each carry matching `input_ids` and `source_family_ids`. Train, selection and report lists must be nonempty; `demo_ids: []` is valid for zero-demo, query-only COCO views. Selection/report IDs belong to Karpathy validation; demos belong to restval; train/demo IDs exclude validation/test. The acquired receipt binds complete image/reference/demo inventories and local PTB/CIDEr scorer assets. It is separate from model acquisition and does not train or download. Registration/preparation consume its exact checksum-bound cache reference. COCO caption policy/seed and image-aware targets stay in effective science; no HellaSwag token-only fixture stands in for multimodal acceptance.
 
 A shared request uses science from the shared example. Check requires local `resolution.model_config`; prepare selects one explicit acquisition path:
 
@@ -63,7 +63,7 @@ experiment:
   # Full shared task_config, locations, quotas, widths, phases, objectives and panels.
 ```
 
-Standalone preparation uses `preparation.output` instead of root. Explicit assets use `preparation.assets` and `model_config`; the assets JSON owns its reference paths, cache hashes, initializers and fixed templates. Registration accepts `references` with model_binding/cache/observation_template/terminal_template `{path, sha256}` records and explicit `synthetic_cpu`, or an exact `from_prepared` path without new references.
+Standalone preparation uses `preparation.output` instead of root. Explicit assets use `preparation.assets` and `model_config`; the assets JSON owns its reference paths, cache hashes, initializers and fixed templates. Asset references and fixed panels are admitted before a scientific root is reserved. Failures after valid admission retain their partial publication evidence. Registration accepts `references` with model_binding/cache/observation_template/terminal_template `{path, sha256}` records and explicit `synthetic_cpu`, or an exact `from_prepared` path without new references.
 
 After preparation, shared training and terminal evaluation are separate calls:
 
@@ -77,7 +77,7 @@ execution:
   attempt: training-NEW
 ```
 
-Use `cases` for an explicit unique set, or omit selection to execute declared cases. Resume requires one case. Shared evaluation uses `operation: evaluate`, a new attempt, and `evaluation: {scope: initial}`. Completed/failed/missing/pending denominators remain visible; incomplete evaluation cannot pass final eligibility. Shared COCO uses acquired image/reference/demo/scorer identities. A single named shared COCO or HellaSwag case can distribute whole site/condition panels to independent processes through `evaluation.parallel`.
+Use `cases` for an explicit unique set, or omit selection to execute declared cases. The entire selected set must initially be eligible before the first case starts; a completed case or an attempt needing explicit continuation rejects the operation before other cases create attempts. Each case rechecks eligibility under its lock. Runtime failures after a valid preflight retain completed and partial evidence. Resume requires one case. Shared evaluation uses `operation: evaluate`, a new attempt, and `evaluation: {scope: initial}`. Completed/failed/missing/pending denominators remain visible; incomplete evaluation cannot pass final eligibility. Serial and parallel final gates require the same verified training and observation obligations. Completed terminal scores remain separate from final eligibility when prior observations are pending; missing or corrupt declared observation proof fails explicitly. Shared COCO uses acquired image/reference/demo/scorer identities. A single named shared COCO or HellaSwag case can distribute whole site/condition panels to independent processes through `evaluation.parallel`.
 
 ```yaml
 schema: jscc-experiment-v1
@@ -91,12 +91,12 @@ execution:
     path: ../runs/RECORDED-shared/cases/RECORDED_CASE/attempts/training-PARENT/engine/checkpoint.pt
     parent_attempt: ../runs/RECORDED-shared/cases/RECORDED_CASE/attempts/training-PARENT
     role: RECORDED_ROLE
-    step: 1 # Replace with recorded positive step.
+    step: 1 # Use the recorded step; shared initialization may use 0.
     size_bytes: 1 # Replace with recorded byte size.
     sha256: RECORDED_SHA256
 ```
 
-The checkpoint may be inside the engine subdirectory; parent_attempt identifies its owning durable training attempt. Training compatibility still verifies source/runtime/config and complete optimizer/LR/scaler/RNG/view/phase state. New source cannot masquerade as an old source-compatible resume.
+Shared step zero is accepted only for an exact owned, published initialization checkpoint; ordinary continuation steps remain positive. A validated durable save is published to its recovery inventory before a post-save deadline stops execution, so explicit continuation can select the last published state. The checkpoint may be inside the engine subdirectory; parent_attempt identifies its owning durable training attempt. Training compatibility still verifies source/runtime/config and complete optimizer/LR/scaler/RNG/view/phase state. New source cannot masquerade as an old source-compatible resume.
 
 Study preview/export is nonexecuting:
 

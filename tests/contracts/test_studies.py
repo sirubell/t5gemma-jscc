@@ -261,3 +261,23 @@ def test_evaluation_only_manifest_can_share_training_link(tmp_path, monkeypatch)
         str(tmp_path/"codec.txt"), str(tmp_path/"vanilla.txt")]
     with pytest.raises(ValueError, match="training links must be distinct"):
         run_task(manifest, 0, "train")
+
+
+@pytest.mark.parametrize("checkpoint", ["last.pt", "", False])
+def test_train_checkpoint_rejected_before_manifest_read(tmp_path, checkpoint):
+    from jscc.study_task import run_task
+    manifest = tmp_path / "missing.json"
+    with pytest.raises(ValueError, match="checkpoint is only supported for evaluate"):
+        run_task(manifest, 0, "train", checkpoint=checkpoint)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_train_checkpoint_wrapper_rejects_before_dispatch(tmp_path):
+    import os
+    script = Path(__import__('jscc.study_task', fromlist=['run_task']).__file__).resolve().parents[1] / 'scripts/slurm_study.sh'
+    result = subprocess.run(['/bin/bash', str(script), 'train', 'missing.json', '--checkpoint', 'last.pt'],
+                            env={**os.environ, 'SLURM_SUBMIT_DIR': str(tmp_path)},
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert '--checkpoint requires evaluate' in result.stderr
+    assert list(tmp_path.iterdir()) == []

@@ -7,7 +7,6 @@ from .shared_preparation import _read_prepared, validate_recipe_prepared
 from .activation_replay import canonical_digest, file_digest
 from .experiment_records import write_json_atomic
 from .run_records import reserve_root, bind_case
-from .shared_assets import prepare_recipe_assets
 from .run_records import bound_config
 import math
 import os
@@ -48,6 +47,7 @@ def prepare_recipe_run(recipe, output, *, registrations=None, prepared=None, ass
     if sum(v is not None for v in (registrations, prepared, assets)) != 1:
         raise ValueError('prepare requires registrations, assets or exact prepared reference')
     manifest = None
+    admitted = None
     if prepared is not None:
         from .shared_preparation import workflow_resolution, _read_reference
         from .shared_config import resolve_recipe
@@ -57,24 +57,21 @@ def prepare_recipe_run(recipe, output, *, registrations=None, prepared=None, ass
         if workflow_resolution(resolved, manifest) != manifest['resolved']:
             raise ValueError('authored science differs from prepared receipt')
     if registrations is not None:
-        from .shared_assets import discover_recipe_assets
-        from .shared_preparation import _read_reference
-        from .shared_config import resolve_recipe
-        from .asset_paths import asset_file_path
-        acquired = discover_recipe_assets(recipe, registrations)
-        binding = _read(_read_reference(acquired['model_binding']))
-        resolve_recipe(recipe, model_config_path=asset_file_path(binding['path'], 'config.json'))
+        from .shared_assets import preflight_recipe_assets
+        admitted = preflight_recipe_assets(recipe, registrations)
     elif assets is not None:
-        from .shared_config import resolve_recipe
-        resolve_recipe(recipe, model_config_path=model_config)
+        from .shared_preparation import bind_recipe_workflow
+        manifest = bind_recipe_workflow(recipe, model_config_path=model_config, output=None, **assets)
     root = reserve_root(output, kind='shared-codec-recipe')
     if prepared is None:
         if assets is None:
-            manifest = prepare_recipe_assets(recipe, registrations=registrations, output=root/'preparation')
+            from .shared_assets import _publish_recipe_assets
+            assert admitted is not None
+            manifest = _publish_recipe_assets(recipe, admitted, registrations=registrations, output=root/'preparation')
         else:
-            from .shared_preparation import bind_recipe_workflow
             (root/'preparation').mkdir()
-            manifest = bind_recipe_workflow(recipe, model_config_path=model_config, output=root/'preparation/prepared.json', **assets)
+            with (root/'preparation/prepared.json').open('x') as handle:
+                handle.write(json.dumps(manifest, indent=2)+'\n')
         prepared = {'path': str(root/'preparation/prepared.json'), 'sha256': file_digest(root/'preparation/prepared.json')}
     assert manifest is not None
     # Select actual rows with the data owner's policy, without tokenizing or
@@ -172,12 +169,16 @@ def _resume_reference(case, checkpoint, *, finalize_terminal=False):
     matches = []
     for path in (case/'attempts').glob('training-*/checkpoints.json'):
         attempt = _read(path.parent/'attempt.json')
-        if attempt['status'] not in ('interrupted', 'failed', 'partial'):
+        if attempt.get('case') != str(case.resolve()) or attempt['status'] not in ('interrupted', 'failed', 'partial'):
             continue
-        matches.extend(row for row in _read(path)['checkpoints'] if row['path'] == wanted)
+        if Path(wanted).is_relative_to(path.parent):
+            matches.extend(row for row in _read(path)['checkpoints'] if row['path'] == wanted)
     if len(matches) != 1 or (matches[0]['role'] == 'terminal' and not finalize_terminal):
         raise ValueError('resume requires one recorded nonterminal checkpoint from this case')
     saved = matches[0]
+    if (type(saved.get('step')) is not int or saved['step'] < 0
+            or ((saved['step'] == 0) != (saved['role'] == 'initialization'))):
+        raise ValueError('resume checkpoint step/role differs from published initialization state')
     return CheckpointRef(saved['path'], saved['sha256'], saved['size'])
 
 
@@ -217,6 +218,57 @@ def reconcile_recipe_attempt(root, selected, attempt_id):
     return attempt
 
 
+def _case_attempt_eligibility(case, *, attempt_id='0001', resume=None,
+                              finalize_terminal=False, lock_held=False):
+    """Read attempt eligibility without reserving or changing case evidence."""
+    case = Path(case)
+    if not isinstance(attempt_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', attempt_id):
+        raise ValueError('attempt identifier must be a plain nonempty name')
+    active_lock = case/'.training-active'
+    if not lock_held and (active_lock.exists() or active_lock.is_symlink()):
+        raise FileExistsError('recipe case has an active training lock')
+    directories = list((case/'attempts').glob('training-*'))
+    if any(not (path/'attempt.json').is_file() for path in directories):
+        raise ValueError('recipe training attempt lacks its required record')
+    existing = [path/'attempt.json' for path in directories]
+    attempts = [_read(path) for path in existing]
+    if any(attempt['status'] == 'completed' for attempt in attempts):
+        raise ValueError('recipe case already completed; use its recorded checkpoint for evaluation')
+    if any(attempt['status'] == 'running' for attempt in attempts):
+        raise ValueError('running recipe attempt requires explicit stopped-worker reconciliation')
+    if any(attempt['status'] not in ('failed', 'interrupted', 'partial') for attempt in attempts):
+        raise ValueError('recipe attempt status is ineligible for continuation')
+    if existing and resume is None:
+        raise ValueError('existing recipe attempts require explicit checkpoint continuation; no implicit retry')
+    if (case/'attempts'/f'training-{attempt_id}').exists():
+        raise FileExistsError('recipe training attempt identifier is already occupied')
+    reference = _resume_reference(case, resume, finalize_terminal=finalize_terminal) if resume else None
+    if finalize_terminal and reference is None:
+        raise ValueError('recipe finalization requires an exact terminal checkpoint')
+    if reference is not None and attempt_id == '0001':
+        raise ValueError('recipe continuation requires an explicit new attempt identifier')
+    return reference
+
+def preflight_recipe_cases(root, selected=None, *, attempt_id='0001', resume=None,
+                           finalize_terminal=False):
+    """Check every selected case before execution; omitted selection means all.
+
+    This read-only check does not reserve cases. Each worker rechecks eligibility
+    while holding its case lock to protect against changes after this preflight.
+    """
+    root = Path(root).resolve()
+    record = recipe_run_record(root)
+    available = [row['case_id'] for row in record['cases']]
+    choices = available if selected is None else list(selected)
+    if not choices or len(set(choices)) != len(choices) or any(name not in available for name in choices):
+        raise ValueError('selected recipe cases must be distinct declared cases')
+    if resume is not None and len(choices) != 1:
+        raise ValueError('resume requires one explicit case')
+    for name in choices:
+        _case_attempt_eligibility(root/'cases'/name, attempt_id=attempt_id,
+            resume=resume, finalize_terminal=finalize_terminal)
+    return choices
+
 def train_recipe_case(root, selected, *, attempt_id='0001', resume=None,
                       timeout_seconds=86400, device_uuid=None, finalize_terminal=False):
     """Execute one pending case or explicitly continue its recorded checkpoint."""
@@ -233,16 +285,8 @@ def train_recipe_case(root, selected, *, attempt_id='0001', resume=None,
     attempt = None
     started = time.perf_counter()
     try:
-        existing = list((case/'attempts').glob('training-*/attempt.json'))
-        if any(_read(path)['status'] == 'completed' for path in existing):
-            raise ValueError('recipe case already completed; use its recorded checkpoint for evaluation')
-        if existing and resume is None:
-            raise ValueError('existing recipe attempts require explicit checkpoint continuation; no implicit retry')
-        reference = _resume_reference(case, resume, finalize_terminal=finalize_terminal) if resume else None
-        if finalize_terminal and reference is None:
-            raise ValueError('recipe finalization requires an exact terminal checkpoint')
-        if reference is not None and attempt_id == '0001':
-            raise ValueError('recipe continuation requires an explicit new attempt identifier')
+        reference = _case_attempt_eligibility(case, attempt_id=attempt_id,
+            resume=resume, finalize_terminal=finalize_terminal, lock_held=True)
         attempt = reserve_attempt(case, 'training', attempt_id=attempt_id,
                                   request={'case_id': selected, 'resume': None if reference is None else reference.__dict__})
         validate_reserved_attempt(attempt, 'training')

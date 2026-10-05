@@ -262,3 +262,109 @@ def test_custom_channel_scalar_and_extra_state_survive_identity_capture(tmp_path
     state = torch.load(attempt / "best.pt", weights_only=True)
     assert state["channel"]["gain"].item() == 0.5
     assert state["channel"]["_extra_state"] == {"protocol": "fixture-channel"}
+
+
+@pytest.fixture
+def mock_recorded_ordinary_root(tmp_path, monkeypatch):
+    """Bound root/checkpoint records only; no model, training or source probing."""
+    monkeypatch.setattr(_body_run_records, "source_state", lambda: {"fixture": "source-pin"})
+    monkeypatch.setattr(_body_run_records, "runtime_identity", lambda: {"fixture": "runtime"})
+    def prepare(task):
+        config = load_config(REPO / f"configs/experiments/ordinary/{task}.yaml")
+        root = ordinary_runs.prepare_task(config, tmp_path / task)
+        bound = _body_run_records.bound_config(root)
+        attempt = _body_run_records.reserve_attempt(root, "training", attempt_id="recorded")
+        checkpoint = attempt / "best.pt"
+        torch.save({"config": bound, "step": 1}, checkpoint)
+        _body_run_records.finish_attempt(attempt, "completed")
+        target = ordinary_runs._checkpoint(checkpoint, role="ordinary-best", expected_config=bound)
+        _body_run_records.write_json_atomic(root / "checkpoint.json", target)
+        return root, bound, checkpoint
+    return prepare
+
+
+@pytest.mark.parametrize("task,overrides,message", [
+    ("coco", {"scoring_policy": "legacy"}, "COCO does not consume candidate scoring controls"),
+    ("coco", {"num_fewshot": 5}, "COCO does not consume candidate scoring controls"),
+    ("hellaswag", {"max_new_tokens": 12}, "HellaSwag does not consume max_new_tokens"),
+])
+def test_public_supplemental_inactive_controls_fail_before_model(
+        tmp_path, monkeypatch, mock_recorded_ordinary_root, task, overrides, message):
+    from request_helpers import invoke
+    root, bound, checkpoint = mock_recorded_ordinary_root(task)
+    override = tmp_path / "overrides.yaml"
+    override.write_text(yaml.safe_dump(overrides))
+    monkeypatch.setattr(evaluation, "build_model", lambda _: pytest.fail("inactive override loaded a model"))
+    with pytest.raises(ValueError, match=message) as failure:
+        invoke(tmp_path, "ordinary", "evaluate", {"root": str(root), "attempt": "inactive",
+               "evaluation": {"overrides": str(override)}})
+    attempt = root / "evaluations/evaluation-inactive"
+    record = read(attempt / "attempt.json")
+    assert record["status"] == "failed"
+    assert record["details"]["error_type"] == "ValueError"
+    assert record["details"]["message"] == str(failure.value)
+    assert read(root / "attempts/training-recorded/attempt.json")["status"] == "completed"
+    assert _body_run_records.bound_config(root) == bound and checkpoint.is_file()
+    assert not (attempt / "config.yaml").exists()
+    assert not (attempt / "results.json").exists()
+
+
+def test_merged_override_ownership_and_operational_controls_before_model(
+        tmp_path, monkeypatch, mock_recorded_ordinary_root):
+    root, config, checkpoint = mock_recorded_ordinary_root("hellaswag")
+    overrides = tmp_path / "operational.yaml"
+    overrides.write_text(yaml.safe_dump({"device": "cpu", "channel": {
+        "type": "identity", "kwargs": {}}, "num_fewshot": 2}))
+    class ReachedModel(Exception):
+        pass
+    def build(actual):
+        assert actual["model"]["device"] == "cpu"
+        assert actual["evaluation"]["channel"] == {"type": "identity", "kwargs": {}}
+        assert actual["evaluation"]["num_fewshot"] == 2
+        raise ReachedModel
+    monkeypatch.setattr(evaluation, "build_model", build)
+    with pytest.raises(ReachedModel):
+        evaluation.evaluate(checkpoint.parent, "best.pt", overrides)
+
+
+def test_public_prepare_retains_nested_design_text_path_and_hash(tmp_path, monkeypatch):
+    from jscc.experiment import execute
+    from jscc.evaluation_policy import file_digest
+    monkeypatch.setattr(_body_run_records, "source_state", lambda: {"fixture": "source-pin"})
+    monkeypatch.setattr(_body_run_records, "runtime_identity", lambda: {"fixture": "runtime"})
+    document = yaml.safe_load((REPO / "configs/experiments/ordinary/coco.yaml").read_text())
+    design = tmp_path / "designs" / "chosen.yaml"
+    design.parent.mkdir()
+    design.write_text((REPO / "configs/models/default.yaml").read_text())
+    document["experiment"]["model_config"] = "designs/chosen.yaml"
+    document["operation"] = "prepare"
+    document["execution"] = {"root": str(tmp_path / "prepared"), "preparation": {}}
+    request = tmp_path / "request.yaml"
+    request.write_text(yaml.safe_dump(document, sort_keys=False))
+    expected = [{"path": str(p.resolve()), "text": p.read_text(), "sha256": file_digest(p)}
+                for p in (request, design)]
+    root = execute(request)
+    record = read(root / "case.json")
+    assert record["authored"] == expected
+    bound = _body_run_records.bound_config(root)
+    design.write_text("changed: after-binding\n")
+    design.unlink()
+    assert read(root / "case.json")["authored"] == expected
+    assert _body_run_records.bound_config(root) == bound
+    assert not (root / "attempts").exists()
+
+
+def test_saved_direct_task_keeps_model_design_provenance(tmp_path, monkeypatch):
+    from jscc.evaluation_policy import file_digest
+    monkeypatch.setattr(_body_run_records, "source_state", lambda: {"fixture": "source-pin"})
+    monkeypatch.setattr(_body_run_records, "runtime_identity", lambda: {"fixture": "runtime"})
+    authored = tmp_path / "legacy-task.yaml"
+    design = tmp_path / "legacy-model.yaml"
+    authored.write_text("model_config: legacy-model.yaml\n")
+    design.write_text("model: retained-direct-reader\n")
+    config = load_config(REPO / "configs/experiments/ordinary/hellaswag.yaml")
+    root = _body_run_records.reserve_root(tmp_path / "legacy-root")
+    _body_run_records.bind_case(root, config, authored_config=authored)
+    assert read(root / "case.json")["authored"] == [
+        {"path": str(p.resolve()), "text": p.read_text(), "sha256": file_digest(p)}
+        for p in (authored, design)]

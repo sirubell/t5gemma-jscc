@@ -114,13 +114,12 @@ def run_recipe_training(model, processor, *, plan, batches, metadata, output, gu
         def publish(role):
             guard()
             saved = state_machine.save(output/f'step_{learner.completed:06d}_{role}.pt')
-            guard()
             result['checkpoints'].append({'role': role, **asdict(saved.reference)})
             result['completed_updates'] = learner.completed
             write_manifest(output/'campaign.json', result)
             if on_checkpoint is not None:
                 on_checkpoint(saved, role)
-                guard()
+            guard()
             return saved
 
         if finalize_terminal:

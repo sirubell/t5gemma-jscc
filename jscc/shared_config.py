@@ -106,6 +106,74 @@ def validate_authored_recipe(recipe):
         fields(values, allowed, 'shared overrides.'+section)
 
 
+
+def validate_shared_base(config):
+    """Own plain task fields before recipe derivation replaces compatibility data."""
+    from .experiment import fields, FIELDS
+    fields(config, {'task', 'seed', 'protocol', 'model', 'split', 'codec', 'channel',
+                    'run', 'data', 'training', 'evaluation'}, 'shared task base',
+           ('task', 'seed', 'model', 'split', 'codec', 'channel', 'run', 'data', 'training', 'evaluation'))
+    if config['task'] not in ('hellaswag', 'coco') or type(config['seed']) is not int or config['seed'] < 0:
+        raise ValueError('shared task/seed differs')
+    for section in ('model', 'split', 'codec', 'channel', 'run'):
+        fields(config[section], FIELDS[section], 'shared task.'+section)
+    if 'memory' in config['codec']:
+        fields(config['codec']['memory'], FIELDS['codec']-{'memory'}, 'shared task.codec.memory')
+    data = config['data']
+    data_fields = {'name', 'revision', 'num_train', 'selection_seed'}
+    data_fields |= ({'row_ids', 'max_length', 'prompt_policy', 'num_validation', 'num_workers'}
+                    if config['task'] == 'hellaswag' else
+                    {'karpathy_name', 'karpathy_revision', 'num_demos', 'max_prompt_length',
+                     'max_target_length', 'caption_policy', 'caption_seed'})
+    fields(data, data_fields, 'shared task.data')
+    if 'num_workers' in data and (type(data['num_workers']) is not int or data['num_workers'] != 0):
+        raise ValueError('shared task.data.num_workers is compatibility-only zero')
+    if data.get('prompt_policy') is not None:
+        fields(data['prompt_policy'], {'version', 'mode', 'seed', 'source_max_length'}, 'shared task.data.prompt_policy')
+    training = config['training']
+    active = {'batch_size', 'gradient_accumulation', 'lr', 'weight_decay', 'warmup_ratio',
+              'min_lr_ratio', 'grad_clip', 'temperature', 'betas', 'eps', 'optimizer',
+              'deterministic_algorithms', 'presentation_stream'}
+    # These named values preserve existing task snapshots; they are not alternate
+    # shared stopping, selection, objective or save controls.
+    compatibility = {'streamed_backward': True, 'valid_only_kl': True,
+                     'low_sync_logging': False, 'mixed_precision': False,
+                     'expected_attention_backend': 'sdpa'}
+    legacy = config.get('protocol') == 'sharing-dn-native16-long-v1'
+    if legacy and config['task'] != 'hellaswag':
+        raise ValueError('shared task historical protocol requires HellaSwag')
+    if legacy:
+        compatibility.update(max_steps=6400, schedule_steps=6400, kl_weight=1.0, mse_weight=.1,
+                             eval_every=3200, validation_snrs=['no_noise'], validation_batches=None,
+                             monitor='loss', patience=None, min_steps=0, min_delta=.005,
+                             log_every=50, save_steps=[3200, 6400], feature_summary=None)
+    fields(training, active | compatibility.keys(), 'shared task.training')
+    for name, expected in compatibility.items():
+        if name in training and (training[name] != expected or type(training[name]) is not type(expected)):
+            raise ValueError('shared task.training.'+name+' differs from its compatibility-only value')
+    if 'deterministic_algorithms' in training and type(training['deterministic_algorithms']) is not bool:
+        raise ValueError('shared task.training.deterministic_algorithms requires boolean')
+    if 'presentation_stream' in training:
+        stream = fields(training['presentation_stream'], {'policy', 'seed', 'start_presentation', 'total_presentations'},
+                        'shared task.training.presentation_stream')
+        if ('total_presentations' in stream and (not legacy or stream['total_presentations'] != 102400
+                                                or type(stream['total_presentations']) is not int)):
+            raise ValueError('shared task stream total_presentations is derived, not an authored control')
+        if (stream.get('policy') != 'epoch-permutations-v1' or type(stream.get('seed')) is not int
+                or stream['seed'] < 0 or type(stream.get('start_presentation', 0)) is not int
+                or stream.get('start_presentation', 0) != 0):
+            raise ValueError('shared task stream requires indexed epoch permutations from zero')
+    evaluation = config['evaluation']
+    legacy_evaluation = {'snrs': ['no_noise', -6, 0, 6, 12, 18], 'batch_size': 16,
+                         'num_samples': 10042, 'num_fewshot': 5, 'vanilla': False,
+                         'scoring_policy': 'fp32-v1', 'evidence_mode': 'compact-v1', 'mode': 'codec_only',
+                         'noise_seed': 0, 'deterministic_algorithms': True, 'attention_backend': 'sdpa'}
+    fields(evaluation, legacy_evaluation if legacy else set(), 'shared task.evaluation')
+    for name, value in evaluation.items():
+        expected = legacy_evaluation[name]
+        if value != expected or type(value) is not type(expected):
+            raise ValueError('shared task.evaluation.'+name+' differs from its compatibility-only value')
+
 def resolve_recipe(path, *, model_config_path):
     """Resolve without downloading assets, loading tensors or authorizing a run.
 
@@ -119,6 +187,7 @@ def resolve_recipe(path, *, model_config_path):
     if not isinstance(recipe, dict) or set(recipe) != required or recipe['schema'] != RECIPE_SCHEMA:
         raise ValueError('unsupported recipe schema or fields (derived budgets must not be declared)')
     config = load_config(path.parent / recipe['task_config'], validate=False)
+    validate_shared_base(config)
     # Compatibility-only ordinary selection fields are derived, never shared controls.
     config['training'].setdefault('eval_every', 1)
     config['training'].setdefault('validation_snrs', ['no_noise'])

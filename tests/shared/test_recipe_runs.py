@@ -30,7 +30,8 @@ def public(recipe, registrations, root, *extra):
     from request_helpers import invoke
     from jscc.shared_config import read_recipe
     from jscc.shared_runs import recipe_run_record
-    options = dict(zip(extra[::2], extra[1::2])) if '--prepare-only' not in extra else {}
+    arguments = [value for value in extra if value != '--finalize-terminal']
+    options = dict(zip(arguments[::2], arguments[1::2])) if '--prepare-only' not in extra else {}
     if not Path(root).exists():
         science = read_recipe(recipe)
         science.pop('schema')
@@ -46,6 +47,8 @@ def public(recipe, registrations, root, *extra):
             saved = next(row for row in index['checkpoints'] if row['path'] == str(checkpoint))
             ex['continuation'] = {'path': str(checkpoint), 'sha256': saved['sha256'], 'size_bytes': saved['size'],
                                    'role': saved['role'], 'step': saved['step'], 'parent_attempt': str(checkpoint.parents[1])}
+            if '--finalize-terminal' in extra:
+                ex['continuation']['finalize_terminal'] = True
             invoke(recipe.parent, 'shared', 'resume', ex)
         else:
             invoke(recipe.parent, 'shared', 'train', ex)
@@ -234,8 +237,11 @@ def test_multiple_cases_selection_frozen_yaml_and_record_integrity(joined_assets
     assert not (selected/'cases/width-8-ratio-50/attempts').exists()
     with pytest.raises(ValueError, match='already completed'):
         public(recipe, registrations, selected, '--case', 'width-8-ratio-75')
-    with pytest.raises(ValueError, match='explicit named case'):
+    with pytest.raises(ValueError, match='already completed'):
         public(recipe, registrations, selected)
+    assert not (selected/'cases/width-8-ratio-50/attempts').exists()
+    assert not list(selected.glob('cases/*/.training-active'))
+    assert not (selected/'cases/width-8-ratio-50/training.json').exists()
     case_record = selected/'cases/width-8-ratio-50/counts.json'
     case_record.write_text('{}')
     with pytest.raises(ValueError, match='record changed'):
@@ -419,3 +425,25 @@ def test_bound_request_helper_uses_recorded_root_without_authored_yaml(tmp_path,
     assert public(authored, tmp_path/'registrations', root, '--case', 'recorded-case') == expected
     assert calls == [('shared', 'train', {'root': str(root), 'attempt': '0001',
         'timeout_seconds': 600, 'case': 'recorded-case'}, None)]
+
+
+@pytest.mark.parametrize('flag_position', ['before', 'after'])
+def test_public_helper_preserves_standalone_terminal_finalization(tmp_path, monkeypatch, flag_position):
+    root = tmp_path/'bound'
+    checkpoint = root/'cases/case/attempts/training-prior/engine/terminal.pt'
+    checkpoint.parent.mkdir(parents=True)
+    saved = {'path': str(checkpoint), 'sha256': '1'*64, 'size': 1, 'role': 'terminal', 'step': 24}
+    (checkpoint.parents[1]/'checkpoints.json').write_text(json.dumps({'checkpoints': [saved]}))
+    calls = []
+    monkeypatch.setattr('request_helpers.invoke', lambda directory, workflow, operation, execution, science=None:
+        calls.append((workflow, operation, execution, science)))
+    record = {'cases': ['case']}
+    monkeypatch.setattr('jscc.shared_runs.recipe_run_record', lambda value: record)
+    arguments = ['--case', 'case', '--resume', str(checkpoint), '--attempt', 'finalize']
+    arguments.insert(0 if flag_position == 'before' else len(arguments), '--finalize-terminal')
+    assert public(tmp_path/'unused.yaml', tmp_path/'registrations', root, *arguments) == record
+    assert calls == [('shared', 'resume', {'root': str(root), 'attempt': 'finalize',
+        'timeout_seconds': 600, 'case': 'case', 'continuation': {
+            'path': str(checkpoint), 'sha256': saved['sha256'], 'size_bytes': 1,
+            'role': 'terminal', 'step': 24, 'parent_attempt': str(checkpoint.parents[1]),
+            'finalize_terminal': True}}, None)]

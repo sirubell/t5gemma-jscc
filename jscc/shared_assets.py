@@ -95,7 +95,8 @@ def register_recipe_assets(*, model_name, model_binding, cache, observation_temp
               'observation_template': deepcopy(observation_template),
               'terminal_template': deepcopy(terminal_template), 'synthetic_cpu': synthetic}
     record['identity'] = canonical_digest(record)
-    _write(output, record)
+    if output is not None:
+        _write(output, record)
     return record
 
 
@@ -113,6 +114,8 @@ def discover_recipe_assets(recipe_path, registrations):
     path = Path(recipe_path).resolve()
     recipe = read_recipe(path)
     config = load_config(path.parent/recipe['task_config'], validate=False)
+    from .shared_config import validate_shared_base
+    validate_shared_base(config)
     # resolve_recipe validates all overrides; selection only needs their data pin.
     data = {**config['data'], **recipe.get('overrides', {}).get('data', {})}
     key = (config['model']['name'], config['model']['revision'], data['name'], data['revision'])
@@ -189,16 +192,14 @@ def _initializer(config, directory):
     return {**reference, 'acquisition': acquisition}
 
 
-def prepare_recipe_assets(recipe_path, *, registrations, output, study_pairing_id=None):
-    """Prepare recipe-prepared-v1 in a fresh owned directory, cache-only.
-
-    Returns the existing manifest. Creates deterministic width/seed codec states,
-    fixed-panel prefixes and complete YAML plans, with no backbone load and no
-    per-update tensors. Consumer reads output/prepared.json and its checksum.
-    A failure retains partial outputs and never overwrites/retries them.
-    """
+def preflight_recipe_assets(recipe_path, registrations):
+    """Admit existing registration references and panel requests without writes."""
     started = time.perf_counter()
     record = discover_recipe_assets(recipe_path, registrations)
+    register_recipe_assets(model_name=record['model_name'], model_binding=record['model_binding'],
+                           cache=record['cache'], observation_template=record['observation_template'],
+                           terminal_template=record['terminal_template'], synthetic=record['synthetic_cpu'],
+                           output=None)
     assets = json.loads(_read_reference(record['model_binding']).read_text())
     from .asset_paths import asset_file_path, normalize_asset_path
     model_path = normalize_asset_path(assets['path'])
@@ -207,6 +208,25 @@ def prepare_recipe_assets(recipe_path, *, registrations, output, study_pairing_i
     first = resolved['trajectories'][0]
     observation = _panel(record['observation_template'], first['observations'][0]['items'], first['evaluation'])
     terminal = _panel(record['terminal_template'], first['evaluation']['items'], first['evaluation'])
+    return started, record, model_path, resolved, observation, terminal
+
+
+def prepare_recipe_assets(recipe_path, *, registrations, output, study_pairing_id=None):
+    """Prepare recipe-prepared-v1 in a fresh owned directory, cache-only.
+
+    Returns the existing manifest. Creates deterministic width/seed codec states,
+    fixed-panel prefixes and complete YAML plans, with no backbone load and no
+    per-update tensors. Consumer reads output/prepared.json and its checksum.
+    A failure retains partial outputs and never overwrites/retries them.
+    """
+    admitted = preflight_recipe_assets(recipe_path, registrations)
+    return _publish_recipe_assets(recipe_path, admitted, registrations=registrations, output=output,
+                                  study_pairing_id=study_pairing_id)
+
+
+def _publish_recipe_assets(recipe_path, admitted, *, registrations, output, study_pairing_id=None):
+    """Publish an admitted registration; retain failures after reservation."""
+    started, record, model_path, resolved, observation, terminal = admitted
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     observation_ref = _write(output/'observation.json', observation)

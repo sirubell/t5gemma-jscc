@@ -228,3 +228,194 @@ def test_quoted_evaluation_booleans_reject_before_binding(tmp_path, field, opera
     with pytest.raises(ValueError, match='evaluation.'+field):
         execute(write(tmp_path, value))
     assert not (tmp_path/'root').exists()
+
+
+@pytest.mark.parametrize('operation', ['check', 'prepare', 'train', 'evaluate'])
+def test_coco_rejects_unused_selection_seed_before_output(tmp_path, operation):
+    value = yaml.safe_load((ROOT/'configs/experiments/ordinary/coco.yaml').read_text())
+    value['experiment']['model_config'] = str(ROOT/'configs/models/default.yaml')
+    value['experiment']['data']['selection_seed'] = 17
+    root = tmp_path/'root'
+    output = tmp_path/'resolved.json'
+    execution: dict
+    if operation == 'check':
+        execution = {'resolution': {'output': str(output)}}
+    elif operation == 'prepare':
+        execution = {'root': str(root), 'preparation': {}}
+    else:
+        execution = {'root': str(root), 'attempt': 'fresh'}
+        if operation == 'evaluate':
+            execution['evaluation'] = {}
+    value.update(operation=operation, execution=execution)
+    filename = write(tmp_path, value)
+    with pytest.raises(ValueError, match="inactive task data fields:.*selection_seed"):
+        execute(filename)
+    assert list(tmp_path.iterdir()) == [filename]
+    assert not root.exists() and not output.exists()
+
+
+
+def shared_plain_request(tmp_path, operation='check'):
+    task = yaml.safe_load((ROOT/'configs/experiments/shared/base.yaml').read_text())
+    task['model_config'] = str(ROOT/'configs/models/shared_direct_affine.yaml')
+    task_path = write(tmp_path, task, 'base.yaml')
+    model = tmp_path/'model'
+    model.mkdir()
+    metadata = model/'config.json'
+    metadata.write_text(json.dumps({'encoder': {'num_hidden_layers': 26, 'hidden_size': 1152},
+                                    'decoder': {'num_hidden_layers': 26, 'hidden_size': 1152}}))
+    value = yaml.safe_load((ROOT/'configs/experiments/shared/shared_hellaswag_example.yaml').read_text())
+    value['experiment']['task_config'] = str(task_path)
+    value['operation'] = operation
+    root = tmp_path/'uncreated-root'
+    if operation == 'check':
+        value['execution'] = {'resolution': {'model_config': str(metadata), 'output': str(tmp_path/'resolution.json')}}
+    else:
+        assets = tmp_path/'assets.json'
+        assets.write_text(json.dumps({'model_path': str(model), 'model_binding': {'path': 'unread-binding', 'sha256': 'a'*64},
+            'cache_manifest': 'unread-cache', 'cache_sha256': 'bad', 'initializations': {},
+            'observation_template': {'path': 'unread-observation', 'sha256': 'a'*64},
+            'terminal_template': {'path': 'unread-terminal', 'sha256': 'a'*64}, 'study_pairing_id': 'fixture', 'synthetic': True}))
+        value['execution'] = {'root': str(root), 'preparation': {'model_config': str(metadata), 'assets': str(assets)}}
+    return value, task, task_path, root
+
+
+@pytest.mark.parametrize('operation', ['check', 'prepare'])
+@pytest.mark.parametrize('section,field,value', [
+    ('training', 'typo_lr', .1), ('training', 'max_minutes', 2),
+    ('training', 'selection_steps', [1]), ('data', 'num_report', 3),
+])
+def test_shared_plain_base_rejects_unknown_and_inactive_before_output(tmp_path, operation, section, field, value):
+    request_value, task, task_path, root = shared_plain_request(tmp_path, operation)
+    task[section][field] = value
+    task_path.write_text(yaml.safe_dump(task))
+    with pytest.raises(ValueError, match='shared task.'+section):
+        execute(write(tmp_path, request_value))
+    assert not root.exists() and not (tmp_path/'resolution.json').exists()
+
+
+def test_shared_plain_base_accepts_named_fixed_compatibility_values(tmp_path):
+    value, _, _, _ = shared_plain_request(tmp_path)
+    resolved = execute(write(tmp_path, value))
+    training = resolved['trajectories'][0]['config']['training']
+    assert training['streamed_backward'] is True and training['valid_only_kl'] is True
+    assert training['low_sync_logging'] is False and training['expected_attention_backend'] == 'sdpa'
+
+
+@pytest.mark.parametrize('workflow,step,role,valid', [
+    ('shared', 0, 'initialization', True), ('shared', 1, 'reconstruction', True),
+    ('shared', True, 'initialization', False), ('shared', False, 'initialization', False),
+    ('shared', -1, 'initialization', False), ('shared', 0.0, 'initialization', False),
+    ('shared', 0, 'terminal', False), ('ordinary', 0, 'ordinary-last', False),
+    ('ordinary', 1, 'ordinary-last', True),
+])
+def test_continuation_step_parser_retains_workflow_semantics(tmp_path, workflow, step, role, valid):
+    value = request('resume', workflow, root='root', attempt='next',
+                    continuation={'path': 'checkpoint.pt', 'sha256': 'a'*64, 'size_bytes': 1,
+                                  'role': role, 'step': step, 'parent_attempt': 'parent'})
+    filename = write(tmp_path, value)
+    if valid:
+        assert read_request(filename)[1]['execution']['continuation']['step'] == step
+    else:
+        with pytest.raises(ValueError, match='step'):
+            read_request(filename)
+
+
+def published_initialization(tmp_path):
+    from jscc.activation_replay import file_digest
+    case = tmp_path/'root/cases/one'
+    parent = case/'attempts/training-parent'
+    engine = parent/'engine'
+    engine.mkdir(parents=True)
+    checkpoint = engine/'step_000000_initialization.pt'
+    checkpoint.write_bytes(b'owned checkpoint fixture bytes; no tensor/model load')
+    row = {'path': str(checkpoint), 'sha256': file_digest(checkpoint), 'size': checkpoint.stat().st_size,
+           'step': 0, 'role': 'initialization'}
+    (parent/'attempt.json').write_text(json.dumps({'case': str(case), 'status': 'partial'}))
+    (parent/'checkpoints.json').write_text(json.dumps({'checkpoints': [row]}))
+    return case, parent, checkpoint, row
+
+
+@pytest.mark.parametrize('mutation', ['valid', 'unrecorded', 'role', 'bool_step', 'foreign_case', 'foreign_checkpoint', 'duplicate'])
+def test_shared_resume_zero_requires_owned_published_initialization(tmp_path, mutation):
+    from jscc.shared_runs import _resume_reference
+    case, parent, checkpoint, row = published_initialization(tmp_path)
+    rows = [row]
+    if mutation == 'unrecorded':
+        rows = []
+    elif mutation == 'role':
+        row['role'] = 'reconstruction'
+    elif mutation == 'bool_step':
+        row['step'] = False
+    elif mutation == 'foreign_case':
+        (parent/'attempt.json').write_text(json.dumps({'case': str(tmp_path/'foreign'), 'status': 'partial'}))
+    elif mutation == 'foreign_checkpoint':
+        checkpoint = tmp_path/'foreign-zero.pt'
+        checkpoint.write_bytes(b'unowned zero-step bytes')
+        row['path'] = str(checkpoint)
+    elif mutation == 'duplicate':
+        rows.append(deepcopy(row))
+    (parent/'checkpoints.json').write_text(json.dumps({'checkpoints': rows}))
+    if mutation == 'valid':
+        reference = _resume_reference(case, checkpoint)
+        assert reference.path == row['path'] and reference.sha256 == row['sha256'] and reference.size == row['size']
+    else:
+        with pytest.raises(ValueError, match='resume'):
+            _resume_reference(case, checkpoint)
+
+
+@pytest.mark.parametrize('mutation', ['valid', 'hash', 'size', 'role', 'bool_step'])
+def test_public_shared_zero_resume_binds_exact_checkpoint_record(tmp_path, monkeypatch, mutation):
+    from jscc import experiment, shared_runs
+    case, parent, checkpoint, row = published_initialization(tmp_path)
+    continuation = {'path': row['path'], 'sha256': row['sha256'], 'size_bytes': row['size'],
+                    'step': 0, 'role': 'initialization', 'parent_attempt': str(parent)}
+    if mutation == 'hash':
+        row['sha256'] = 'b'*64
+    elif mutation == 'size':
+        row['size'] += 1
+    elif mutation == 'role':
+        row['role'] = 'reconstruction'
+    elif mutation == 'bool_step':
+        row['step'] = False
+    (parent/'checkpoints.json').write_text(json.dumps({'checkpoints': [row]}))
+    calls = []
+    monkeypatch.setattr(experiment, '_bound', lambda *args: {})
+    monkeypatch.setattr(shared_runs, 'recipe_run_record', lambda root: {'cases': [{'case_id': 'one'}]})
+    monkeypatch.setattr(shared_runs, 'train_recipe_case', lambda *args, **kwargs: calls.append(kwargs))
+    value = request('resume', 'shared', root=str(case.parents[1]), case='one', attempt='next', continuation=continuation)
+    filename = write(tmp_path, value)
+    if mutation == 'valid':
+        execute(filename)
+        assert len(calls) == 1 and calls[0]['resume'] == str(checkpoint)
+    else:
+        with pytest.raises(ValueError, match='continuation checkpoint role/step/attempt'):
+            execute(filename)
+        assert calls == []
+
+
+@pytest.mark.parametrize('operation', ['check', 'prepare'])
+@pytest.mark.parametrize('metadata', ['protocol_only', 'candidate_controls', 'budget_controls'])
+def test_shared_coco_rejects_hellaswag_compatibility_before_output(tmp_path, operation, metadata):
+    _, _, task_path, root = shared_plain_request(tmp_path, operation)
+    task = yaml.safe_load((ROOT/'configs/experiments/shared/coco_base.yaml').read_text())
+    task['model_config'] = str(ROOT/'configs/models/shared_direct_affine.yaml')
+    task['protocol'] = 'sharing-dn-native16-long-v1'
+    if metadata == 'candidate_controls':
+        task['evaluation'].update(num_fewshot=5, scoring_policy='fp32-v1')
+    elif metadata == 'budget_controls':
+        task['training'].update(max_steps=6400, schedule_steps=6400)
+    task_path.write_text(yaml.safe_dump(task))
+    value = yaml.safe_load((ROOT/'configs/experiments/shared/shared_coco_example.yaml').read_text())
+    value['experiment']['task_config'] = str(task_path)
+    value['operation'] = operation
+    model_config = tmp_path/'model/config.json'
+    if operation == 'check':
+        value['execution'] = {'resolution': {'model_config': str(model_config),
+                                           'output': str(tmp_path/'resolution.json')}}
+    else:
+        value['execution'] = {'root': str(root), 'preparation': {
+            'model_config': str(model_config), 'assets': str(tmp_path/'assets.json')}}
+    with pytest.raises(ValueError, match='shared task historical protocol requires HellaSwag'):
+        execute(write(tmp_path, value))
+    assert not root.exists() and not (tmp_path/'resolution.json').exists()

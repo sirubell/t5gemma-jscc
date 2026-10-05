@@ -152,14 +152,14 @@ def validate_recipe_prepared(manifest, *, resolved=None, check_source=True):
 def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_binding, cache_manifest, cache_sha256,
                          initializations, observation_template, terminal_template, study_pairing_id,
                          output, synthetic=False):
-    """Acquire a new source receipt reusing already acquired immutable assets."""
+    """Validate acquired assets; output=None admits without publishing a receipt."""
     from .runtime import source_state
     model_path = _asset_path(model_path)
     config_path = Path(model_config_path).resolve()
     from .asset_paths import asset_file_path
+    resolved = resolve_recipe(recipe_path, model_config_path=config_path)
     if config_path != asset_file_path(model_path, 'config.json'):
         raise ValueError('recipe topology must come from acquired model config')
-    resolved = resolve_recipe(recipe_path, model_config_path=config_path)
     revision = resolved['trajectories'][0]['config']['model']['revision']
     cache_ref = {'path': str(Path(cache_manifest).resolve()), 'sha256': cache_sha256}
     assets = json.loads(_read_reference(model_binding).read_text())
@@ -185,8 +185,9 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_bi
         initial = torch.load(path, map_location='cpu', weights_only=True)
         if state_dict_identity(initial) != ref['state_identity']:
             raise ValueError('recipe acquired initializer tensor identity differs')
-    with Path(output).open('x') as handle:
-        handle.write(json.dumps(manifest, indent=2)+'\n')
+    if output is not None:
+        with Path(output).open('x') as handle:
+            handle.write(json.dumps(manifest, indent=2)+'\n')
     return manifest
 
 

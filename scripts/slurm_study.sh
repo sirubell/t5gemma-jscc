@@ -31,6 +31,9 @@ while (( $# )); do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [[ "$phase" == train && -n "$checkpoint" ]]; then
+  echo "--checkpoint requires evaluate" >&2; exit 2
+fi
 if [[ "$fixed_step" == true || -n "$expected_step" ]]; then
   if [[ "$phase" != evaluate || -z "$checkpoint" || ! "$expected_step" =~ ^[1-9][0-9]*$ ]]; then
     echo "Fixed-step evaluation requires evaluate, --checkpoint and positive --expected-step together" >&2

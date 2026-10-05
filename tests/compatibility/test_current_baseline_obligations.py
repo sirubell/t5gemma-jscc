@@ -213,7 +213,10 @@ def test_current_runner_faults_never_publish_freeze(tmp_path, monkeypatch, fault
         if expired[0] or (fault == "guard" and actual and actual[0].completed == 1):
             raise TimeoutError("allocation deadline")
 
+    published = []
+
     def saved(state, role):
+        published.append({"role": role, **asdict(state.reference)})
         if fault == "deadline_after_save" or (
             fault == "terminal_deadline" and role == "terminal"
         ):
@@ -244,6 +247,9 @@ def test_current_runner_faults_never_publish_freeze(tmp_path, monkeypatch, fault
         assert (
             result["status"] == "incomplete"
         )  # Freeze bytes cannot erase failed publication.
+    if fault in {"deadline_after_save", "terminal_deadline", "terminal_save_deadline"}:
+        assert result["checkpoints"] == published
+        assert published[-1]["role"] == ("initialization" if fault == "deadline_after_save" else "terminal")
     if fault in {"event_append", "ambiguous_optimizer"}:
         assert (
             actual[0].failed

@@ -223,3 +223,119 @@ def test_simultaneous_first_use_waits_for_atomic_initializer_receipt(joined_asse
         assert first.result(timeout=5) == second.result(timeout=5)
     assert len(list(directory.glob('*/initial.pt'))) == 1
     assert len(list(directory.glob('*/reference.json'))) == 1
+
+
+@pytest.fixture
+def entry_explicit_assets(tmp_path, monkeypatch):
+    """Reference admission fixture only: no backbone, cache decoding or training."""
+    from jscc import shared_preparation, runtime
+    model = tmp_path/'model'
+    model.mkdir()
+    (model/'config.json').write_text(json.dumps({'encoder': {'num_hidden_layers': 2, 'hidden_size': 16},
+                                               'decoder': {'num_hidden_layers': 2, 'hidden_size': 16}}))
+    binding = tmp_path/'binding.json'
+    binding.write_text(json.dumps({'path': str(model), 'revision': 'fixture'}))
+    cache = tmp_path/'cache.json'
+    cache.write_text('{}')
+    panel = tmp_path/'panel.json'
+    panel.write_text('{}')
+    initial = tmp_path/'initial.pt'
+    initial.write_bytes(b'not decoded by negative reference checks')
+    def ref(path):
+        return {'path': str(path), 'sha256': file_digest(path)}
+    item = {'width': 8, 'ratio': 50, 'locations': ['enc_fn'],
+            'config': {'model': {'revision': 'fixture'}, 'codec': {'hidden_dim': 16}},
+            'observations': [{'sites': ['enc_fn']}]}
+    item['identity'] = canonical_digest(item)
+    resolved = {'trajectories': [item], 'launch_authorized': False}
+    resolved['identity'] = canonical_digest(resolved)
+    monkeypatch.setattr(shared_preparation, 'resolve_recipe', lambda *args, **kwargs: deepcopy(resolved))
+    monkeypatch.setattr(runtime, 'source_state', lambda: {'revision': '59a3c80555b442908fd28391f88386c814e3e228'})
+    monkeypatch.setattr(shared_preparation, 'recipe_source_inventory', lambda: {'fixture.py': 'fixture'})
+    assets = {'model_path': str(model), 'model_binding': ref(binding), 'cache_manifest': str(cache),
+              'cache_sha256': file_digest(cache), 'initializations': {'8': {**ref(initial), 'state_identity': 'fixture'}},
+              'observation_template': ref(panel), 'terminal_template': ref(panel),
+              'study_pairing_id': 'fixture', 'synthetic': True}
+    return model, assets
+
+
+@pytest.mark.parametrize('failure', ['cache_hash', 'binding_hash', 'binding_revision'])
+def test_entry_explicit_reference_failure_precedes_scientific_root(tmp_path, entry_explicit_assets, failure):
+    from jscc.experiment import execute, SCHEMA
+    model, assets = entry_explicit_assets
+    if failure == 'cache_hash':
+        assets['cache_sha256'] = 'b'*64
+    elif failure == 'binding_hash':
+        assets['model_binding']['sha256'] = 'b'*64
+    else:
+        binding = Path(assets['model_binding']['path'])
+        binding.write_text(json.dumps({'path': str(model), 'revision': 'wrong'}))
+        assets['model_binding']['sha256'] = file_digest(binding)
+    assets_path = tmp_path/'explicit-assets.json'
+    assets_path.write_text(json.dumps(assets))
+    root = tmp_path/'uncreated-root'
+    science = {'task_config': 'unused-by-resolver-mock', 'locations': ['enc_fn'], 'updates_per_location': 8,
+               'widths': [8], 'reconstruction_percentages': [50], 'overrides': {}, 'objectives': {},
+               'save': {}, 'observation': {}, 'evaluation': {}}
+    value = {'schema': SCHEMA, 'workflow': 'shared', 'operation': 'prepare', 'experiment': science,
+             'execution': {'root': str(root), 'preparation': {'assets': str(assets_path),
+                           'model_config': str(model/'config.json')}}}
+    request = tmp_path/'request.yaml'
+    request.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match='acquired reference bytes|binding path/revision'):
+        execute(request)
+    assert not root.exists()
+
+
+def test_entry_registered_panel_failure_precedes_scientific_root(tmp_path, monkeypatch):
+    from jscc import shared_assets, experiment
+    model = tmp_path/'model'
+    model.mkdir()
+    (model/'config.json').write_text('{}')
+    binding = tmp_path/'binding.json'
+    binding.write_text(json.dumps({'path': str(model)}))
+    panel = tmp_path/'panel.json'
+    panel.write_text(json.dumps({'input_ids': [0]}))
+    record = {'model_name': 'fixture', 'model_binding': {'path': str(binding), 'sha256': file_digest(binding)},
+              'cache': {}, 'observation_template': {'path': str(panel), 'sha256': file_digest(panel)},
+              'terminal_template': {}, 'synthetic_cpu': True}
+    monkeypatch.setattr(shared_assets, 'discover_recipe_assets', lambda *args: record)
+    def admitted_registration(**kwargs):
+        assert kwargs['output'] is None
+    monkeypatch.setattr(shared_assets, 'register_recipe_assets', admitted_registration)
+    monkeypatch.setattr(shared_assets, 'resolve_recipe', lambda *args, **kwargs: {
+        'trajectories': [{'observations': [{'items': 2}], 'evaluation': {'items': 2}}]})
+    root = tmp_path/'uncreated-root'
+    value = {'schema': experiment.SCHEMA, 'workflow': 'shared', 'operation': 'prepare',
+             'experiment': {'task_config': 'unread', 'locations': ['enc_fn'], 'updates_per_location': 8,
+                           'widths': [8], 'reconstruction_percentages': [50], 'overrides': {},
+                           'objectives': {}, 'save': {}, 'observation': {}, 'evaluation': {}},
+             'execution': {'root': str(root), 'preparation': {'registrations': str(tmp_path/'registrations')}}}
+    request = tmp_path/'request.yaml'
+    request.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match='exceeds acquired fixed panel'):
+        experiment.execute(request)
+    assert not root.exists()
+
+
+def test_entry_admitted_registration_reused_and_publication_failure_retained(tmp_path, monkeypatch):
+    from jscc import shared_assets, shared_runs
+    root = tmp_path/'root'
+    admitted = object()
+    calls = []
+    def preflight(*args):
+        assert not root.exists()
+        calls.append('preflight')
+        return admitted
+    def failed_publication(recipe, selected, *, registrations, output):
+        assert selected is admitted and root.exists()
+        calls.append('publication')
+        output.mkdir()
+        (output/'partial.json').write_text('{"status": "partial"}')
+        raise RuntimeError('injected publication failure after valid admission')
+    monkeypatch.setattr(shared_assets, 'preflight_recipe_assets', preflight)
+    monkeypatch.setattr(shared_assets, '_publish_recipe_assets', failed_publication)
+    with pytest.raises(RuntimeError, match='after valid admission'):
+        shared_runs.prepare_recipe_run(tmp_path/'recipe.yaml', root, registrations=tmp_path/'registrations')
+    assert calls == ['preflight', 'publication']
+    assert (root/'experiment.json').is_file() and (root/'preparation/partial.json').is_file()
