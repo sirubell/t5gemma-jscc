@@ -286,7 +286,7 @@ class IndexedImages:
 def coco_recipe_state(tmp_path, channel='awgn'):
     tmp_path.mkdir(parents=True, exist_ok=True)
     # Resolve a real COCO task/recipe with the accepted shared numerical envelope.
-    task_config = load_config(ROOT / 'configs/experiments/ordinary/coco.yaml')
+    task_config = load_config(ROOT / 'configs/experiments/shared/coco_base.yaml', validate=False)
     task_config['model'].update(device='cpu', dtype='float32', revision='tiny-coco',
                                 sdpa_backend_policy='auto', numerical_policy='native')
     task_config['codec'] = deepcopy(CODEC)
