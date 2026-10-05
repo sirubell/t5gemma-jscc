@@ -99,24 +99,22 @@ class RecipePlan:
         return next(stage for stage in self.stages if stage.start <= index < stage.stop)
 
     def objective_at(self, index):
-        update = self.update_at(index)
+        stage = self.stage_at(index)
+        site = self.trained_sites[index % len(self.trained_sites)]
         weights = self._description['objectives']
-        role = 'decoder' if update.site.startswith('dec_') else 'encoder'
-        phase = next(p for p in self._description['phases'] if p['start'] <= index < p['stop'])
-        return {**weights[role], 'kl': weights['functional_kl'] if phase['objective_kind'] == 'combined' else 0.0}
+        role = 'decoder' if site.startswith('dec_') else 'encoder'
+        return {**weights[role], 'kl': weights['functional_kl'] if stage.objective_kind == 'combined' else 0.0}
 
     def update_at(self, index):
-        if type(index) is not int or not 0 <= index < self.horizon:
-            raise ValueError('update outside recipe horizon')
+        stage = self.stage_at(index)
         local, position = divmod(index, len(self.trained_sites))
         site, view = self.trained_sites[position], self.views[local]
-        phase = next(p for p in self._description['phases'] if p['start'] <= index < p['stop'])
-        key = NoiseKey(self.study_pairing_id, phase['objective_kind'], site, local,
+        key = NoiseKey(self.study_pairing_id, stage.objective_kind, site, local,
                        view.view_sha256, view.layout_sha256, condition='uniform',
                        draw_schema='original13-role-awgn-v1')
         schedule = self._description['config']['training']
         return ScheduledUpdate('shared', index, site, local, view, key,
-            phase_lr_factor(index - phase['start'], phase['stop'] - phase['start'],
+            phase_lr_factor(index - stage.start, stage.horizon,
                             schedule['warmup_ratio'], schedule['min_lr_ratio']))
 
     def progress(self, completed, phase_start):

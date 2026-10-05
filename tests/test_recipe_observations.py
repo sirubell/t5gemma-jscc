@@ -158,7 +158,13 @@ def test_same_terminal_requests_receipts_and_tamper(tmp_path, native_task):
     assert state_exact(export_codec(model), weights)
     report = evaluation.recipe_report(tmp_path/'train', initial=tmp_path/'initial', supplemental=tmp_path/'extra')
     assert [report['terminal'][s]['observed_items'] for s in ('initial', 'supplemental')] == [12, 6]
-    assert report['training_scalars']['rows'][0]['objective']['resolved_weights']['hidden'] == .3
+    rows = report['training_scalars']['rows']
+    assert rows[0]['objective']['resolved_weights']['hidden'] == .3
+    for index in (0, 1, 7, 8, 9, 15):
+        decoder = index % 2 == 0
+        assert rows[index]['objective']['resolved_weights'] == {
+            'hidden': .3 if decoder else .2, 'memory': .4 if decoder else 0.,
+            'kl': .7 if index >= 8 else 0.}
     score = next((tmp_path/'extra').glob('*/identity_*.json'))
     score.write_text('tampered')
     with pytest.raises(ValueError, match='artifact bytes'):

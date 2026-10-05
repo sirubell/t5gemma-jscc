@@ -8,6 +8,8 @@ import yaml
 
 from jscc.experiment_recipe import resolve_recipe, validate_retained_recipe
 from jscc.recipe_plan import RecipePlan, phase_lr_factor
+from jscc.experiment_schedule import NoiseKey
+from jscc.sharing_schedule import ScheduledUpdate
 from jscc.encoder_stages_plan import Original13Plan, ORIGINAL13_SITES
 from jscc.encoder_stages_preparation import validate_original13_config
 from test_original13_joined import cli, prepared as prepared, execution_args, offline_dataset
@@ -47,6 +49,7 @@ def test_original13_yaml_counts_and_plan_parity(recipe_files):
         plan = RecipePlan(item, views, 'paired')
         for index in (0, 6, 12, 13, retained.reconstruction_stop, retained.horizon-1):
             assert plan.update_at(index) == retained.update_at(index)
+            assert plan.objective_at(index) == retained.objective_at(index)
     assert result['launch_authorized'] is False
 
 
@@ -54,6 +57,8 @@ def test_yaml_changes_resolve_to_complete_settings_and_order(recipe_files):
     path, metadata, recipe = recipe_files
     recipe.update(locations=['dec_l3', 'enc_l2', 'enc_emb'], updates_per_location=80,
                   widths=[32], reconstruction_percentages=[50])
+    recipe['objectives'] = {'encoder': {'hidden': .2, 'memory': 0.},
+                            'decoder': {'hidden': .3, 'memory': .4}, 'functional_kl': .7}
     recipe['overrides']['data'] = {'num_train': 12, 'selection_seed': 23}
     recipe['overrides']['training'].update(lr=.001, weight_decay=.02, warmup_ratio=.1,
                                          min_lr_ratio=.2, betas=[.8, .95], eps=1e-7)
@@ -72,6 +77,23 @@ def test_yaml_changes_resolve_to_complete_settings_and_order(recipe_files):
     plan = RecipePlan(item, views, 'paired')
     assert [plan.update_at(i).site for i in range(6)] == recipe['locations'] * 2
     assert [plan.update_at(i).site_local_index for i in range(6)] == [0, 0, 0, 1, 1, 1]
+    for start, kind in ((0, 'reconstruction'), (120, 'combined')):
+        # First/last cycles and partial-cycle indices retain the declared order.
+        for index in (start, start+1, start+2, start+3, start+118, start+119):
+            local, position = divmod(index, 3)
+            site = recipe['locations'][position]
+            role = 'decoder' if position == 0 else 'encoder'
+            assert plan.stage_at(index).objective_kind == kind
+            assert plan.objective_at(index) == {**recipe['objectives'][role],
+                                                'kl': .7 if start else 0.}
+            assert plan.update_at(index) == ScheduledUpdate('shared', index, site, local, views[local],
+                NoiseKey('paired', kind, site, local, views[local].view_sha256, views[local].layout_sha256,
+                         condition='uniform', draw_schema='original13-role-awgn-v1'),
+                phase_lr_factor(index-start, 120, .1, .2))
+    for index in (True, False, 1.0, '1', None, -1, plan.horizon, plan.horizon+1):
+        for lookup in (plan.stage_at, plan.objective_at, plan.update_at):
+            with pytest.raises(ValueError, match='update outside recipe horizon'):
+                lookup(index)
     assert plan.progress(4, 0)['completed_per_site'] == {'dec_l3': 2, 'enc_l2': 1, 'enc_emb': 1}
     assert plan.progress(240, 120)['next_site'] is None
     with pytest.raises(ValueError, match='unrecorded reset'):
