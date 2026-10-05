@@ -63,6 +63,8 @@ def main(argv=None):
     else:
         recipe = _read(args.request, args.request_sha256).get('schema') == 'recipe-terminal-request-v1'
     if recipe:
+        if args.command == 'run':
+            raise ValueError('generalized prepared evaluation run retired; use evaluate.py --run ROOT')
         from jscc.recipe_workflow import evaluation_cli
         return evaluation_cli(args)
     if args.command == 'run':

@@ -279,6 +279,8 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
     Changed science/source/resources requires its separate revision procedure.
     """
     from .recipe_submission import CASE_SCHEMA, _sync_directory, validate_bundle
+    _require(bundle.get('schema') == CASE_SCHEMA and new_bundle.get('schema') == CASE_SCHEMA,
+             'old submission execution retired')
     directory = Path(receipt_dir)
     validate_bundle(new_bundle)
     with _locked(directory):
@@ -298,14 +300,13 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
                  and authorization['user_authorization_reference'].strip(), 'new explicit exact retry authorization required')
         _require(bundle['schema'] == new_bundle['schema'], 'retry schema differs')
         _require(new_bundle['identity'] != bundle['identity'] and new_bundle['output'] != bundle['output']
-                 and (bundle['schema'] != CASE_SCHEMA or new_bundle['attempt'] != bundle['attempt']), 'fresh output and attempt required')
+                 and new_bundle['attempt'] != bundle['attempt'], 'fresh output and attempt required')
         keys = ('source', 'source_binding', 'python', 'cache', 'root', 'resources')
-        keys += (('run_output', 'run_identity', 'input_binding', 'combined') if bundle['schema'] == CASE_SCHEMA
-                 else ('model', 'prepared', 'resolved'))
+        keys += ('run_output', 'run_identity', 'input_binding', 'combined')
         for key in keys:
             _require(bundle[key] == new_bundle[key], 'retry changes source/science/budget: '+key)
         old_indices = []
-        dependency_key = 'aftercorr' if bundle['schema'] == CASE_SCHEMA else 'afterok'
+        dependency_key = 'aftercorr'
         for group in new_bundle['groups']:
             matches = [i for i, old in enumerate(bundle['groups'])
                        if old['indices'] == group['indices']
@@ -331,17 +332,6 @@ def authorize_retry_job(bundle, receipt_dir, *, new_bundle, authorization):
                 _require(predecessor_record['status'] == 'accepted' and group[dependency_key] is None
                          and group.get('accepted_dependency_job_id') == predecessor_record['job_id'],
                          'retry must retain accepted scheduler dependency')
-        if bundle['schema'] != CASE_SCHEMA:
-            for group in new_bundle['groups']:
-                matches = [i for i, old in enumerate(bundle['groups'])
-                           if old['indices'] == group['indices'] and old['concurrency'] == group['concurrency']]
-                _require(len(matches) == 1 and record['groups'][matches[0]]['status'] in ('not-accepted', 'not-attempted'),
-                         'accepted or changed legacy groups cannot be retried')
-            approved = _approve_recovery(record, authorization, new_bundle['identity'], old_indices)
-            if record.get('recovery_approvals', {}).get(new_bundle['identity']) != authorization:
-                record = _save(directory, approved)
-            return {'new_bundle_identity': new_bundle['identity'], 'submission_performed': False,
-                    'authorization_record': record['sequence'], 'retired_fences': []}
         old_tasks = {}
         for group in record['groups']:
             shape = bundle['groups'][group['group']]
@@ -420,6 +410,7 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
     """Review-only subset of reconciled unaccepted groups, unchanged science."""
     from copy import deepcopy
     from .recipe_submission import CASE_SCHEMA, normalize_path
+    _require(bundle.get('schema') == CASE_SCHEMA, 'old submission execution retired')
     directory = Path(receipt_dir)
     with _locked(directory):
         _read(bundle, directory)
@@ -439,7 +430,7 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
         _require(new['output'] != bundle['output'], 'fresh output required')
         new['retry_of'] = {'bundle_identity': bundle['identity'], 'submission': str(directory),
                            'reconciliation_sha256': canonical_digest(record), 'groups': selected}
-        dependency_key = 'aftercorr' if bundle['schema'] == CASE_SCHEMA else 'afterok'
+        dependency_key = 'aftercorr'
         remap = {old: index for index, old in enumerate(selected)}
         new['groups'] = []
         for old in selected:
@@ -454,16 +445,14 @@ def prepare_retry_bundle(bundle, receipt_dir, *, output, attempt, groups=None) -
                     group[dependency_key] = None
                     group['accepted_dependency_job_id'] = record['groups'][dep]['job_id']
             new['groups'].append(group)
-            if bundle['schema'] == CASE_SCHEMA:
-                stages = ['training', 'evaluation'] if group['stage'] == 'combined' else [group['stage']]
-                for index in group['indices']:
-                    for stage in stages:
-                        command = new['cases'][index]['commands'].get(stage)
-                        if command:
-                            command[command.index('--attempt')+1] = f'{attempt}-g{remap[old]}-i{index}'
-        if bundle['schema'] == CASE_SCHEMA:
-            _require(attempt != bundle['attempt'], 'fresh attempt required')
-            new['attempt'] = attempt
+            stages = ['training', 'evaluation'] if group['stage'] == 'combined' else [group['stage']]
+            for index in group['indices']:
+                for stage in stages:
+                    command = new['cases'][index]['commands'].get(stage)
+                    if command:
+                        command[command.index('--attempt')+1] = f'{attempt}-g{remap[old]}-i{index}'
+        _require(attempt != bundle['attempt'], 'fresh attempt required')
+        new['attempt'] = attempt
         new.pop('identity')
         new['identity'] = canonical_digest(new)
         return new

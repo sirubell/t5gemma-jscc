@@ -272,61 +272,52 @@ The callable consumer contract is
 study_pairing_id=...)`, returning the existing `recipe-prepared-v1` manifest.
 `discover_recipe_assets` performs exact selection. Consumers use the resulting
 `prepared.json` checksum and existing loader; they must preserve registration,
-initializer and cache lifetimes. Automatic preparation does not wire public
-train/evaluate dispatch or scheduler preflight; those consumers integrate this
-interface separately. Existing `--assets` and low-level binding APIs remain
+initializer and cache lifetimes. Public recorded train/evaluate dispatch and current case submission consume this
+preparation interface. Existing `--assets` and low-level binding APIs remain
 available for already prepared callers.
 
-## Train, resume and evaluate
+## Saved prepared and scientific readers
+
+New shared-codec training, continuation and evaluation use the public recorded
+commands above: `train.py --config RECIPE --output ROOT` and
+`evaluate.py --run ROOT`. Generalized `recipe-prepared-v1` train/resume and
+`recipe-terminal-request-v1` loose run modes reject before model/data setup or
+output reservation. The separate original13 prepared branch remains available
+at its retained source; this change does not release any campaign source hold.
+
+Small acquired receipts and saved scientific records retain explicit readers:
 
 ```bash
-uv run --locked python scripts/original13_training.py train \
-  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
-  --recipe configs/recipes/changed.yaml --width 32 --ratio 50 \
-  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
-  --device-uuid GPU-ASSIGNED_UUID --output /fresh/training
-uv run --locked python scripts/original13_training.py resume \
-  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
-  --recipe configs/recipes/changed.yaml --width 32 --ratio 50 \
-  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
-  --device-uuid GPU-ASSIGNED_UUID --output /fresh/continued \
-  --resume-checkpoint /existing/state.pt --resume-sha256 EXACT_SHA256 --resume-size EXACT_BYTES
+uv run --locked python scripts/original13_training.py check \
+  --prepared /existing/prepared.json --prepared-sha256 EXACT_SHA256
 uv run --locked python scripts/original13_evaluation.py request \
-  --training-run /fresh/training --template /existing/fixed-terminal.json \
+  --training-run /existing/training --template /existing/fixed-terminal.json \
   --template-sha256 EXACT_SHA256 --scope initial --output /fresh/request.json
-uv run --locked python scripts/original13_evaluation.py run \
-  --request /fresh/request.json --request-sha256 EXACT_SHA256 \
-  --prepared /fresh/prepared.json --prepared-sha256 EXACT_SHA256 \
-  --approved-source FULL_ACCEPTED_SOURCE_SHA --timeout-seconds 7200 \
-  --device-uuid GPU-ASSIGNED_UUID --output /fresh/evaluation
+uv run --locked python scripts/original13_evaluation.py check \
+  --request /existing/request.json --request-sha256 EXACT_SHA256
 uv run --locked python scripts/original13_evaluation.py report \
-  --training-run /fresh/training --initial /fresh/evaluation \
-  --observation /fresh/training/EXPLICIT_OBSERVATION_DIRECTORY --output /fresh/report.json
+  --training-run /existing/training --initial /existing/evaluation \
+  --observation /existing/training/EXPLICIT_OBSERVATION_DIRECTORY --output /fresh/report.json
 ```
 
-The optional `--recipe` resolves changed settings against the same acquired assets;
-without it, execution uses the prepared resolution. Routine subset/seed/quota,
-location/order, objective, optimizer/save/channel changes require YAML only.
-Resume requires identical source/config/data/initializer/fixed observations and
-full Adam/LR/scaler/RNG/runtime state; a changed recipe is a new run. Both phases,
-partial location cycles and pre/post-reset checkpoints retain their exact cursor.
-The runner binds each fresh cached batch once and reuses it across locations.
-Identity and AWGN idle state adapters are supported. Observation callbacks restore
-training state in finally; only typed scoring failures can continue after verified
-restoration. Save, nonfinite, checkpoint or restoration failures stop the segment.
+Checks retain their own exact prepared, source, acquired asset and fixed-panel
+contracts. Scientific request/check/report readers validate the saved terminal,
+YAML coefficients, LR/counts, observations and pending ancestor obligations.
+They do not upgrade old schemas or certify incompatible old source bindings.
+Keep original saved hashes and required pinned sources; newly prepared records
+bind the changed source. Shared engines retain phase/reset state, exact
+continuation, native cached batches and observation restoration policies.
 
-Terminal requests select this run's one durable terminal, including an explicit
-supplemental request when desired. The generalized report validates
-`recipe-training-event-v1`, actual YAML coefficients/LR/counts and supplied
-observation receipts. Ancestor obligations remain pending until explicitly
-completed; supplied receipts do not silently rewrite them. Legacy events retain
-their separate reader and frozen package validation.
+## Finite case submission
 
-## One submission command
+New preparation and all execution/retry producers accept only
+`recipe-case-submission-v1`. Use the
+[reviewed public recipe case arrays](source-lifetime.md#reviewed-public-recipe-case-arrays)
+for the existing finite job and limits YAML, then:
 
 ```bash
-uv run --locked python scripts/submit_recipe.py prepare \
-  --job /existing/job.yaml --limits /approved/limits.yaml --output /fresh/bundle.json
+uv run --locked python scripts/submit_recipe.py action \
+  --job /existing/cases.yaml --limits /approved/limits.yaml --output /fresh/bundle.json
 uv run --locked python scripts/submit_recipe.py check --bundle /fresh/bundle.json
 uv run --locked python scripts/submit_recipe.py render \
   --bundle /fresh/bundle.json --output /fresh/job.sbatch
@@ -334,19 +325,17 @@ uv run --locked python scripts/submit_recipe.py submit \
   --bundle /fresh/bundle.json --mock-results /existing/mock-results.json
 ```
 
-The job schema is `shared-codec-submission-v1`: recipe path, root, full source
-commit/path, model path/config digest, prepared digest/candidate paths, Python,
-cache, fresh output, resources and array groups. Limits separately pin root,
-partition/account/qos/node and bound GPU/CPU/memory/walltime/concurrency/task count.
-Every trajectory occurs once; dependencies refer to earlier groups. `/work`
-canonicalizes to `/raid/work`; lexical escapes and changed host symlinks fail.
-Preparation accepts generalized small receipts and retains legacy exact-compatible
-packages. Launch uses the persisted resolved bundle through `--resolved`, so a
-later YAML edit cannot alter allocated work. Mock and live modes share payload,
-reservation, arguments and durable attempted-command receipts. Uncertain outcomes
-retain the reservation and never retry automatically. Live submit additionally
-requires exact human authorization for bundle/source/target/operation; these
-commands and resource limits provide no such authorization.
+The case graph retains persisted public argv, own-task training/evaluation gates,
+source/runtime holds, intent ordering and unknown-acceptance fences. Live
+submission still requires exact authorization for bundle/source/target/operation.
+Preparation and mocked acceptance grant no scheduler or scientific authority.
+
+Saved `shared-codec-submission-v1` bundles retain integrity/prepared/preflight,
+intents, reconciliation, terminal and release readers under their original
+source-specific contracts. Old prepare/action/preview/render/scheduler/submit/run,
+retry preparation and retry authorization reject before new reservations,
+history, source registry, recovery claims or fences. Saved bundles and historical
+receipt/payload hashes remain unchanged; no schema conversion occurs.
 
 ## Cost and acceptance limits
 

@@ -55,6 +55,8 @@ def main(argv=None):
             parser.error('exact --prepared-sha256 is required')
         raw_prepared = json.loads(Path(args.prepared).read_text())
         if raw_prepared.get('schema') == 'recipe-prepared-v1':
+            if args.mode != 'check':
+                raise ValueError('generalized prepared train/resume retired; use train.py --config RECIPE --output ROOT')
             from jscc.recipe_workflow import training_cli
             result = training_cli(args)
             print(json.dumps(result, indent=2))

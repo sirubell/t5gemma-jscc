@@ -2,8 +2,6 @@
 from copy import deepcopy
 import json
 from pathlib import Path
-import subprocess
-import sys
 from typing import Any, cast
 from time import perf_counter
 
@@ -12,6 +10,7 @@ from datasets.arrow_writer import ArrowWriter
 import pytest
 import torch
 import yaml
+from types import SimpleNamespace
 
 from jscc.activation_replay import file_digest
 from jscc.encoder_stages_preparation import bind_recipe_data_cache
@@ -147,26 +146,30 @@ def workflow(assets, name, *, retained=False, reverse=False, subset=12, seed=23,
     return root, recipe, recipe_path, prepared, manifest
 
 
-def cli_args(prepared, manifest, output, mode='train', resume=None, extra=()):
-    args = [mode, '--prepared', str(prepared), '--prepared-sha256', file_digest(prepared),
-            '--width', '8', '--ratio', '50', '--timeout-seconds', '600', '--approved-source', manifest['source_commit'],
-            '--output', str(output), *extra]
-    if resume:
-        args += ['--resume-checkpoint', resume['path'], '--resume-sha256', resume['sha256'],
-                 '--resume-size', str(resume['size'])]
-    return args
-
-
 def terminal_payload(result):
     terminal = next(row for row in result['checkpoints'] if row['role'] == 'terminal')
     return torch.load(terminal['path'], map_location='cpu', weights_only=False)
 
 
-def train(prepared, manifest, output, **kwargs):
-    from scripts.original13_training import main
+def train(prepared, manifest, output, *, mode='train', resume=None, recipe=None):
+    """Exercise the shared scientific engine, never the retired CLI producer."""
+    from jscc.encoder_stages_evaluation import make_recipe_observer
+    from jscc.experiment_recipe import resolve_recipe
+    from jscc.experiment_state import CheckpointRef
+    from jscc.original13_training import run_recipe_training
+    from jscc.recipe_workflow import initialize_recipe, load_recipe_workflow
+    resolved = resolve_recipe(recipe, model_config_path=manifest['model_config']['path']) if recipe else None
+    _, config, plan, stream, initial, metadata, ids = load_recipe_workflow(
+        prepared, checksum=file_digest(prepared), width=8, ratio=50, resolved=resolved)
+    assert plan is not None and stream is not None and metadata is not None
+    processor, model = initialize_recipe(config, initial, plan.trained_sites, synthetic=True)
+    reference = CheckpointRef(resume['path'], resume['sha256'], resume['size']) if resume else None
+    observation = json.loads(Path(manifest['observation_template']['path']).read_text())
     started = perf_counter()
-    result = main(cli_args(prepared, manifest, output, **kwargs))
-    (output/'wall-cost.json').write_text(json.dumps({'operation': kwargs.get('mode', 'train'),
+    result = run_recipe_training(model, processor, plan=plan, batches=stream, metadata=metadata,
+        output=output, guard=lambda: None, observe=make_recipe_observer(observation), resume=reference,
+        data_ids=ids, synthetic=True)
+    (output/'wall-cost.json').write_text(json.dumps({'operation': mode,
                                                   'seconds': perf_counter()-started}))
     return result
 
@@ -254,10 +257,10 @@ def test_changed_yaml_native_training_resume_terminal_and_reporting(joined_asset
     assert request == evaluation.terminal_recipe_request(root/'train', json.loads((root/'terminal.json').read_text()))
     evaluate_cli(['check', '--request', str(request_path), '--request-sha256', file_digest(request_path)])
     started = perf_counter()
-    scored = evaluate_cli(['run', '--request', str(request_path), '--request-sha256', file_digest(request_path),
-                          '--prepared', str(prepared), '--prepared-sha256', file_digest(prepared),
-                          '--approved-source', manifest['source_commit'], '--timeout-seconds', '120',
-                          '--output', str(root/'terminal-score')])
+    from jscc.recipe_workflow import initialize_recipe
+    processor, model = initialize_recipe(config, initial, plan.trained_sites, evaluation=True, synthetic=True)
+    scored = evaluation.run_recipe_evaluation(model, processor, request=request,
+        output=root/'terminal-score', guard=lambda: None)
     (root/'terminal-score/wall-cost.json').write_text(json.dumps({'operation': 'evaluate',
                                                                 'seconds': perf_counter()-started}))
     scored = cast(dict[str, Any], scored)
@@ -295,51 +298,20 @@ def test_changed_yaml_native_training_resume_terminal_and_reporting(joined_asset
                           '--output', str(root/f'bad-report-{field}.json')])
 
 
-def test_submission_persisted_resolution_and_changed_resume_rejection(joined_assets):
-    from jscc.recipe_submission import SCHEMA, prepare_job, render_payload, submit_job
+def test_prepared_persisted_resolution_and_changed_resume_rejection(joined_assets):
     from jscc.recipe_workflow import load_recipe_workflow
     from scripts.original13_training import main
-    root, recipe, recipe_path, prepared, manifest = workflow(joined_assets, 'submission', optimizer=True)
-    # The submission seam now requires an actual fixed source/runtime, even
-    # for an offline scheduler. Keep the existing learner fixture unchanged.
-    subprocess.run(['git', 'clone', '--shared', '--quiet', str(ROOT), str(root/'release')], check=True)
-    subprocess.run(['git', '-C', str(root/'release'), 'checkout', '--detach', '--quiet',
-                    manifest['source_commit']], check=True)
-    (root/'python').symlink_to(sys.executable)
-    resources = dict(partition='h200q', account='research', qos='h200q_1g', node='hgx-cn01',
-                     gpus=1, cpus=16, memory_gb=170, walltime_minutes=120)
-    job = dict(schema=SCHEMA, recipe=str(recipe_path), root=str(joined_assets['root']),
-        source={'commit': manifest['source_commit'], 'path': str(root/'release')},
-        model={'path': str(joined_assets['model']),
-               'config_sha256': file_digest(joined_assets['model']/'config.json')},
-        prepared={'sha256': file_digest(prepared), 'candidates': [str(prepared)]},
-        python=str(root/'python'), cache=str(root/'cache'), output=str(root/'campaign'),
-        resources=resources, groups=[{'indices': [0], 'concurrency': 1, 'afterok': None}])
-    limits = dict(root=job['root'], resources=resources, max_concurrency=1, max_array_tasks=1)
-    bundle = prepare_job(write_yaml(root/'job.yaml', job), write_yaml(root/'limits.yaml', limits))
-    commands = []
-    def scheduler(command):
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, '731;fixture\n', '')
-    started = perf_counter()
-    receipt = submit_job(bundle, bundle['output'], scheduler=scheduler)
-    (root/'campaign/wall-cost.json').write_text(json.dumps({'operation': 'mock_submit',
-                                                          'seconds': perf_counter()-started}))
-    assert receipt['mocked'] is True and receipt['jobs'][0]['job_id'] == '731'
-    assert len(commands) == 1 and commands[0][0] == 'sbatch'
-    assert 'scripts/submit_recipe.py run' in render_payload(bundle, root/'campaign/bundle.json')
+    root, recipe, recipe_path, prepared, manifest = workflow(joined_assets, 'persisted', optimizer=True)
     direct = train(prepared, manifest, root/'direct')
     recipe['overrides']['training']['lr'] = .0015
     write_yaml(recipe_path, recipe)
-    resolved_args = ['--resolved', str(root/'campaign/bundle.json'), '--resolved-identity', bundle['identity'],
-                     '--trajectory', '0']
-    persisted = train(prepared, manifest, root/'persisted', extra=resolved_args)
+    persisted = train(prepared, manifest, root/'persisted')
     assert state_exact(terminal_payload(persisted)['model'], terminal_payload(direct)['model'])
     assert state_exact(terminal_payload(persisted)['optimizer'], terminal_payload(direct)['optimizer'])
     pre = next(row for row in direct['checkpoints'] if row['role'] == 'pre_reset')
     with pytest.raises(ValueError, match='identity|compatibility'):
         train(prepared, manifest, root/'bad-resume', mode='resume', resume=pre,
-              extra=['--recipe', str(recipe_path)])
+              recipe=recipe_path)
     if (root/'bad-resume/campaign.json').exists():
         assert json.loads((root/'bad-resume/campaign.json').read_text())['status'] == 'incomplete'
     assert not (root/'bad-resume/freeze.json').exists()
@@ -351,7 +323,7 @@ def test_submission_persisted_resolution_and_changed_resume_rejection(joined_ass
     recipe['updates_per_location'] = 16
     recipe['overrides']['data'] = {'num_train': 20, 'selection_seed': 2}
     write_yaml(recipe_path, recipe)
-    changed = train(prepared, manifest, root/'yaml-override', extra=['--recipe', str(recipe_path)])
+    changed = train(prepared, manifest, root/'yaml-override', recipe=recipe_path)
     assert changed['completed_updates'] == 32
     _, _, baseline_plan, _, _, _, baseline_ids = load_recipe_workflow(
         prepared, checksum=file_digest(prepared), width=8, ratio=50)
@@ -400,3 +372,60 @@ def test_one_time_model_acquisition_cli_and_repeated_prepare_never_rehash_weight
     (joined_assets['root']/'repeated-prepare-cost.json').write_text(json.dumps({
         'fresh_preparations': 2, 'weight_files_hashed': list(joined_assets['weight_hashes']),
         'bindings': [str(first[3]), str(second[3])]}))
+
+
+@pytest.mark.parametrize('mode', ['train', 'resume'])
+def test_generalized_training_rejects_before_prepared_or_execution_setup(tmp_path, monkeypatch, mode):
+    from jscc import recipe_workflow
+    from scripts.original13_training import main
+    monkeypatch.setattr(recipe_workflow, '_read_prepared', lambda *a: pytest.fail('prepared read forbidden'))
+    monkeypatch.setattr(recipe_workflow, 'load_recipe_workflow', lambda *a, **k: pytest.fail('data setup forbidden'))
+    monkeypatch.setattr(recipe_workflow, 'initialize_recipe', lambda *a, **k: pytest.fail('model setup forbidden'))
+    with pytest.raises(ValueError, match='retired.*train.py'):
+        recipe_workflow.training_cli(SimpleNamespace(mode=mode))
+    saved = tmp_path/'prepared.json'
+    saved.write_text(json.dumps({'schema': 'recipe-prepared-v1'}))
+    before = file_digest(saved)
+    with pytest.raises(ValueError, match='retired.*train.py'):
+        main([mode, '--prepared', str(saved), '--prepared-sha256', before, '--output', str(tmp_path/'output')])
+    assert file_digest(saved) == before
+    assert not (tmp_path/'output').exists()
+
+
+def test_generalized_evaluation_rejects_before_checkpoint_or_execution_setup(tmp_path, monkeypatch):
+    from jscc import recipe_workflow, encoder_stages_evaluation
+    from scripts.original13_evaluation import main
+    monkeypatch.setattr(encoder_stages_evaluation, 'open_recipe_terminal', lambda *a: pytest.fail('checkpoint read forbidden'))
+    monkeypatch.setattr(recipe_workflow, 'load_recipe_workflow', lambda *a, **k: pytest.fail('data setup forbidden'))
+    monkeypatch.setattr(recipe_workflow, 'initialize_recipe', lambda *a, **k: pytest.fail('model setup forbidden'))
+    with pytest.raises(ValueError, match='retired.*evaluate.py'):
+        recipe_workflow.evaluation_cli(SimpleNamespace(command='run'))
+    saved = tmp_path/'request.json'
+    saved.write_text(json.dumps({'schema': 'recipe-terminal-request-v1'}))
+    before = file_digest(saved)
+    with pytest.raises(ValueError, match='retired.*evaluate.py'):
+        main(['run', '--request', str(saved), '--request-sha256', before,
+              '--prepared', str(tmp_path/'missing.json'), '--prepared-sha256', '0'*64,
+              '--approved-source', '0'*40, '--timeout-seconds', '1', '--output', str(tmp_path/'output')])
+    assert file_digest(saved) == before
+    assert not (tmp_path/'output').exists()
+
+
+def test_changed_source_requires_fresh_recipe_binding_preserves_saved_bytes(joined_assets):
+    from jscc.activation_replay import canonical_digest
+    from jscc.recipe_workflow import validate_recipe_prepared
+    root, _, _, prepared, manifest = workflow(joined_assets, 'fresh-source')
+    before = file_digest(prepared)
+    validate_recipe_prepared(manifest)
+    historical = deepcopy(manifest)
+    historical['source_inventory']['jscc/recipe_workflow.py'] = '0'*64
+    historical['source_identity'] = canonical_digest(historical['source_inventory'])
+    historical['manifest_identity'] = canonical_digest({k: v for k, v in historical.items() if k != 'manifest_identity'})
+    path = root/'historical-prepared.json'
+    path.write_text(json.dumps(historical))
+    old_hash = file_digest(path)
+    with pytest.raises(ValueError, match='source inventory'):
+        validate_recipe_prepared(historical)
+    assert file_digest(path) == old_hash and file_digest(prepared) == before
+    # Explicit saved metadata validation does not assert execution compatibility.
+    validate_recipe_prepared(historical, check_source=False)

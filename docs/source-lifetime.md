@@ -1,6 +1,6 @@
 # Fixed source preview and consumer lifetime
 
-Existing recipe submissions bind a clean ordinary checkout/worktree at a full
+Current `recipe-case-submission-v1` submissions bind a clean ordinary checkout/worktree at a full
 Git SHA, the tracked `uv.lock` digest, and the selected Python interpreter and
 installed distribution versions. Preparation, submission and launch check that
 binding before data/model execution. These checks read small metadata; they do
@@ -22,15 +22,23 @@ uv run --locked python scripts/submit_recipe.py preview --bundle /fresh/bundle.j
 uv run --locked python scripts/submit_recipe.py check --bundle /fresh/bundle.json
 ```
 
-Use concrete absolute paths under the existing approved host root. Preview prints
-the full source/runtime binding, effective configs and their digests, selected
-paths, per-task GPU/CPU/RAM/walltime, stable trajectory indices, per-array caps,
-dependencies, task counts, and separate per-location/case/comparison update and
-presentation budgets. `selected_rows_request` is a selection request, not an
-observed eligible-row count. No scheduler is invoked. The payload equals the one
-used by `submit`; dependency ID `1` in command templates is a labeled placeholder
-for an earlier group's actual receipt. This preview covers existing recipe job
-inputs; the [released public recipe case arrays](#reviewed-public-recipe-case-arrays) below provide stable selected cases and own-training evaluation pairing. Ordinary-task submission arrays are not provided by this recipe interface.
+Use concrete absolute paths under the approved host root. Preview prints the
+recorded finite cases, exact public train/evaluate commands, resources, selected
+scientific work, task counts and own-task dependencies. It invokes no scheduler.
+The preview payload equals the saved submission payload; dependency ID `1` is a
+labeled placeholder. Ordinary-task submission arrays are not provided here.
+
+New preparation, action, preview, render, scheduler generation, submission,
+launch and retry accept only `recipe-case-submission-v1`. The retired
+`shared-codec-submission-v1` route rejects before output reservation, acquired
+input loading, registry/history/claim/fence changes, scheduler calls or execution.
+Saved legacy bundles remain available to `check`, `intents`, `reconcile`,
+`terminal` and `release`. `check` preserves prepared/model/config/source/runtime
+integrity checks, rather than merely validating the bundle identity. Changed
+source bytes may make an old prepared binding incompatible; use its retained
+exact source where needed. Saved bundle, payload, receipt and source hashes are
+never rewritten or converted. Retiring current execution does not stop jobs or
+release held pinned execution sources.
 
 Bound effective settings come from `bundle.json`, so later authored YAML edits
 cannot change a queued case. Editing the bundle or prepared/config bytes fails
@@ -223,7 +231,7 @@ python scripts/submit_recipe.py intents --bundle submission/bundle.json
 python scripts/submit_recipe.py reconcile --bundle submission/bundle.json --evidence scheduler-evidence.json
 ```
 
-`reconcile_job(bundle, receipt_dir, *, evidence)` supports both released bundle
+`reconcile_job(bundle, receipt_dir, *, evidence)` supports both saved bundle
 schemas. `reconciliation_intents` returns the exact anchors to copy into the
 evidence. Legacy intents with missing identity/time retain those missing values
 and include the original submission SHA256; they require an exact authoritative
@@ -266,7 +274,7 @@ the same snapshot. Acceptance and supported task terminal evidence persist acros
 later delayed queries. Original receipts and reservations are not overwritten.
 
 Retry eligibility and operational authority are distinct. An unknown group blocks
-all fresh retry preparation. Accepted groups are never selected again. Prepare a
+all fresh current-case retry preparation. Accepted groups are never selected again. Prepare a
 reviewable subset of only eligible groups, retaining accepted predecessor IDs:
 
 ```bash
@@ -283,7 +291,8 @@ and recorded checkpoint policy. `authorize_retry_job` requires an approval with
 science, resources, concurrency and dependencies. The action records approval
 before retiring only eligible case stage fences into retained
 `<stage>.retired-<old identity>.json` archives; task reservations remain intact.
-Legacy retry subsets have no case fences to retire. A new submission still uses
+Saved legacy retry metadata remains readable; new legacy retry preparation and
+authorization reject before mutation. A new current-case submission still uses
 the existing explicit exact `submit-recipe` approval. None of these recovery
 commands submits automatically. Changed science/source/budgets use the existing
 revision/case rules. Completed or accepted training is never automatically rerun.
@@ -310,7 +319,8 @@ recovery from that original receipt, even under a new approval. Reconcile the
 child's own stopped attempt to prepare its next recovery. Disjoint unclaimed
 groups may receive separate exact approvals; later evidence retains all claims
 and approvals. Inherited accepted dependencies remain fixed across successive
-case or legacy recovery generations.
+current-case recovery generations. Saved legacy claims, approvals and inherited
+dependencies remain lifecycle evidence.
 
 An exact authoritative task result contradicting retained terminal evidence
 writes a durable conflict snapshot before reporting failure. Missing or failed

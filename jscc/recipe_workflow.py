@@ -239,11 +239,9 @@ def verify_recipe_source(manifest, approved_source):
 
 
 def training_cli(args):
-    """Generalized branch of the existing source-bound training command."""
-    from .original13_provenance import original13_execution_guard
-    from .original13_training import run_recipe_training
-    from .encoder_stages_evaluation import make_recipe_observer
-    from .experiment_state import CheckpointRef
+    """Check a saved prepared receipt; new execution uses recorded cases."""
+    if args.mode != 'check':
+        raise ValueError('generalized prepared train/resume retired; use train.py --config RECIPE --output ROOT')
     manifest = _read_prepared(args.prepared, args.prepared_sha256)
     resolved = manifest['resolved']
     if args.recipe:
@@ -263,84 +261,34 @@ def training_cli(args):
         if (args.width, args.ratio) != (selected['width'], selected['ratio']):
             raise ValueError('recipe resolved trajectory differs')
     if args.width is None or args.ratio is None:
-        if args.mode != 'check':
-            raise ValueError('recipe train/resume require exact width/ratio')
         selected = resolved['trajectories'][0]
         args.width, args.ratio = selected['width'], selected['ratio']
-    if args.mode == 'check':
-        bound = validate_recipe_prepared(manifest, resolved=resolved)
-        if sum((d['width'], d['ratio']) == (args.width, args.ratio) for d in bound['trajectories']) != 1:
-            raise ValueError('recipe requires exact declared width/ratio')
-        # Legacy caller-supplied tensors retain their setup identity check.
-        for ref in manifest['initializations'].values():
-            if not _acquired_initializer(ref):
-                initial = torch.load(_read_reference(ref), map_location='cpu', weights_only=True)
-                if state_dict_identity(initial) != ref['state_identity']:
-                    raise ValueError('recipe initializer tensor identity differs')
-        return {'schema': SCHEMA, 'status': 'valid', 'resolved': bound,
-                'model_assets_status': manifest['model_assets']['status'], 'launch_authorized': False}
-    manifest, config, plan, stream, initial, metadata, data_ids = load_recipe_workflow(
-        args.prepared, checksum=args.prepared_sha256, width=args.width, ratio=args.ratio,
-        resolved=resolved)
-    if not args.output or not args.approved_source:
-        raise ValueError('recipe execution requires output and approved source')
-    verify_recipe_source(manifest, args.approved_source)
-    resume = None
-    if args.mode == 'resume':
-        if not args.resume_checkpoint or not args.resume_sha256 or not args.resume_size:
-            raise ValueError('recipe resume requires exact checkpoint path/hash/size')
-        resume = CheckpointRef(args.resume_checkpoint, args.resume_sha256, args.resume_size)
-    elif args.resume_checkpoint or args.resume_sha256 or args.resume_size:
-        raise ValueError('fresh recipe train cannot take continuation fields')
-    guard = original13_execution_guard(config, synthetic=manifest['synthetic_cpu'],
-        timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid)
-    guard()
-    assert plan is not None and metadata is not None and stream is not None
-    processor, model = initialize_recipe(config, initial, plan.trained_sites, synthetic=manifest['synthetic_cpu'])
-    if config['model']['device'] == 'cuda' and (torch.cuda.device_count() != 1 or not torch.cuda.is_bf16_supported()):
-        raise ValueError('recipe requires one assigned BF16-capable GPU')
-    guard()
-    observation = json.loads(_read_reference(manifest['observation_template']).read_text())
-    return run_recipe_training(model, processor, plan=plan, batches=stream, metadata=metadata,
-        output=args.output, guard=guard, observe=make_recipe_observer(observation), resume=resume,
-        data_ids=data_ids, synthetic=manifest['synthetic_cpu'])
+    bound = validate_recipe_prepared(manifest, resolved=resolved)
+    if sum((d['width'], d['ratio']) == (args.width, args.ratio) for d in bound['trajectories']) != 1:
+        raise ValueError('recipe requires exact declared width/ratio')
+    # Legacy caller-supplied tensors retain their setup identity check.
+    for ref in manifest['initializations'].values():
+        if not _acquired_initializer(ref):
+            initial = torch.load(_read_reference(ref), map_location='cpu', weights_only=True)
+            if state_dict_identity(initial) != ref['state_identity']:
+                raise ValueError('recipe initializer tensor identity differs')
+    return {'schema': SCHEMA, 'status': 'valid', 'resolved': bound,
+            'model_assets_status': manifest['model_assets']['status'], 'launch_authorized': False}
 
 
 def evaluation_cli(args):
+    """Retain saved request/check/report readers without loose execution."""
+    if args.command == 'run':
+        raise ValueError('generalized prepared evaluation run retired; use evaluate.py --run ROOT')
     from . import encoder_stages_evaluation as evaluation
-    from .original13_state import _recipe_plan
-    from .original13_provenance import original13_execution_guard
     from .baseline_protocol import write_manifest
 
-    if args.command in ('run', 'check'):
+    if args.command == 'check':
         request = json.loads(_read_reference({'path': str(Path(args.request).resolve()),
                                              'sha256': args.request_sha256}).read_text())
         state, _ = evaluation.open_recipe_terminal(request['training_run'])
         evaluation._validate_recipe_request(state, request, observation=False)
-        if args.command == 'check':
-            result = {'status': 'valid', 'checkpoint': state.reference.sha256, 'launch_authorized': False}
-        else:
-            own_plan = _recipe_plan(state.payload)
-            manifest = _read_prepared(args.prepared, args.prepared_sha256)
-            resolved = deepcopy(manifest['resolved'])
-            resolved['trajectories'] = [own_plan.description]
-            resolved['identity'] = canonical_digest({k: v for k, v in resolved.items() if k != 'identity'})
-            manifest, config, plan, _, initial, metadata, _ = load_recipe_workflow(args.prepared,
-                checksum=args.prepared_sha256, width=own_plan.width, ratio=own_plan.ratio, resolved=resolved)
-            verify_recipe_source(manifest, args.approved_source)
-            assert plan is not None and metadata is not None
-            for key, expected in {**metadata, 'plan_identity': plan.identity}.items():
-                if state.payload['metadata'].get(key) != expected:
-                    raise ValueError('recipe evaluation acquired identity differs: '+key)
-            guard = original13_execution_guard(config, synthetic=manifest['synthetic_cpu'],
-                timeout_seconds=args.timeout_seconds, device_uuid=args.device_uuid)
-            guard()
-            processor, model = initialize_recipe(config, initial, plan.trained_sites,
-                evaluation=True, synthetic=manifest['synthetic_cpu'])
-            if config['model']['device'] == 'cuda' and (torch.cuda.device_count() != 1 or not torch.cuda.is_bf16_supported()):
-                raise ValueError('recipe evaluation requires one assigned BF16-capable GPU')
-            guard()
-            result = evaluation.run_recipe_evaluation(model, processor, request=request, output=args.output, guard=guard)
+        result = {'status': 'valid', 'checkpoint': state.reference.sha256, 'launch_authorized': False}
         print(json.dumps(result, indent=2))
         return result
     if args.command == 'request':

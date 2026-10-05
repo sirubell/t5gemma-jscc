@@ -12,7 +12,7 @@ from jscc.submission_reconciliation import (authorize_retry_job, finalize_source
                                            reconciliation_intents)
 from test_reviewed_case_arrays import case_job as case_job, graph_job as graph_job
 from test_source_lifetime import source as source
-from test_recipe_submission import job_files as job_files
+from test_recipe_submission import job_files as job_files, saved_submission
 
 
 def stopped(graph_job, *, partial=False):
@@ -278,39 +278,6 @@ def test_concurrent_idempotent_snapshot(graph_job):
     assert len(list((Path(bundle['output'])/'reconciliation').glob('[0-9]*.json'))) == 1
 
 
-def test_legacy_lost_response_and_subset_retry(job_files):
-    from jscc.submission_reconciliation import prepare_retry_bundle
-    bundle = submission.prepare_job(*job_files[:2])
-    count = 0
-    def scheduler(command):
-        nonlocal count
-        count += 1
-        if count == 1:
-            return subprocess.CompletedProcess(command, 0, '9501', '')
-        raise ConnectionError('fake legacy lost response')
-    with pytest.raises(ConnectionError):
-        submission.submit_job(bundle, bundle['output'], scheduler=scheduler)
-    # Legacy submitted remains accepted; old missing identity/time is supported
-    # through the exact original receipt digest rather than invented fields.
-    directory = Path(bundle['output'])
-    receipt = json.loads((directory/'SUBMISSION.json').read_text())
-    receipt['jobs'][1].pop('attempt_identity')
-    receipt['jobs'][1].pop('attempted_at')
-    submission.write_json(directory/'SUBMISSION.json', receipt)
-    record = reconcile(bundle, evidence(bundle, result='rejected'))
-    assert record['groups'][0]['job_id'] == '9501'
-    new = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
-    assert new['groups'][0]['indices'] == bundle['groups'][1]['indices']
-    assert new['groups'][0]['accepted_dependency_job_id'] == '9501'
-    authorize_retry_job(bundle, bundle['output'], new_bundle=new, authorization=approval(bundle, new))
-    calls = []
-    def accepted(command):
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, '9502', '')
-    submission.submit_job(new, new['output'], scheduler=accepted)
-    assert len(calls) == 1 and '--dependency=afterok:9501' in calls[0]
-
-
 def test_retry_changed_budget_blocked(graph_job):
     bundle, _ = stopped(graph_job)
     reconcile(bundle, evidence(bundle, result='rejected'))
@@ -382,25 +349,6 @@ def test_reconcile_preserves_claim_and_exact_approval(graph_job):
     submission.submit_job(new, new['output'], scheduler=lambda c: subprocess.CompletedProcess(c, 0, '9701', ''))
 
 
-def test_legacy_parent_cannot_authorize_second_duplicate_recovery(job_files):
-    from jscc.submission_reconciliation import prepare_retry_bundle
-    bundle = submission.prepare_job(*job_files[:2])
-    with pytest.raises(ConnectionError):
-        submission.submit_job(bundle, bundle['output'], scheduler=lambda _: (_ for _ in ()).throw(ConnectionError('lost')))
-    reconcile(bundle, evidence(bundle, result='rejected'))
-    first = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-A', attempt='0002')
-    authorize_retry_job(bundle, bundle['output'], new_bundle=first, authorization=approval(bundle, first))
-    submission.submit_job(first, first['output'], scheduler=lambda c: subprocess.CompletedProcess(c, 0, '9702', ''))
-    with pytest.raises(ValueError, match='eligible'):
-        prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-B', attempt='0003')
-    second = deepcopy(first)
-    second['output'] = bundle['output']+'-B'
-    second.pop('identity')
-    second['identity'] = canonical_digest(second)
-    with pytest.raises(ValueError, match='already claimed'):
-        authorize_retry_job(bundle, bundle['output'], new_bundle=second, authorization=approval(bundle, second))
-
-
 def test_second_generation_evaluation_retry_retains_external_dependency(graph_job):
     from jscc.submission_reconciliation import prepare_retry_bundle
     bundle, _ = stopped(graph_job, partial=True)
@@ -459,34 +407,6 @@ def test_foreign_empty_stage_fence_never_retired(graph_job):
     assert foreign.exists() and foreign.read_bytes() == b''
 
 
-def test_second_generation_legacy_dependency_retry(job_files):
-    from jscc.submission_reconciliation import prepare_retry_bundle
-    bundle = submission.prepare_job(*job_files[:2])
-    count = 0
-    def partial(command):
-        nonlocal count
-        count += 1
-        if count == 1:
-            return subprocess.CompletedProcess(command, 0, '9801', '')
-        raise ConnectionError('lost original second group')
-    with pytest.raises(ConnectionError):
-        submission.submit_job(bundle, bundle['output'], scheduler=partial)
-    reconcile(bundle, evidence(bundle, result='rejected'))
-    first = prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-A', attempt='0002')
-    authorize_retry_job(bundle, bundle['output'], new_bundle=first, authorization=approval(bundle, first))
-    with pytest.raises(ConnectionError):
-        submission.submit_job(first, first['output'], scheduler=lambda _: (_ for _ in ()).throw(ConnectionError('lost recovery')))
-    reconcile(first, evidence(first, result='rejected'))
-    second = prepare_retry_bundle(first, first['output'], output=bundle['output']+'-B', attempt='0003')
-    authorize_retry_job(first, first['output'], new_bundle=second, authorization=approval(first, second))
-    calls = []
-    def accepted(command):
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, '9802', '')
-    submission.submit_job(second, second['output'], scheduler=accepted)
-    assert len(calls) == 1 and '--dependency=afterok:9801' in calls[0]
-
-
 @pytest.mark.parametrize('basis', ['original-receipt', 'previous-reconciliation'])
 @pytest.mark.parametrize('contradiction', ['definitive-absence', 'different-id'])
 def test_authoritative_accepted_group_conflict_blocks_lifetime_and_retry(graph_job, basis, contradiction):
@@ -518,3 +438,86 @@ def test_authoritative_accepted_group_conflict_blocks_lifetime_and_retry(graph_j
     with pytest.raises(ValueError, match='fully reconciled'):
         prepare_retry_bundle(bundle, bundle['output'], output=bundle['output']+'-retry', attempt='0002')
     assert (Path(bundle['output'])/'SUBMISSION.json').read_bytes() == original
+
+
+@pytest.mark.parametrize('missing_intent_fields', [False, True])
+def test_saved_legacy_lost_response_reconciliation_and_terminal(job_files, missing_intent_fields):
+    from jscc.submission_reconciliation import prepare_retry_bundle
+    bundle = saved_submission(job_files, missing_intent_fields=missing_intent_fields)
+    directory = Path(bundle['output'])
+    original = {name: (directory/name).read_bytes() for name in ('bundle.json', 'job.sbatch', 'SUBMISSION.json')}
+    intents = reconciliation_intents(bundle, directory)
+    if missing_intent_fields:
+        assert intents[1]['attempt_identity'] is None and intents[1]['attempted_at'] is None
+        assert intents[1]['submission_sha256'] == submission.file_digest(directory/'SUBMISSION.json')
+    first = reconcile(bundle, evidence(bundle, result='rejected'))
+    assert [g['status'] for g in first['groups']] == ['accepted', 'not-accepted']
+    assert first['groups'][0]['job_id'] == '9501'
+    assert first['retry_eligible_groups'] == [1]
+    assert reconcile(bundle, evidence(bundle, result='rejected')) == first
+    assert not first['all_tasks_terminal']
+    with pytest.raises(ValueError, match='terminal evidence'):
+        finalize_source_consumer(bundle, directory, release=True)
+    value = evidence(bundle, result='rejected')
+    for index in bundle['groups'][0]['indices']:
+        value['tasks'].append({'group': 0, 'index': index, 'job_id': '9501',
+            'scheduler_task_id': '9501_'+str(index), 'query_status': 'complete',
+            'authoritative': True, 'status': 'completed', 'reference': 'historical-terminal'})
+    assert reconcile(bundle, value)['all_tasks_terminal']
+    assert finalize_source_consumer(bundle, directory, release=True)['released']
+    assert finalize_source_consumer(bundle, directory, release=True)['released']
+    before = sorted(str(p) for p in directory.rglob('*'))
+    for operation in (lambda: prepare_retry_bundle(bundle, directory, output=bundle['output']+'-retry', attempt='02'),
+                      lambda: authorize_retry_job(bundle, directory, new_bundle=bundle, authorization={})):
+        with pytest.raises(ValueError, match='execution retired'):
+            operation()
+    assert sorted(str(p) for p in directory.rglob('*')) == before
+    assert {name: (directory/name).read_bytes() for name in original} == original
+
+
+def test_saved_legacy_unknown_and_payload_integrity(job_files):
+    bundle = saved_submission(job_files, accepted_first=False)
+    directory = Path(bundle['output'])
+    record = reconcile(bundle, evidence(bundle, result='delayed'))
+    assert [g['status'] for g in record['groups']] == ['unknown', 'not-attempted']
+    assert not record['all_tasks_terminal']
+    with pytest.raises(ValueError, match='terminal evidence'):
+        finalize_source_consumer(bundle, directory, release=True)
+    (directory/'job.sbatch').write_text('changed historical payload')
+    with pytest.raises(ValueError, match='payload'):
+        reconciliation_intents(bundle, directory)
+
+
+def test_saved_legacy_recovery_history_survives_new_reconciliation(job_files, monkeypatch):
+    import test_recipe_submission as fixtures
+    saved_bundle = fixtures.bundle
+    def inherited_bundle(files):
+        value = saved_bundle(files)
+        value['groups'][1].update(afterok=None, accepted_dependency_job_id='9400')
+        value['identity'] = canonical_digest({k: v for k, v in value.items() if k != 'identity'})
+        return value
+    monkeypatch.setattr(fixtures, 'bundle', inherited_bundle)
+    bundle = saved_submission(job_files)
+    directory = Path(bundle['output'])
+    original = {name: (directory/name).read_bytes() for name in ('bundle.json', 'job.sbatch', 'SUBMISSION.json')}
+    first = reconcile(bundle, evidence(bundle, result='rejected'))
+    # A saved historical approval/claim snapshot, never a new old-schema retry.
+    history = deepcopy(first)
+    authorization = {'approved': True, 'reference': 'saved-historical-owner-approval'}
+    history.update(sequence=2, previous_sha256=canonical_digest(first),
+                   retry_authorization=authorization, new_bundle_identity='a'*64,
+                   recovery_claims={'1': 'a'*64}, recovery_approvals={'a'*64: authorization})
+    path = directory/'reconciliation/00000002.json'
+    submission.write_json(path, history)
+    history_bytes = path.read_bytes()
+    updated = evidence(bundle, result='delayed')
+    updated['reference'] = 'later-incomplete-query'
+    record = reconcile(bundle, updated)
+    assert record['sequence'] == 3 and record['previous_sha256'] == canonical_digest(history)
+    for key in ('retry_authorization', 'new_bundle_identity', 'recovery_claims', 'recovery_approvals'):
+        assert record[key] == history[key]
+    assert record['groups'][0]['job_id'] == '9501'
+    assert record['groups'][1]['status'] == 'not-accepted'
+    assert json.loads((directory/'bundle.json').read_text())['groups'][1]['accepted_dependency_job_id'] == '9400'
+    assert path.read_bytes() == history_bytes
+    assert {name: (directory/name).read_bytes() for name in original} == original

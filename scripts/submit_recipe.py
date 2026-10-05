@@ -84,7 +84,7 @@ def main(argv=None) -> Any:
         # without trusting an output path inside a mutated bundle.
         try:
             bundle = validate_bundle(json.loads(Path(args.bundle).read_text()))
-            if args.mode == 'run' and args.identity and bundle['identity'] != args.identity:
+            if args.mode == 'run' and bundle['schema'] == 'recipe-case-submission-v1' and args.identity and bundle['identity'] != args.identity:
                 raise ValueError('explicit bundle identity differs')
         except (ValueError, KeyError, OSError) as error:
             if args.mode in ('run', 'submit'):
@@ -103,6 +103,8 @@ def main(argv=None) -> Any:
                                     'identity': args.identity, 'bundle_path': str(Path(args.bundle).resolve()),
                                     'failure': {'type': type(error).__name__, 'message': str(error)}})
             raise
+        if args.mode in ('preview', 'render', 'submit', 'run', 'prepare-retry', 'authorize-retry') and bundle['schema'] != 'recipe-case-submission-v1':
+            raise ValueError('old submission execution retired')
         if args.mode in ('check', 'render'):
             submission_preflight(bundle)
         if args.mode == 'preview':

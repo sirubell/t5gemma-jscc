@@ -62,7 +62,7 @@ def job_files(tmp_path):
     job = dict(schema=SCHEMA, recipe=str(recipe_file), root=str(tmp_path),
                source={'commit': commit, 'path': str(source)},
                model={'path': str(model), 'config_sha256': file_digest(metadata)},
-               prepared={'sha256': file_digest(prepared),
+               prepared={'sha256': file_digest(Path(prepared)),
                          'candidates': [str(tmp_path/'missing.json'), str(wrong), str(prepared)]},
                python=str(tmp_path/'python'), cache=str(tmp_path/'cache'), output=str(tmp_path/'campaign'),
                resources=resources, groups=[{'indices': [0, 1, 2], 'concurrency': 1, 'afterok': None},
@@ -72,28 +72,6 @@ def job_files(tmp_path):
     job_path.write_text(yaml.safe_dump(job))
     limits_path.write_text(yaml.safe_dump(limits))
     return job_path, limits_path, job
-
-
-def bundle(job_files):
-    job, limits, _ = job_files
-    return prepare_job(job, limits)
-
-
-def test_resolve_assets_render_exact_commands(job_files):
-    b = bundle(job_files)
-    assert [r['status'] for r in b['assets_inspected']] == ['missing', 'digest differs', 'selected exact manifest']
-    assert b['launch_authorized'] is False
-    payload = render_payload(b, b['output']+'/bundle.json')
-    assert payload.startswith('#!/bin/bash -l\nset -euo pipefail')
-    for env in ('HF_HUB_OFFLINE=1', 'HF_DATASETS_OFFLINE=1', 'CUBLAS_WORKSPACE_CONFIG=:4096:8'):
-        assert env in payload
-    assert b['source']['path']+'/scripts/submit_recipe.py run' in payload
-    assert scheduler_command(b, b['output']+'/job.sbatch', 1, '12345') == [
-        'sbatch', '--parsable', '--export=NONE', '--no-requeue', '--job-name=codec-recipe',
-        '--partition=h200q', '--account=research', '--qos=h200q_1g', '--nodelist=hgx-cn01', '--gres=gpu:1',
-        '--cpus-per-task=16', '--mem=170G', '--time=120', '--array=3,4,5,6,7,8%3',
-        '--output='+b['output']+'/logs/%A_%a.stdout', '--error='+b['output']+'/logs/%A_%a.stderr',
-        '--dependency=afterok:12345', '--kill-on-invalid-dep=yes', b['output']+'/job.sbatch']
 
 
 @pytest.mark.parametrize('value', ['/work/u/../escape', '/work/u/./data', 'relative', '/work/u/\nx'])
@@ -110,207 +88,11 @@ def test_aliases_boundaries():
             normalize_path(value, '/work/user')
 
 
-@pytest.mark.parametrize('mutation, match', [
-    (lambda j: j['resources'].update(cpus=17), 'invalid cpus'),
-    (lambda j: j['resources'].update(walltime_minutes=9), 'invalid walltime'),
-    (lambda j: j['resources'].update(account='unapproved'), 'unapproved account'),
-    (lambda j: j['resources'].update(node='bad\nnode'), 'invalid Slurm'),
-    (lambda j: j['groups'][0].update(concurrency=True), 'invalid concurrency'),
-    (lambda j: j['groups'][0].update(afterok=0), 'earlier group'),
-    (lambda j: j['groups'][1].update(indices=[0, 1]), 'exactly once'),
-    (lambda j: j['source'].update(commit='short'), 'full source'),
-    (lambda j: j.update(output=j['root']+'/../escape'), 'path escape'),
-    (lambda j: j['model'].update(config_sha256='f'*64), 'model config digest'),
-    (lambda j: j['prepared'].update(sha256='f'*64), 'no compatible existing'),
-])
-def test_invalid_job(job_files, mutation, match):
-    path, limits, job = job_files
-    mutation(job)
-    path.write_text(yaml.safe_dump(job))
-    with pytest.raises(ValueError, match=match):
-        prepare_job(path, limits)
-
-
-def test_changed_recipe_needs_integration(job_files):
-    path, limits, job = job_files
-    recipe_path = Path(job['recipe'])
-    recipe = yaml.safe_load(recipe_path.read_text())
-    recipe['overrides']['training']['lr'] = .001
-    recipe_path.write_text(yaml.safe_dump(recipe))
-    with pytest.raises(ValueError, match='complete config differs'):
-        prepare_job(path, limits)
-
-
-def test_symlink_asset(job_files, tmp_path):
-    path, limits, job = job_files
-    link = tmp_path/'link.json'
-    link.symlink_to(tmp_path/'prepared.json')
-    job['prepared']['candidates'] = [str(link)]
-    path.write_text(yaml.safe_dump(job))
-    with pytest.raises(ValueError, match='symlink changes'):
-        prepare_job(path, limits)
-
-
-def test_receipts_and_duplicate_prevention(job_files):
-    b = bundle(job_files)
-    commands = []
-
-    def scheduler(command):
-        receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
-        assert receipt['jobs'][-1]['status'] == 'attempting'
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, str(100+len(commands))+';cluster\n', '')
-
-    receipt = submit_job(b, b['output'], scheduler=scheduler)
-    assert receipt['status'] == 'submitted' and receipt['mocked'] is True
-    assert [j['job_id'] for j in receipt['jobs']] == ['101', '102']
-    assert '--dependency=afterok:101' in commands[1]
-    root = Path(b['output'])
-    assert receipt['payload_sha256'] == file_digest(root/'job.sbatch')
-    assert receipt['bundle_sha256'] == file_digest(root/'bundle.json')
-    assert (root/'logs').is_dir()
-    with pytest.raises(FileExistsError):
-        submit_job(b, b['output'], scheduler=scheduler)
-    assert len(commands) == 2
-
-
-@pytest.mark.parametrize('failure', ['nonzero', 'ambiguous', 'exception', 'keyboard'])
-def test_partial_ambiguous_outcomes(job_files, failure):
-    b = bundle(job_files)
-    calls = []
-
-    def scheduler(command):
-        calls.append(command)
-        if len(calls) == 1:
-            return subprocess.CompletedProcess(command, 0, '123\n', '')
-        if failure == 'exception':
-            raise OSError('connection lost after possible acceptance')
-        if failure == 'keyboard':
-            raise KeyboardInterrupt()
-        return subprocess.CompletedProcess(command, 1 if failure == 'nonzero' else 0,
-                                            'accepted but no ID', 'diagnostic')
-
-    with pytest.raises((ValueError, OSError, KeyboardInterrupt)):
-        submit_job(b, b['output'], scheduler=scheduler)
-    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
-    assert receipt['status'] == 'stopped-no-retry'
-    assert receipt['jobs'][0]['job_id'] == '123'
-    assert receipt['jobs'][1]['arguments'] == calls[1]
-    if failure in ('nonzero', 'ambiguous'):
-        assert receipt['jobs'][1]['stdout'] == 'accepted but no ID'
-    with pytest.raises(FileExistsError):
-        submit_job(b, b['output'], scheduler=scheduler)
-    assert len(calls) == 2
-
-
-def test_no_scheduler_without_approval(job_files, monkeypatch):
-    b = bundle(job_files)
-    monkeypatch.setattr('jscc.recipe_submission._slurm_submit', lambda *a, **k: pytest.fail('unexpected scheduler'))
-    with pytest.raises(ValueError, match='explicit exact live'):
-        submit_job(b, b['output'])
-    assert not Path(b['output']).exists()
-
-
-def test_cli_offline_operations(job_files, tmp_path, monkeypatch):
-    path, limits, _ = job_files
-    monkeypatch.setattr('jscc.recipe_submission._slurm_submit', lambda *a, **k: pytest.fail('unexpected scheduler'))
-    command = cli('submit_recipe.py')
-    output = tmp_path/'bundle.json'
-    b = command(['prepare', '--job', str(path), '--limits', str(limits), '--output', str(output)])
-    assert command(['check', '--bundle', str(output)])['launch_authorized'] is False
-    preview = command(['preview', '--bundle', str(output)])
-    assert preview['scheduler_invoked'] is False and preview['task_count'] == 9
-    assert preview['scientific_totals']['optimizer_updates'] == 1170000
-    assert preview['payload'] == render_payload(b, output)
-    command(['render', '--bundle', str(output), '--output', str(tmp_path/'render.sbatch')])
-    responses = tmp_path/'mock.json'
-    responses.write_text(json.dumps([{'returncode': 0, 'stdout': '123\n', 'stderr': ''},
-                                    {'returncode': 0, 'stdout': '124\n', 'stderr': ''}]))
-    assert command(['submit', '--bundle', str(output), '--mock-results', str(responses)])['status'] == 'submitted'
-    with pytest.raises(FileExistsError):
-        command(['prepare', '--job', str(path), '--limits', str(limits), '--output', str(output)])
-    with pytest.raises(SystemExit):
-        command(['check', '--bundle', str(output), '--live'])
-    assert b['identity'] == validate_bundle(json.loads(output.read_text()))['identity']
-
-
 def test_bundle_tampering(job_files):
     b = deepcopy(bundle(job_files))
     b['resources']['gpus'] = 5
     with pytest.raises(ValueError, match='bundle identity'):
         validate_bundle(b)
-
-
-def test_recheck_model_and_prepared_at_submission(job_files):
-    b = bundle(job_files)
-    Path(b['model']['path'], 'config.json').write_text('{}')
-    calls = []
-    with pytest.raises(ValueError, match='model config digest differs'):
-        submit_job(b, b['output'], scheduler=calls.append)
-    assert not calls
-    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
-    assert receipt['failure']['stage'] == 'preflight'
-
-
-def test_output_parent_symlink_escape(job_files, tmp_path):
-    path, limits, job = job_files
-    link = tmp_path/'link'
-    link.symlink_to(tmp_path, target_is_directory=True)
-    job['output'] = str(link/'campaign')
-    path.write_text(yaml.safe_dump(job))
-    b = bundle(job_files)
-    with pytest.raises(ValueError, match='parent symlink'):
-        submit_job(b, b['output'], scheduler=lambda command: None)
-    assert not (tmp_path/'campaign').exists()
-
-
-def test_run_payload_uses_bound_training_cli(job_files, tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from jscc import recipe_submission as submission
-    b = bundle(job_files)
-    submission.submit_job(b, b['output'], scheduler=lambda command: subprocess.CompletedProcess(command, 0, '123\n', ''))
-    monkeypatch.setattr(submission, '__file__', b['source']['path']+'/jscc/recipe_submission.py')
-    monkeypatch.setenv('SLURM_JOB_ID', '123')
-    monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '4')
-    monkeypatch.setattr('torch.cuda.device_count', lambda: 1)
-    monkeypatch.setattr('torch.cuda.is_bf16_supported', lambda: True)
-    monkeypatch.setattr('torch.cuda.get_device_properties', lambda index: SimpleNamespace(uuid='fixture-gpu'))
-    calls = []
-    monkeypatch.setattr('os.execv', lambda path, argv: calls.append((path, argv)))
-    submission.run_job(b, b['identity'])
-    executable, args = calls[0]
-    assert executable == b['python']
-    assert args[:3] == [b['python'], b['source']['path']+'/scripts/original13_training.py', 'train']
-    assert args[args.index('--width')+1] == '1152'
-    assert args[args.index('--ratio')+1] == '75'
-    assert args[args.index('--trajectory')+1] == '4'
-    assert args[args.index('--approved-source')+1] == b['source']['commit']
-    assert args[args.index('--device-uuid')+1] == 'GPU-fixture-gpu'
-    assert args[args.index('--timeout-seconds')+1] == '6900'
-    with pytest.raises(FileExistsError):
-        submission.run_job(b, b['identity'])
-    assert len(calls) == 1
-
-
-@pytest.mark.parametrize('field,value,match', [
-    ('source_commit', '2'*40, 'prepared source commit'),
-    ('schema', 'other-v1', 'prepared schema'),
-])
-def test_prepared_source_rejected_before_reservation(job_files, field, value, match):
-    b = bundle(job_files)
-    path = Path(b['prepared']['path'])
-    manifest = json.loads(path.read_text())
-    manifest[field] = value
-    path.write_text(json.dumps(manifest))
-    b['prepared']['sha256'] = file_digest(path)
-    from jscc.activation_replay import canonical_digest
-    b['identity'] = canonical_digest({k: v for k, v in b.items() if k != 'identity'})
-    calls = []
-    with pytest.raises(ValueError, match=match):
-        submit_job(b, b['output'], scheduler=calls.append)
-    assert not calls
-    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
-    assert receipt['failure']['stage'] == 'preflight'
 
 
 def test_real_retained_loader_checks_persisted_resolution(prepared, tmp_path):
@@ -343,81 +125,6 @@ def test_real_retained_loader_checks_persisted_resolution(prepared, tmp_path):
         check(args)
 
 
-@pytest.mark.parametrize('mutation', ['dirty', 'untracked', 'wrong-sha', 'runtime'])
-def test_source_failure_retained_before_scheduler(job_files, mutation):
-    b = bundle(job_files)
-    source = Path(b['source']['path'])
-    if mutation == 'dirty':
-        (source/'worker.py').write_text('changed')
-    elif mutation == 'untracked':
-        (source/'new-worker.py').write_text('changed')
-    elif mutation == 'runtime':
-        Path(b['python']).unlink()
-        Path(b['python']).write_text('not an interpreter')
-    else:
-        (source/'worker.py').write_text('changed')
-        subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
-        subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c',
-                        'user.email=fixture@example.invalid', 'commit', '-qm', 'new'], check=True)
-    calls = []
-    with pytest.raises((ValueError, OSError)):
-        submit_job(b, b['output'], scheduler=calls.append)
-    receipt = json.loads((Path(b['output'])/'SUBMISSION.json').read_text())
-    assert receipt['failure']['stage'] == 'preflight'
-    assert receipt['jobs'] == [] and not calls
-    assert receipt['status'] == 'stopped-no-retry'
-
-
-@pytest.mark.parametrize('mutation', ['dirty', 'wrong-sha', 'config'])
-def test_launch_source_failure_before_model_with_evidence(job_files, monkeypatch, mutation):
-    from jscc import recipe_submission as submission
-    b = bundle(job_files)
-    submit_job(b, b['output'], scheduler=lambda command: subprocess.CompletedProcess(command, 0, '123\n', ''))
-    source = Path(b['source']['path'])
-    if mutation == 'config':
-        Path(b['prepared']['path']).write_text('{}')
-    else:
-        (source/'worker.py').write_text('changed')
-        if mutation == 'wrong-sha':
-            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
-            subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c',
-                            'user.email=fixture@example.invalid', 'commit', '-qm', 'new'], check=True)
-    monkeypatch.setattr(submission, '__file__', str(source/'jscc/recipe_submission.py'))
-    monkeypatch.setenv('SLURM_JOB_ID', '123')
-    monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '0')
-    monkeypatch.setattr('torch.cuda.device_count', lambda: pytest.fail('model/GPU reached'))
-    monkeypatch.setattr('os.execv', lambda *a: pytest.fail('execution reached'))
-    with pytest.raises(ValueError):
-        submission.run_job(b, b['identity'])
-    marker = json.loads((Path(b['output'])/'trajectory-0.preflight.json').read_text())
-    assert marker['status'] == 'failed' and marker['failure']['message']
-    with pytest.raises(FileExistsError):
-        submission.run_job(b, b['identity'])
-    with pytest.raises(ValueError, match='held'):
-        submission.source_consumers(b).require_released(source)
-
-
-def test_preview_bound_yaml_and_no_large_asset_reads(job_files, monkeypatch):
-    from jscc import recipe_submission as submission, source_lifetime
-    b = bundle(job_files)
-    recipe = Path(job_files[2]['recipe'])
-    recipe.write_text('invalid YAML after binding')
-    (Path(b['model']['path'])/'weights.safetensors').write_text('immutable fixture weight')
-    read_files = []
-
-    def counted(path):
-        read_files.append(Path(path).name)
-        return file_digest(path)
-
-    monkeypatch.setattr(submission, 'file_digest', counted)
-    monkeypatch.setattr(source_lifetime, 'file_digest', counted)
-    monkeypatch.setattr(submission, '_slurm_submit', lambda *a: pytest.fail('scheduler reached'))
-    preview = submission.preview_job(b, b['output']+'/bundle.json')
-    assert preview['cases'][0]['effective_config'] == b['resolved']['trajectories'][0]['config']
-    assert set(read_files) <= {'uv.lock', 'config.json', 'prepared.json'}
-    assert read_files and preview['scheduler_invoked'] is False
-
-
 @pytest.mark.parametrize('content', ['invalid json', '{"schema": "wrong"}', '[]', 'null'])
 @pytest.mark.parametrize('mode', ['run', 'submit'])
 def test_cli_invalid_launch_bundle_records_failure(tmp_path, monkeypatch, content, mode):
@@ -437,8 +144,7 @@ def test_cli_invalid_launch_bundle_records_failure(tmp_path, monkeypatch, conten
     assert marker.read_bytes() == original
 
 
-
-def test_cli_changed_valid_bundle_preserves_approved_identity_failure(job_files, tmp_path, monkeypatch):
+def test_cli_changed_old_bundle_rejects_without_failure_marker(job_files, tmp_path, monkeypatch):
     from jscc.activation_replay import canonical_digest
     b = bundle(job_files)
     approved = b['identity']
@@ -448,11 +154,160 @@ def test_cli_changed_valid_bundle_preserves_approved_identity_failure(job_files,
     path.write_text(json.dumps(b))
     monkeypatch.setenv('SLURM_ARRAY_TASK_ID', '7')
     command = cli('submit_recipe.py')
-    with pytest.raises(ValueError, match='explicit bundle identity differs'):
+    with pytest.raises(ValueError, match='execution retired'):
         command(['run', '--bundle', str(path), '--identity', approved])
-    marker = tmp_path/'trajectory-7.bundle-failure.json'
-    failure = json.loads(marker.read_text())
-    assert failure['identity'] == approved and failure['stage'] == 'bundle-preflight'
-    assert failure['failure']['message'] == 'explicit bundle identity differs'
-    with pytest.raises(FileExistsError):
-        command(['run', '--bundle', str(path), '--identity', approved])
+    assert not (tmp_path/'trajectory-7.bundle-failure.json').exists()
+
+
+def bundle(job_files):
+    """Construct a saved historical bundle, independently of execution APIs."""
+    from jscc.activation_replay import canonical_digest
+    from jscc.source_lifetime import capture_source_binding
+    _, _, job = job_files
+    prepared = str(Path(job['root'])/'prepared.json')
+    result = {key: deepcopy(job[key]) for key in
+              ('schema', 'root', 'source', 'model', 'python', 'cache', 'output', 'resources', 'groups')}
+    result.update(prepared={'path': prepared, 'sha256': file_digest(Path(prepared))},
+                  resolved=resolve_recipe(job['recipe'], model_config_path=Path(job['model']['path'])/'config.json'),
+                  launch_authorized=False,
+                  assets_inspected=[{'path': prepared, 'status': 'selected exact manifest'}])
+    result['source_binding'] = capture_source_binding(job['source']['path'], job['source']['commit'], job['python'])
+    result['identity'] = canonical_digest(result)
+    return result
+
+
+def saved_submission(job_files, *, accepted_first=True, missing_intent_fields=False):
+    """Serialize a historical stopped receipt; no production scheduler/producer runs."""
+    from jscc import recipe_submission as submission
+    b = bundle(job_files)
+    directory = Path(b['output'])
+    directory.mkdir()
+    submission.write_json(directory/'bundle.json', b)
+    (directory/'job.sbatch').write_text('#!/bin/bash\n# retained historical payload\n')
+    receipt = {'schema': SCHEMA, 'bundle_identity': b['identity'],
+               'source_commit': b['source']['commit'], 'status': 'stopped-no-retry',
+               'mocked': True, 'bundle_sha256': file_digest(directory/'bundle.json'),
+               'payload_sha256': file_digest(directory/'job.sbatch'), 'jobs': [],
+               'source_consumer_reserved': True}
+    for index in range(2 if accepted_first else 1):
+        row = {'bundle_identity': b['identity'], 'group': index,
+               'arguments': ['sbatch', '--array='+','.join(map(str,b['groups'][index]['indices'])),
+                             str(directory/'job.sbatch')],
+               'payload_sha256': receipt['payload_sha256'], 'status': 'attempting'}
+        if not missing_intent_fields:
+            row.update(attempt_identity=f'historical-intent-{index}', attempted_at='2026-10-01T00:00:00+00:00')
+        if index == 0 and accepted_first:
+            row.update(status='submitted', job_id='9501', stdout='9501\n', stderr='', returncode=0)
+        receipt['jobs'].append(row)
+    submission.write_json(directory/'SUBMISSION.json', receipt)
+    registry = submission.source_consumers(b)
+    registry.reserve(b['source_binding'], b['identity'], owner=b['output'], reference=str(directory/'SUBMISSION.json'))
+    registry.record_state(b['source']['path'], b['identity'], 'unresolved', owner=b['output'], evidence=str(directory/'SUBMISSION.json'))
+    return b
+
+
+@pytest.mark.parametrize('operation', ['preview', 'render', 'scheduler', 'submit', 'run', 'private-preview', 'private-submit', 'private-run', 'prepare-retry', 'authorize-retry'])
+def test_old_producers_reject_before_effects(job_files, operation, monkeypatch):
+    from jscc import recipe_submission as submission
+    from jscc.submission_reconciliation import prepare_retry_bundle, authorize_retry_job
+    b = bundle(job_files)
+    before = sorted(str(p) for p in Path(b['root']).rglob('*'))
+    monkeypatch.setattr(submission, 'submission_preflight', lambda *_: pytest.fail('preflight ran'))
+    monkeypatch.setattr(submission, 'source_consumers', lambda *_: pytest.fail('registry consulted'))
+    operations = {
+        'preview': lambda: submission.preview_job(b, b['output']+'/bundle.json'),
+        'render': lambda: render_payload(b, b['output']+'/bundle.json'),
+        'scheduler': lambda: scheduler_command(b, b['output']+'/job.sbatch', 0),
+        'submit': lambda: submit_job(b, b['output'], scheduler=lambda _: pytest.fail('scheduler ran')),
+        'run': lambda: submission.run_job(b, b['identity'], runner=lambda _: pytest.fail('runner ran')),
+        'private-preview': lambda: submission._preview_case_job(b, b['output']+'/bundle.json'),
+        'private-submit': lambda: submission._submit_case_job(b, b['output'],
+            scheduler=lambda _: pytest.fail('scheduler ran'), authorization=None),
+        'private-run': lambda: submission._run_case_job(b, b['identity'], 0, runner=lambda _: pytest.fail('runner ran')),
+        'prepare-retry': lambda: prepare_retry_bundle(b, b['output'], output=b['output']+'-retry', attempt='02'),
+        'authorize-retry': lambda: authorize_retry_job(b, b['output'], new_bundle=b, authorization={})}
+    with pytest.raises(ValueError, match='execution retired'):
+        operations[operation]()
+    assert sorted(str(p) for p in Path(b['root']).rglob('*')) == before
+
+
+@pytest.mark.parametrize('mode', ['prepare', 'action'])
+def test_old_job_rejects_before_inputs_or_output(job_files, mode, monkeypatch, tmp_path):
+    import jscc.recipe_submission as submission
+    job, limits, _ = job_files
+    monkeypatch.setattr(submission, 'local_path', lambda *_: pytest.fail('asset read'))
+    limits.unlink()
+    with pytest.raises(ValueError, match='execution retired'):
+        prepare_job(job, limits)
+    output = tmp_path/'new-bundle.json'
+    with pytest.raises(ValueError, match='execution retired'):
+        cli('submit_recipe.py')([mode, '--job', str(job), '--limits', str(limits), '--output', str(output)])
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('mode', ['preview', 'render', 'submit', 'run', 'prepare-retry', 'authorize-retry'])
+def test_valid_old_cli_rejects_without_artifacts(job_files, mode, tmp_path):
+    b = bundle(job_files)
+    path = tmp_path/'saved-bundle.json'
+    path.write_text(json.dumps(b))
+    before = sorted(str(p) for p in tmp_path.rglob('*'))
+    with pytest.raises(ValueError, match='execution retired'):
+        cli('submit_recipe.py')([mode, '--bundle', str(path), '--identity', b['identity'],
+                               '--output', str(tmp_path/'new-output')])
+    assert sorted(str(p) for p in tmp_path.rglob('*')) == before
+
+
+def test_saved_preflight_preserves_model_prepared_and_source_integrity(job_files):
+    from jscc.recipe_submission import submission_preflight
+    from jscc.activation_replay import canonical_digest
+    b = bundle(job_files)
+    assert submission_preflight(b) == b['source_binding']
+    assert cli('submit_recipe.py')(['check', '--bundle', _save_bundle(b)])['trajectories'] == 9
+    metadata = Path(b['model']['path'])/'config.json'
+    original = metadata.read_bytes()
+    metadata.write_text('{}')
+    with pytest.raises(ValueError, match='model config digest'):
+        submission_preflight(b)
+    metadata.write_bytes(original)
+    asset = Path(b['prepared']['path'])
+    manifest = json.loads(asset.read_text())
+    manifest['configs']['8']['training']['lr'] = .001
+    asset.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='prepared digest'):
+        submission_preflight(b)
+    b['prepared']['sha256'] = file_digest(asset)
+    b['identity'] = canonical_digest({k:v for k,v in b.items() if k != 'identity'})
+    with pytest.raises(ValueError, match='complete config differs'):
+        submission_preflight(b)
+
+
+def _save_bundle(b):
+    path = Path(b['root'])/'saved-check.json'
+    path.write_text(json.dumps(b))
+    return str(path)
+
+
+@pytest.mark.parametrize('mutation,match', [('dirty', 'tracked changes'), ('runtime', 'runtime'),
+                                            ('prepared-source', 'prepared source commit'),
+                                            ('prepared-plan', 'exact trajectory')])
+def test_saved_preflight_rejects_source_runtime_and_science_changes(job_files, mutation, match):
+    from jscc.recipe_submission import submission_preflight
+    from jscc.activation_replay import canonical_digest
+    b = bundle(job_files)
+    if mutation == 'dirty':
+        (Path(b['source']['path'])/'worker.py').write_text('changed source')
+    elif mutation == 'runtime':
+        b['source_binding']['runtime']['python'] += '-different'
+    else:
+        path = Path(b['prepared']['path'])
+        manifest = json.loads(path.read_text())
+        if mutation == 'prepared-source':
+            manifest['source_commit'] = '0'*40
+        else:
+            manifest['plans'].pop()
+        path.write_text(json.dumps(manifest))
+        b['prepared']['sha256'] = file_digest(path)
+    b['identity'] = canonical_digest({k:v for k,v in b.items() if k != 'identity'})
+    with pytest.raises(ValueError, match=match):
+        submission_preflight(b)
+    assert not Path(b['output']).exists()
