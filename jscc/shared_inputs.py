@@ -492,6 +492,37 @@ def _processor_asset_names(assets):
         '*processor*.json', 'chat_template*') for p in Path(assets).glob(pattern) if p.is_file()})
 
 
+def _coco_image_processor_config(assets):
+    """Use the local loader's nested-config precedence and normalization.
+
+    Older separate-file receipts retain their authored-field comparison.
+    Nested metadata must load as an image processor, including class defaults
+    and nullable legacy fields, rather than merely supplying a filename.
+    """
+    # Match ProcessorMixin's lazy import; the top-level export unnecessarily
+    # requires torchvision even when the existing loader uses the PIL backend.
+    from transformers.models.auto.image_processing_auto import AutoImageProcessor
+    from transformers.image_processing_base import ImageProcessingMixin
+    nested = False
+    if (Path(assets) / 'processor_config.json').is_file():
+        processor_path = asset_file_path(assets, 'processor_config.json')
+        document = json.loads(processor_path.read_text())
+        if not isinstance(document, dict):
+            raise ValueError('COCO acquisition requires valid processor metadata')
+        nested = 'image_processor' in document
+        if nested and (not isinstance(document['image_processor'], dict) or not document['image_processor']):
+            raise ValueError('COCO acquisition requires valid image processor metadata')
+    config, _ = ImageProcessingMixin.get_image_processor_dict(assets, local_files_only=True)
+    if not isinstance(config, dict) or not config:
+        raise ValueError('COCO acquisition requires valid image processor metadata')
+    if nested:
+        if not isinstance(config.get('image_processor_type'), str) or not config['image_processor_type'].strip():
+            raise ValueError('COCO nested metadata requires an image processor type')
+        config = AutoImageProcessor.from_pretrained(
+            assets, local_files_only=True, trust_remote_code=False).to_dict()
+    return json.loads(json.dumps(config, allow_nan=False)), nested
+
+
 def _coco_membership(raw, fixed, karpathy):
     from .data.coco import validate_ids
     required = {'train_ids','demo_ids','selection_ids','report_ids'}
@@ -553,9 +584,10 @@ def bind_coco_data_cache(*, dataset_path, assets, dataset_name, dataset_revision
         if not isinstance(value,str) or not value.strip():
             raise ValueError('COCO acquisition requires explicit pinned '+key)
     names = _processor_asset_names(assets)
-    if ('config.json' not in names or 'preprocessor_config.json' not in names
+    if ('config.json' not in names or not {'preprocessor_config.json', 'processor_config.json'} & set(names)
             or not any(name.startswith('tokenizer') for name in names)):
         raise ValueError('COCO acquisition requires local tokenizer/config/image processor assets')
+    _coco_image_processor_config(assets)
     metadata = json.loads(asset_file_path(assets,'config.json').read_text())
     if metadata.get('_commit_hash') is not None and metadata['_commit_hash'] != model_revision:
         raise ValueError('COCO model metadata revision differs from acquisition')
@@ -629,11 +661,13 @@ def _validate_coco_cache(receipt):
     verify_asset_record(arrow,dataset,trust['dataset'])
     verify_asset_record(normalize_asset_path(karpathy['path']),karpathy,trust['karpathy'])
     files = tokenizer['files']
-    if (set(files) != set(_processor_asset_names(assets)) or 'preprocessor_config.json' not in files
+    if (set(files) != set(_processor_asset_names(assets))
+            or not {'preprocessor_config.json', 'processor_config.json'} & set(files)
             or receipt['processor_identity'] != canonical_digest({'revision':tokenizer['revision'],'files':files})):
         raise ValueError('COCO processor asset inventory differs')
     for name, record in files.items():
         verify_asset_record(asset_file_path(assets,name),record,trust['tokenizer'][name])
+    _coco_image_processor_config(assets)
     for path, record in receipt['external_images'].items():
         if not Path(path).is_absolute():
             raise ValueError('COCO external image requires absolute local path')
@@ -659,12 +693,12 @@ def _validate_coco_processor(processor, assets):
     name = getattr(tokenizer,'name_or_path',None)
     if name is None or normalize_asset_path(name) != normalize_asset_path(assets):
         raise ValueError('COCO runtime processor differs from acquired local snapshot')
-    expected = json.loads(asset_file_path(assets,'preprocessor_config.json').read_text())
+    expected, nested = _coco_image_processor_config(assets)
     image_processor = getattr(processor,'image_processor',None)
     actual = image_processor.to_dict() if image_processor is not None else {}
     if any(key not in actual for key in expected):
         raise ValueError('COCO runtime image preprocessing differs from acquired config')
-    actual = json.loads(json.dumps({key: actual[key] for key in expected}, allow_nan=False))
+    actual = json.loads(json.dumps(actual if nested else {key: actual[key] for key in expected}, allow_nan=False))
     if actual != expected:
         raise ValueError('COCO runtime image preprocessing differs from acquired config')
     backend = getattr(tokenizer,'backend_tokenizer',None)

@@ -74,6 +74,36 @@ def positive(value, name):
         raise ValueError(name+' requires a positive integer')
 
 
+def _hellaswag_cache_membership(fixed):
+    """Require authored split-local memberships; loaders check row eligibility."""
+    required = {'train_rows', 'validation_rows', 'validation_split', 'development', 'final_validation'}
+    fields(fixed, required | {'selection_seed'}, 'HellaSwag fixed membership', required)
+    if fixed['validation_split'] != 'train':
+        raise ValueError('HellaSwag selection holdout requires the train split')
+    if 'selection_seed' in fixed and type(fixed['selection_seed']) is not int:
+        raise ValueError('HellaSwag selection_seed requires an integer')
+    for key in ('train_rows', 'validation_rows'):
+        rows = fixed[key]
+        if (not isinstance(rows, list) or not rows
+                or any(type(row) is not int or row < 0 for row in rows) or len(set(rows)) != len(rows)):
+            raise ValueError('HellaSwag fixed rows require unique nonnegative integer IDs')
+    if set(fixed['train_rows']) & set(fixed['validation_rows']):
+        raise ValueError('HellaSwag train and selection rows must be disjoint')
+    for key in ('development', 'final_validation'):
+        panel = fields(fixed[key], {'input_ids', 'source_family_ids', 'noise'},
+                       'HellaSwag '+key, ('input_ids', 'source_family_ids'))
+        rows, families = panel['input_ids'], panel['source_family_ids']
+        if (not isinstance(rows, list) or not rows
+                or any(type(row) is not int or row < 0 for row in rows) or len(set(rows)) != len(rows)
+                or not isinstance(families, list) or len(families) != len(rows)
+                or any(not isinstance(family, str) or not family.strip() for family in families)):
+            raise ValueError('HellaSwag panels require aligned row and source-family IDs')
+        if 'noise' in panel:
+            noise = fields(panel['noise'], {'namespace', 'seed'}, 'panel noise', ('namespace', 'seed'))
+            if not isinstance(noise['namespace'], str) or not noise['namespace'].strip() or type(noise['seed']) is not int:
+                raise ValueError('panel noise requires namespace and integer seed')
+
+
 def ordinary_fields(science):
     fields(science, {'task', 'seed', 'protocol', 'model_config', *FIELDS}, 'ordinary experiment', ('task', 'seed', 'run', 'data', 'training', 'evaluation'))
     if science['task'] not in ('coco', 'hellaswag') or type(science['seed']) is not int or science['seed'] < 0:
@@ -207,19 +237,25 @@ def read_request(filename) -> tuple[Path, dict[str, Any]]:
         ex['resolution'] = resolution
     elif operation == 'acquire':
         acquisition = ex.get('acquisition')
-        if isinstance(acquisition, dict) and acquisition.get('kind') == 'coco-cache':
+        if isinstance(acquisition, dict) and acquisition.get('kind') in ('coco-cache', 'hellaswag-cache'):
+            coco = acquisition['kind'] == 'coco-cache'
             keys = {'kind', 'dataset_path', 'assets', 'dataset_name', 'dataset_revision',
-                    'model_revision', 'karpathy_path', 'karpathy_name', 'karpathy_revision',
-                    'fixed_data_ids', 'output'}
-            a = fields(acquisition, keys, 'COCO cache acquisition', keys)
-            for key in ('dataset_name', 'dataset_revision', 'model_revision', 'karpathy_name', 'karpathy_revision'):
+                    'model_revision', 'fixed_data_ids', 'output'}
+            if coco:
+                keys |= {'karpathy_path', 'karpathy_name', 'karpathy_revision'}
+            label = 'COCO' if coco else 'HellaSwag'
+            a = fields(acquisition, keys, label+' cache acquisition', keys)
+            for key in ('dataset_name', 'dataset_revision', 'model_revision', *(
+                    ('karpathy_name', 'karpathy_revision') if coco else ())):
                 if not isinstance(a[key], str) or not a[key].strip():
-                    raise ValueError('COCO acquisition requires pinned '+key)
+                    raise ValueError(label+' acquisition requires pinned '+key)
             if not isinstance(a['fixed_data_ids'], dict):
-                raise ValueError('COCO acquisition requires explicit fixed image partitions')
+                raise ValueError(label+' acquisition requires explicit fixed partitions')
+            if not coco:
+                _hellaswag_cache_membership(a['fixed_data_ids'])
             if isinstance(a['output'], str) and (filename.parent/Path(a['output']).expanduser()).is_symlink():
-                raise FileExistsError('COCO acquisition output is already reserved by a symlink')
-            for key in ('dataset_path', 'assets', 'karpathy_path', 'output'):
+                raise FileExistsError(label+' acquisition output is already reserved by a symlink')
+            for key in ('dataset_path', 'assets', 'output', *(('karpathy_path',) if coco else ())):
                 a[key] = str(path(a[key], filename))
         else:
             a = fields(acquisition, {'model_path', 'model_revision', 'output', 'synthetic_cpu'}, 'acquisition', ('model_path', 'model_revision', 'output', 'synthetic_cpu'))
@@ -413,6 +449,9 @@ def execute(filename) -> Any:
         if a.get('kind') == 'coco-cache':
             from .shared_inputs import bind_coco_data_cache
             value = bind_coco_data_cache(**{k: v for k, v in a.items() if k != 'kind'})
+        elif a.get('kind') == 'hellaswag-cache':
+            from .shared_inputs import bind_recipe_data_cache
+            value = bind_recipe_data_cache(**{k: v for k, v in a.items() if k != 'kind'})
         else:
             from .asset_identity import bind_model_assets
             value = bind_model_assets(a['model_path'], a['model_revision'], production=not a['synthetic_cpu'])
