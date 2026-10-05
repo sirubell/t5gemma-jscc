@@ -187,8 +187,8 @@ For local research, start with `docs/local/research/HANDOFF.md` when present. It
 
 - [Current operations commands and experiment-ticket guidance](docs/operations-workflow.md)
 - [Current defaults and historical recipe lineage](docs/current-defaults.md)
-- [COCO query-image and endpoint diagnostic](docs/coco-query-endpoint-diagnostic.md)
-- [COCO visited-generation trajectory diagnostic](docs/coco-trajectory-diagnostic.md)
+- [COCO query/endpoint helpers and saved receipts](docs/coco-query-endpoint-diagnostic.md)
+- [COCO saved trajectories and comparison helpers](docs/coco-trajectory-diagnostic.md)
 - [Shared encoder capture and replay acceptance](docs/shared-encoder-atlas.md)
 - [HellaSwag enc_l9 two-stage preparation and execution](docs/hellaswag-two-stage.md)
 - [Architecture, data, objectives and checkpoint semantics](docs/architecture.md)

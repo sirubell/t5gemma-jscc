@@ -92,57 +92,78 @@ def test_complete_observed_matrix_and_exact_call_budget():
     assert counts["training_updates"] == 0
 
 
-@pytest.mark.parametrize("failure_stage", ["cached", "full"])
-def test_failed_request_retains_attempt_artifact_and_failed_status(tmp_path, monkeypatch, failure_stage):
-    from jscc import coco_trajectory as trajectory
-    from jscc import coco_diagnostic as endpoint
-    from PIL import Image
-    torch.manual_seed(0)
-    model = SplitModel(tiny_backbone(), Codec(16, {"hidden_dim": 16, "bottleneck_dim": 8,
-        "activation": "gelu", "layernorm": "none", "snr_film": False, "n_res_blocks": 0}),
-        AWGNChannel(), {"stack": "enc", "where": "after_layer", "index": 0},
-        {"normalize_power": True, "clean_film_snr": 18.0}).eval()
-    inputs = {"input_ids": torch.tensor([[2, 5]]), "attention_mask": torch.ones(1, 2, dtype=torch.long),
-              "pixel_values": torch.empty((0, 3, 8, 8))}
-    class Tokenizer:
-        eos_token_id = 1
-        def __call__(self, *args, **kwargs):
-            return {"input_ids": [8]}
-    class Processor:
-        tokenizer = Tokenizer()
-        def __call__(self, **kwargs):
-            return inputs
-    row = {"image_id": 1, "model_mode": "vanilla", "generated_token_ids": [2, 4, 1],
-           "selection": selected_states([2, 4, 1], 1, [8]), "checkpoint_sha256": "digest",
-           "request_id": "original", "input_tensor_sha256": {k: endpoint.tensor_sha256(v) for k, v in inputs.items()}}
-    evidence = {"trajectories": [row], "evidence_sha256": {}, "eos": 1, "newline": [8],
-                "identity": {"modes": {m: {"checkpoint_sha256": "digest"} for m in endpoint.MODES}}}
-    monkeypatch.setattr(trajectory, "read_evidence", lambda *_: evidence)
-    monkeypatch.setattr(endpoint, "load_rows_offline", lambda *_: {1: {"image": Image.new("RGB", (8, 8)), "answer": ["caption"]}})
-    monkeypatch.setattr(endpoint, "load_mode", lambda *_: (Processor(), model))
-    def fail(*args, **kwargs):
-        raise ValueError("injected nonfinite logits")
-    if failure_stage == "cached":
-        monkeypatch.setattr(trajectory, "cached_replay", fail)
-    else:
-        monkeypatch.setattr(trajectory, "cached_replay", lambda *args, **kwargs: ({2: torch.zeros(32)}, [4, 1], 0))
-        monkeypatch.setattr(endpoint, "forward_endpoint", fail)
-    plan = {"selection": {"image_ids": [1], "demo_ids": [1] * 4}, "ids": {}, "manifest_sha256": "test",
-            "modes": {m: {"checkpoint_sha256": "digest", "config": {}} for m in endpoint.MODES}}
-    result = trajectory.run(plan, tmp_path, {"evidence_sha256": {}}, tmp_path / "output", 30, 0)
-    assert result["status"] == "failed"
-    assert result["attempts"] == (1 if failure_stage == "cached" else 2)
-    assert result["completed"] == (0 if failure_stage == "cached" else 1)
+
+
+@pytest.fixture
+def saved_screen(tmp_path):
+    """Small receipt matrix, independent of private scientific artifacts."""
     import json
-    records = [json.loads(line) for line in (tmp_path / "output/items.jsonl").read_text().splitlines()]
-    assert [r["status"] for r in records if "status" in r] == (
-        ["partial", "failed"] if failure_stage == "cached" else ["partial", "complete", "partial", "failed"])
-    if failure_stage == "full":
-        complete = next(r for r in records if r.get("status") == "complete")
-        artifact = tmp_path / "output" / complete["artifact"]
-        assert endpoint.sha256(artifact) == complete["artifact_sha256"]
-        saved = torch.load(artifact, weights_only=True)
-        assert saved["request_id"] == complete["request_id"]
-        assert torch.isfinite(saved["result"][0][2]).all()
-    assert json.loads((tmp_path / "output/status.json").read_text())["status"] == "failed"
-    assert not model.base._forward_hooks
+    from jscc.coco_diagnostic import MODES, sha256
+
+    identity = {"modes": {mode: {"checkpoint_sha256": str(index) * 64}
+                          for index, mode in enumerate(MODES)}}
+    (tmp_path / "identity.json").write_text(json.dumps(identity))
+    (tmp_path / "status.json").write_text(json.dumps({
+        "status": "complete", "completed": 1024,
+        "manifest_sha256": sha256(tmp_path / "identity.json")}))
+    endpoints = [{"status": "complete", "request_kind": "endpoint",
+                  "eos_token_id": 1, "newline_token_ids": [7, 8]} for _ in range(768)]
+    trajectories = [{"status": "complete", "request_kind": "generation",
+                     "query_control": "matched", "image_id": image_id, "model_mode": mode,
+                     "checkpoint_sha256": identity["modes"][mode]["checkpoint_sha256"],
+                     "generated_token_ids": [2, 7, 8, 1]}
+                    for image_id in range(32) for mode in MODES]
+    rows = endpoints + trajectories
+    (tmp_path / "items.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return tmp_path
+
+
+def test_saved_reader_preserves_exact_matrix_hashes_and_workload(saved_screen):
+    from jscc.coco_diagnostic import sha256
+
+    evidence = read_evidence(saved_screen)
+    assert evidence["eos"] == 1 and evidence["newline"] == [7, 8]
+    assert evidence["evidence_sha256"] == {name: sha256(saved_screen / name)
+        for name in ("identity.json", "status.json", "items.jsonl")}
+    assert workload(evidence) == {"trajectories": 128, "selected_states": 256,
+        "logical_requests": 672, "decoder_calls": 1120, "encoder_calls": 672,
+        "missing_newline": 0, "training_updates": 0}
+    assert evidence["trajectories"][0]["selection"]["prefix_lengths"] == [1, 3]
+
+
+@pytest.mark.parametrize("mutation,message", [
+    ("incomplete", "complete 1024"),
+    ("identity", "identity bytes"),
+    ("missing_endpoint", "tokenizer contracts"),
+    ("tokenizer", "tokenizer contracts"),
+    ("missing_generation", "32 images by four"),
+    ("duplicate_mode", "32 images by four"),
+    ("checkpoint", "checkpoint identity"),
+])
+def test_saved_reader_rejects_changed_or_incomplete_receipts(saved_screen, mutation, message):
+    import json
+
+    if mutation == "incomplete":
+        path = saved_screen / "status.json"
+        value = json.loads(path.read_text())
+        value["completed"] = 1023
+        path.write_text(json.dumps(value))
+    elif mutation == "identity":
+        path = saved_screen / "identity.json"
+        path.write_text(path.read_text() + "\n")
+    else:
+        path = saved_screen / "items.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        if mutation == "missing_endpoint":
+            rows.pop(0)
+        elif mutation == "tokenizer":
+            rows[0]["newline_token_ids"] = [8]
+        elif mutation == "missing_generation":
+            rows.pop()
+        elif mutation == "duplicate_mode":
+            rows[-1]["model_mode"] = "enc_fn"
+        elif mutation == "checkpoint":
+            rows[-1]["checkpoint_sha256"] = "changed"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(ValueError, match=message):
+        read_evidence(saved_screen)

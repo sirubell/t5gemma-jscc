@@ -154,7 +154,7 @@ The HellaSwag two-stage planner can opt into `--include-reset-control`, adding f
 
 The existing public objective helpers remain re-exported from `training.py` for historical scripts and top-level instrumentation; new shared-objective code should import from `training_objectives.py`. Functional training still invokes its imported aggregate/scaled-loss names so existing instrumentation can wrap those entry points. Private globals inside moved helpers belong to the objective module.
 
-COCO endpoint and trajectory diagnostics share input placement through `coco_diagnostic.diagnostic_inputs`: all source tensors move to the backbone device, and only image pixels adopt the backbone dtype. Diagnostic budgets, output schemas and distinct evidence-hash formats retain their existing definitions.
+Retained COCO endpoint and trajectory helpers share input placement through `coco_diagnostic.diagnostic_inputs`: all source tensors move to the backbone device, and only image pixels adopt the backbone dtype. Query/prefix/scoring/cache helpers, the saved-evidence reader, fixed RequestBudget semantics and distinct evidence-hash formats retain their existing definitions. The fixed32/step500 preparation/execution family and its dedicated CLIs are retired; historical receipts keep their recorded source identities.
 
 ## Opt-in codec and receiver FP32 arithmetic
 
