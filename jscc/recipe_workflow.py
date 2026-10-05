@@ -170,10 +170,11 @@ def bind_recipe_workflow(recipe_path, *, model_config_path, model_path, model_bi
     validate_recipe_prepared(manifest)
     # Initializer integrity is a setup boundary; never decode it per update.
     for ref in initializations.values():
-        if _acquired_initializer(ref):
-            _read_reference(ref, trusted_stat=_acquired_initializer(ref))
+        acquired = _acquired_initializer(ref)
+        path = _read_reference(ref, trusted_stat=acquired)
+        if acquired:
             continue
-        initial = torch.load(_read_reference(ref, trusted_stat=_acquired_initializer(ref)), map_location='cpu', weights_only=True)
+        initial = torch.load(path, map_location='cpu', weights_only=True)
         if state_dict_identity(initial) != ref['state_identity']:
             raise ValueError('recipe acquired initializer tensor identity differs')
     with Path(output).open('x') as handle:

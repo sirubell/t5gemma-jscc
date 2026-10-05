@@ -62,6 +62,34 @@ def test_model_transition_failures(tmp_path, mutation):
         verify_model_assets(config)
 
 
+@pytest.mark.parametrize('mutation', ['list', 'missing-key', 'extra-key', 'wrong-key'])
+@pytest.mark.parametrize('missing_asset', [False, True])
+def test_model_malformed_trust_inventory_and_missing_asset_priority(tmp_path, mutation, missing_asset):
+    config = model_binding(tmp_path)
+    binding = config['model']['asset_binding']
+    if mutation == 'list':
+        binding['trust'] = list(binding['trust'])
+    elif mutation == 'missing-key':
+        del binding['trust']['tokenizer.json']
+    elif mutation == 'extra-key':
+        binding['trust']['extra.json'] = binding['trust']['config.json']
+    else:
+        binding['trust']['wrong.json'] = binding['trust'].pop('tokenizer.json')
+    if missing_asset:
+        (tmp_path / 'tokenizer.json').unlink()
+    with pytest.raises(ValueError, match='layout changed' if missing_asset else 'trust inventory differs'):
+        verify_model_assets(config)
+
+
+def test_model_explicit_byte_audit_precedes_malformed_trust_inventory(tmp_path):
+    config = model_binding(tmp_path)
+    config['model']['asset_binding']['trust'] = []
+    target = tmp_path / 'model.safetensors'
+    target.write_bytes(b'x' * target.stat().st_size)
+    with pytest.raises(ValueError, match='model/tokenizer asset bytes differ'):
+        verify_model_assets(config, verify_bytes=True)
+
+
 def test_bound_real_updates_do_not_hash_and_preserve_noise(tmp_path, monkeypatch):
     left, data, _ = setup_recipe(tmp_path, locations=['enc_emb', 'dec_l3'])
     right, other, _ = setup_recipe(tmp_path, locations=['enc_emb', 'dec_l3'])

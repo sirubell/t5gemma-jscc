@@ -125,13 +125,15 @@ def verify_model_assets(config, *, require_complete=True, verify_bytes=False):
         raise ValueError('original13 model asset layout changed; reacquire assets')
     if verify_bytes and model_asset_inventory(root) != files:
         raise ValueError('original13 model/tokenizer asset bytes differ')
+    trust = binding.get('trust')
+    trust_inventory_differs = trust is not None and (not isinstance(trust, dict) or set(trust) != set(files))
     for name, record in files.items():
         try:
             asset = asset_file_path(root, name)
         except FileNotFoundError as error:
             raise ValueError('original13 model/tokenizer asset bytes differ (presence): ' + name) from error
-        trust = binding.get('trust')
-        if trust is not None and (not isinstance(trust, dict) or set(trust) != set(files)):
+        # Preserve path/presence rejection priority over malformed trust metadata.
+        if trust_inventory_differs:
             raise ValueError('original13 asset trust inventory differs')
         if asset.stat().st_size != record['bytes']:
             raise ValueError('original13 model/tokenizer asset bytes differ (size): ' + name)
