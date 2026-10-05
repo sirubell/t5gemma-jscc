@@ -1,11 +1,12 @@
 """CPU checks for bounded oracle/noise interventions on real tiny Transformers."""
-import json
-import time
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import torch
 
-from scripts.experiments.evening_eval import GlobalBudget, Intervention, compare, replay_epsilon, score
+from scripts.experiments.evening_eval import Intervention, compare, replay_epsilon, score
 from test_harness_payload import fixture_model
 
 
@@ -89,19 +90,20 @@ def test_selective_noise_pairing_and_restore_on_failure():
     assert model._transmit == original
 
 
-def test_global_request_budget_counts_failed_attempts_and_deadline(tmp_path):
-    auth = {"execution_authorized": True, "plan_id": "EVENING_SMALL_SUITE_V1",
-            "hard_stop_at_unix": time.time() + 60, "stop_new_gpu_at_unix": time.time() + 60}
-    (tmp_path / "AUTHORIZATION.json").write_text(json.dumps(auth))
-    one, two = GlobalBudget(tmp_path), GlobalBudget(tmp_path)
-    one.reserve(64, "one", "attempt")
-    two.reserve(64, "two", "attempt")
-    records = [json.loads(line) for line in one.path.read_text().splitlines()]
-    assert records[-1]["cumulative"] == 128
-    one.path.write_text(json.dumps({"count": 49152}) + "\n")
-    with pytest.raises(ValueError, match="budget exhausted"):
-        two.reserve(64, "two", "attempt")
-    auth["hard_stop_at_unix"] = 0
-    (tmp_path / "AUTHORIZATION.json").write_text(json.dumps(auth))
-    with pytest.raises(ValueError, match="deadline"):
-        two.reserve(64, "two", "attempt")
+@pytest.mark.parametrize("module", ["evening_eval", "evening_gradients", "evening_pilot"])
+@pytest.mark.parametrize("argv", [["--help"], ["--output", "unused-output", "--route", "dec_l20"]])
+def test_retired_module_execution_rejects_before_imports_or_output(module, argv, tmp_path):
+    # -S removes third-party packages: the retirement boundary must precede even
+    # dependency imports, as well as model/data loading and output creation.
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "unused-output"
+    argv = [str(output) if value == "unused-output" else value for value in argv]
+    result = subprocess.run(
+        [sys.executable, "-S", "-m", f"scripts.experiments.{module}", *argv],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1
+    assert f"{module} executor is retired" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not result.stdout
+    assert not output.exists()

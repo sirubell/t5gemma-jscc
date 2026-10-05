@@ -1,93 +1,26 @@
-"""Isolated EVENING_SMALL_SUITE_V1 E1/E2/E4 runner; no production defaults change.
+"""Retained EVENING_SMALL_SUITE_V1 scoring, replay and intervention helpers.
 
-Fixtures: root/fixtures/encoded-requests.jsonl, 256 documents x four candidates.
-All scored forwards, including failed attempts and controls, reserve a shared
-flock-protected 49,152-request ledger before execution. No optimizer is created.
+The historical executor is retired; imports preserve scientific interpretation.
 """
-import argparse
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "evening_eval executor is retired; retained helpers are available by import."
+    )
+
 from contextlib import contextmanager
-import copy
-import fcntl
-import json
-import os
-from pathlib import Path
-import sys
 import time
 from types import MethodType
 from typing import Any
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.frozen_prompt_gap import digest, tensor_batch
 
-from scripts.frozen_prompt_gap import digest, read, rows, sha, tensor_batch, write
-from scripts.evaluate_prompt_alignment import compact_row, verify_tokenization
-
-LIMIT = 49152
 TOLERANCE = {"atol": 5e-4, "rtol": 1e-5}
 
 
 def require(value, message):
     if not value:
         raise ValueError(message)
-
-
-def append(path, value):
-    with Path(path).open("a") as stream:
-        stream.write(json.dumps(value, allow_nan=False) + "\n")
-        stream.flush()
-
-
-class GlobalBudget:
-    """A single append-only budget shared by both GPU lanes (POSIX flock)."""
-    def __init__(self, root):
-        self.root = Path(root)
-        self.path = self.root / "request-ledger.jsonl"
-        self.local_used = 0
-
-    def authorized(self, new_job=False):
-        auth = read(self.root / "AUTHORIZATION.json")
-        require(auth.get("execution_authorized") is True and
-                auth.get("plan_id") == "EVENING_SMALL_SUITE_V1", "Missing suite authorization")
-        key = "stop_new_gpu_at_unix" if new_job else (
-            "gpu_work_stop_at_unix" if "gpu_work_stop_at_unix" in auth else "hard_stop_at_unix")
-        require(time.time() < auth[key], f"Suite deadline reached: {key}")
-
-    def reserve(self, count, cell, phase):
-        require(count == 64, "Only exact64 candidate batches are authorized")
-        self.authorized()
-        with self.path.open("a+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            stream.seek(0)
-            previous = [json.loads(line) for line in stream]
-            used = sum(row["count"] for row in previous)
-            require(used + count <= LIMIT, "Global candidate request budget exhausted")
-            stream.seek(0, 2)
-            stream.write(json.dumps({"cell": cell, "phase": phase, "count": count,
-                                     "cumulative": used + count, "pid": os.getpid(),
-                                     "reserved_unix": time.time()}) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            self.local_used += count
-
-
-def validate_fixture(root):
-    path = root / "fixtures/encoded-requests.jsonl"
-    encoded = rows(path)
-    require(len(encoded) == 1024, "Require exactly 1024 candidate requests")
-    ids = [encoded[i]["sample_id"] for i in range(0, 1024, 4)]
-    require(len(set(ids)) == 256, "Require 256 unique documents")
-    for i in range(0, 1024, 4):
-        group = encoded[i:i + 4]
-        require([r["candidate"] for r in group] == list(range(4)), "Candidate order changed")
-        require(len({r["sample_id"] for r in group}) == 1, "Mixed document candidates")
-        require(len({(r["gold"], r["source_id"], r["prompt_sha256"]) for r in group}) == 1,
-                "Document metadata disagrees")
-        for row in group:
-            require(row.get("shot", 5) == 5 and row["gold"] in range(4), "Five-shot/gold mismatch")
-            require(0 < len(row["context_token_ids"]) <= 2048 and
-                    0 < len(row["continuation_token_ids"]) <= 2048, "Token cap violated")
-            require(row["denominator"] > 0, "Invalid character denominator")
-    return encoded, sha(path)
 
 
 def replay_epsilon(z, mask, request_keys, seed, stream):
@@ -263,205 +196,3 @@ def score(adapter, model, batch, budget, cell, phase, policies=None, seed=None):
     finally:
         hook.remove()
         adapter._payload_lengths = None
-
-
-def run(args):
-    import torch
-    from lm_eval.models.huggingface import HFLM
-    from jscc.evaluation_policy import scoring_kwargs
-    from jscc.harness_payload import payload_harness_class
-    from jscc.models.split_model import build_model
-    from jscc.runtime import configure_training_determinism
-
-    root = args.root
-    budget = GlobalBudget(root)
-    budget.authorized(new_job=True)
-    encoded, fixture_hash = validate_fixture(root)
-    require(sha(args.checkpoint) == args.checkpoint_sha256, "Checkpoint bytes differ from inventory")
-    state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    config = state["config"]
-    require(state["step"] == args.step, "Wrong internal checkpoint step")
-    require(config["task"] == "hellaswag" and config["model"]["dtype"] == "bfloat16", "Wrong task/dtype")
-    require(config["split"] == {"stack": args.route[:3], "where": "after_layer", "index": int(args.route.split("_l")[1])}, "Wrong route")
-    require(config["channel"]["normalize_power"] is True, "Power must remain enabled")
-    require(args.mode != "decoder-final" or (args.step == 10000 and args.route.startswith("dec")), "Wrong E1/E2 route/step")
-    require(not args.vanilla or (args.route == "dec_l0" and args.mode == "decoder-final"), "Shared vanilla only on dec_l0")
-    require(args.mode != "curve" or args.route in {"enc_l9", "dec_l20"}, "Wrong E4 route")
-    family = config.get("experiment", {}).get("codec_family")
-    require(args.mode != "pilot" or (args.route == "enc_l9" and args.step == 500 and
-            family in {"affine_core", "shallow_nonlinear", "current_residual"}), "Wrong pilot family/step")
-    suffix = f"_{family}" if args.mode == "pilot" else ""
-    output = root / "results" / f"{args.route}_{args.step:06d}{suffix}"
-    output.mkdir(parents=True, exist_ok=False)
-    started = time.monotonic()
-    write(output / "tolerances.json", {**TOLERANCE, "frozen_before_scores": True})
-    write(output / "config.json", config)
-    receipt = {"checkpoint": str(args.checkpoint), "checkpoint_sha256": args.checkpoint_sha256,
-               "checkpoint_step": args.step, "fixture_sha256": fixture_hash, "measurement": "MEASURED"}
-    completed = []
-    try:
-        configure_training_determinism({"deterministic_algorithms": True})
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        if args.mode == "pilot":
-            from scripts.experiments.evening_pilot import experimental_build_model
-            tokenizer, model = experimental_build_model(copy.deepcopy(config))
-        else:
-            tokenizer, model = build_model(copy.deepcopy(config))
-        model.load_communication_state(state)
-        state.clear()
-        model.eval().requires_grad_(False)
-        require(next(model.base.parameters()).device.type == "cuda", "GPU execution requires assigned CUDA device")
-        require(model.codec.film is None and (model.memory_codec is None or model.memory_codec.film is None), "FiLM must be off")
-        require(all(p.dtype == torch.float32 for p in model.codec.parameters()), "Codec parameters must remain FP32")
-        require(getattr(model.base.config.decoder, "_attn_implementation", None) == "sdpa", "Expected formal SDPA backend")
-        verify_tokenization(tokenizer, encoded)
-        cls = payload_harness_class(HFLM)
-        adapter = cls(communication_model=model, pretrained=model.base, tokenizer=tokenizer,
-                      backend="seq2seq", batch_size=64, max_length=2048,
-                      **scoring_kwargs({"scoring_policy": "fp32-v1"}, model))
-        native_dir = root / "fixtures" / "native_batches"
-        native_dir.mkdir(exist_ok=True)
-
-        def batch_score(batch, cell, phase, policies=None, seed=None):
-            values, evidence, native = score(adapter, model, batch, budget, cell, phase, policies, seed)
-            append(output / "batches.jsonl", evidence)
-            # Unique deterministic path; equal fixtures must agree across routes.
-            target = native_dir / f"{digest(native['request_keys'])}.json"
-            with target.open("a+") as stream:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-                stream.seek(0)
-                old = stream.read()
-                require(not old or json.loads(old) == native, "Native preparation/packing changed")
-                if not old:
-                    stream.write(json.dumps(native, allow_nan=False) + "\n")
-            return values, evidence
-
-        def panel(cell, experiment, policies=None, seed=None, phase="core"):
-            scores, per_request, events = [], [], []
-            for start in range(0, 1024, 64):
-                values, evidence = batch_score(encoded[start:start + 64], cell, phase, policies, seed)
-                scores.extend(values)
-                events.append(evidence)
-                for i in range(64):
-                    payload = {e["stream"]: {"allocated": e["allocated_per_request"][i],
-                                             "valid": e["valid_per_request"][i], "policy": e["policy"],
-                                             "noise": e.get("noise", [None] * 64)[i]}
-                               for e in evidence["events"]}
-                    for stream in ("hidden", "memory"):
-                        if stream not in payload:
-                            codec = model.codec if stream == "hidden" else model.memory_codec
-                            length_key = "continuation_token_ids" if stream == "hidden" and model.split["stack"] == "dec" else "context_token_ids"
-                            count = (len(encoded[start + i][length_key]) * codec.config["bottleneck_dim"]
-                                     if codec is not None and evidence["allocated"][stream] else 0)
-                            payload[stream] = {"allocated": evidence["allocated"][stream] // 64,
-                                               "valid": count, "policy": "production" if count else "bypassed_or_absent",
-                                               "noise": None}
-                    per_request.append(payload)
-            result = []
-            for start in range(0, 1024, 4):
-                item = compact_row(encoded[start:start + 4], scores[start:start + 4], args.route, 5, receipt, fixture_hash)
-                if cell == "vanilla":
-                    item.update(route="vanilla", checkpoint=None, checkpoint_sha256=None,
-                                checkpoint_step=None, base_model=config["model"])
-                item.update(experiment=experiment, case=cell, noise_seed=seed,
-                            main_noise_enabled=bool(policies and policies["hidden"] == "A"),
-                            memory_noise_enabled=bool(policies and policies["memory"] == "A"),
-                            main_snr_db=-6.0 if policies and policies["hidden"] == "A" else None,
-                            memory_snr_db=-6.0 if policies and policies["memory"] == "A" else None,
-                            override_semantics="O bypasses codec/power/channel at receiver boundary; C retains codec/power with noise disabled; A retains codec/power with AWGN",
-                            stream_policy=policies, privileged_oracle=bool(policies and "O" in policies.values()),
-                            payload_coordinates=per_request[start:start + 4])
-                result.append(item)
-                append(output / f"{cell}.jsonl", item)
-            completed.append(cell)
-            write(output / "progress.json", {"completed": completed, "requests": budget.local_used})
-            print(f"{args.route} step{args.step} {cell} COMPLETE requests={budget.local_used}", flush=True)
-            return scores, events, result
-
-        reference, _ = batch_score(encoded[:64], "production", "reference_self_replay")
-        replay, _ = batch_score(encoded[:64], "production", "reference_self_replay")
-        control = compare(reference, replay)
-        write(output / "reference-self-replay.json", control)
-        require(control["passed"], "Production reference self-replay failed")
-        if args.mode in {"curve", "pilot"}:
-            values, _, _ = panel("no_noise", "E5" if args.mode == "pilot" else "E4",
-                                 {"hidden": "C", "memory": "C"})
-            control = compare(reference, values[:64])
-            write(output / "CC-control.json", control)
-            require(control["passed"], "Wrapper no-noise differs from production")
-            if args.mode == "pilot":
-                panel("awgn_-6_20260921", "E5", {"hidden": "A", "memory": "C"}, 20260921)
-        else:
-            if args.vanilla:
-                vanilla, _, vanilla_rows = panel("vanilla", "E1")
-                write(root / "results/vanilla.json", {"fixture_sha256": fixture_hash,
-                      "model_config": config["model"], "scores": vanilla, "rows": vanilla_rows})
-            production, _, _ = panel("production", "CONTROL", phase="production_control")
-            cc, cc_events, _ = panel("CC", "E1", {"hidden": "C", "memory": "C"})
-            cc_control = compare(production, cc)
-            write(output / "CC-control.json", cc_control)
-            require(cc_control["passed"], "Wrapper CC differs from production")
-            for case in ("OC", "CO", "OO"):
-                values, events, _ = panel(case, "E1", {"hidden": case[0], "memory": case[1]})
-                # Main input must be untouched by receiver-side memory changes.
-                for base_batch, changed_batch in zip(cc_events, events, strict=True):
-                    base_hash = next(e["input_sha256"] for e in base_batch["events"] if e["stream"] == "hidden")
-                    changed_hash = next(e["input_sha256"] for e in changed_batch["events"] if e["stream"] == "hidden")
-                    require(base_hash == changed_hash, "Receiver intervention changed transmitter main input")
-                if case == "OO":
-                    write(output / "OO-scores.json", {"fixture_sha256": fixture_hash, "model_config": config["model"], "scores": values})
-                    shared = root / "results/vanilla.json"
-                    if shared.exists():
-                        baseline = read(shared)
-                        require(baseline["fixture_sha256"] == fixture_hash and baseline["model_config"] == config["model"], "Vanilla identity mismatch")
-                        oo_control = compare(baseline["scores"], values)
-                        write(output / "OO-control.json", oo_control)
-                        # Keep E2 independently executable; failed oracle is explicitly invalid.
-                    else:
-                        write(output / "OO-control.json", {"passed": None, "reason": "Shared vanilla pending; E1 mechanism interpretation blocked"})
-            for seed in (20260921, 20260922):
-                proofs = {}
-                for case in ("AN", "NA", "AA"):
-                    policies = {"hidden": "A" if case[0] == "A" else "C",
-                                "memory": "A" if case[1] == "A" else "C"}
-                    values, events, _ = panel(f"{case}_{seed}", "E2", policies, seed)
-                    proofs[case] = {e["stream"]: [n["valid_epsilon_sha256"] for b in events for e2 in b["events"]
-                                                if e2["stream"] == e["stream"] for n in e2.get("noise", [])]
-                                    for e in events[0]["events"] if e["noise_enabled"]}
-                    if case == "AA":
-                        replay, _ = batch_score(encoded[:64], f"{case}_{seed}", "noise_replay", policies, seed)
-                        check = compare(values[:64], replay)
-                        write(output / f"noise-replay-{seed}.json", check)
-                        require(check["passed"], "Noise self-replay failed")
-                require(proofs["AN"]["hidden"] == proofs["AA"]["hidden"] and
-                        proofs["NA"]["memory"] == proofs["AA"]["memory"], "Noise stream pairing failed")
-                write(output / f"noise-pairing-{seed}.json", {"passed": True, "valid_epsilon_hashes": proofs})
-        require(sha(args.checkpoint) == args.checkpoint_sha256, "Checkpoint mutated during evaluation")
-        require(sha(root / "fixtures/encoded-requests.jsonl") == fixture_hash, "Fixture mutated during evaluation")
-        write(output / "completion.json", {**receipt, "status": "COMPLETED", "completed": completed,
-              "candidate_requests": budget.local_used, "optimizer_updates": 0,
-              "oracle_control": read(output / "OO-control.json") if args.mode == "decoder-final" else None,
-              "elapsed_seconds_including_model_load": time.monotonic() - started,
-              "runner_sha256": sha(__file__)})
-    except BaseException as exc:
-        write(output / "failure.json", {"type": type(exc).__name__, "message": str(exc),
-              "candidate_requests": budget.local_used, "completed": completed,
-              "elapsed_seconds": time.monotonic() - started})
-        raise
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--route", choices=("dec_l0", "dec_l20", "enc_l9"), required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--checkpoint-sha256", required=True)
-    parser.add_argument("--step", type=int, choices=(500, 1000, 5000, 10000), required=True)
-    parser.add_argument("--mode", choices=("decoder-final", "curve", "pilot"), required=True)
-    parser.add_argument("--vanilla", action="store_true")
-    run(parser.parse_args(argv))
-
-
-if __name__ == "__main__":
-    main()

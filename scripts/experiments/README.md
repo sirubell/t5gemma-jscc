@@ -1,19 +1,21 @@
 # Historical experiment modules
 
-These nine modules reproduce the evening diagnostics and main-weight screen. They are retained with their tests as source for interpreting historical evidence. Importing this package does not schedule or start an experiment. The drivers can start subprocesses when explicitly invoked; do not treat an old allocation or approval record as permission to rerun one.
+The retained evening helpers and main-weight screen modules support interpretation of historical evidence. Importing this package does not schedule or start an experiment. The main-weight screen execution graph remains available and requires separate execution authorization; old allocations and approvals do not authorize another run.
 
-From the repository root, invoke a moved module as `uv run --locked python -m scripts.experiments.<module> ...`. The former `scripts.<module>` import and `python -m` paths have changed as follows:
+The evening E5 and suite drivers are retired from current source. The retained `evening_eval`, `evening_gradients` and `evening_pilot` modules preserve scoring/replay/intervention, feature/VJP/selection and codec-family initialization/configuration helpers. Their historical executors are unsupported: module invocation exits with an explicit retirement error before imports, model/data loading or output creation. Import the helpers through the retained module paths below.
 
-| Former module | Current module |
+| Former module | Retained module or disposition |
 |---|---|
-| `scripts.evening_e5_driver` | `scripts.experiments.evening_e5_driver` |
-| `scripts.evening_eval` | `scripts.experiments.evening_eval` |
-| `scripts.evening_gradients` | `scripts.experiments.evening_gradients` |
-| `scripts.evening_pilot` | `scripts.experiments.evening_pilot` |
-| `scripts.evening_suite_driver` | `scripts.experiments.evening_suite_driver` |
+| `scripts.evening_e5_driver` | Retired historical driver; use its recorded source package to interpret old commands. |
+| `scripts.evening_eval` | `scripts.experiments.evening_eval` (imported helpers only) |
+| `scripts.evening_gradients` | `scripts.experiments.evening_gradients` (imported helpers only) |
+| `scripts.evening_pilot` | `scripts.experiments.evening_pilot` (imported helpers only) |
+| `scripts.evening_suite_driver` | Retired historical driver; use its recorded source package to interpret old commands. |
 | `scripts.main_weight_screen_driver` | `scripts.experiments.main_weight_screen_driver` |
 | `scripts.main_weight_screen_eval` | `scripts.experiments.main_weight_screen_eval` |
 | `scripts.main_weight_screen_gradients` | `scripts.experiments.main_weight_screen_gradients` |
 | `scripts.main_weight_screen_train` | `scripts.experiments.main_weight_screen_train` |
 
-These modules use repository-root-relative paths after relocation. The portable regression inputs for the main-weight selection and recipe are in [`tests/fixtures/main_weight_screen/`](../../tests/fixtures/main_weight_screen/README.md). Original experiment inputs and receipts remain with the MTK archive outside this Git project; the test fixtures are intentionally smaller or path-sanitized copies.
+From the repository root, an authorized main-weight invocation uses `uv run --locked python -m scripts.experiments.<main_weight_module> ...`. Its evaluator accepts only `--route dec_l20` and `--step 500` or `--step 1000`, matching the retained driver and runtime guard. Scoring, replay, payload and budget policies are unchanged.
+
+Retained main-weight modules use repository-root-relative paths. The portable regression inputs for selection and recipe helpers are in [`tests/fixtures/main_weight_screen/`](../../tests/fixtures/main_weight_screen/README.md). Original experiment inputs, commands, source hashes and receipts remain with the MTK archive outside this Git project; test fixtures are intentionally smaller or path-sanitized copies. Current source does not promise historical reproduction. Future execution needs fresh source bindings; saved hashes and held scientific sources retain their original identities.

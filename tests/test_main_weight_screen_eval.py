@@ -42,3 +42,34 @@ def test_identical_scores_cannot_hide_payload_mismatch():
     changed = {**original, "valid": {"hidden": 32, "memory": 63}}
     assert payload_check(original, original)["passed"]
     assert not payload_check(original, changed)["passed"]
+
+
+def evaluation_argv(root, route="dec_l20", step=500):
+    return ["--root", str(root), "--route", route, "--step", str(step),
+            "--checkpoint", str(root / "weight.pt"), "--checkpoint-sha256", "saved-hash",
+            "--arm", "W005"]
+
+
+@pytest.mark.parametrize("step", [500, 1000])
+def test_parser_dispatches_supported_route_and_steps_only(step, tmp_path, monkeypatch):
+    from scripts.experiments import main_weight_screen_eval as runner
+    calls = []
+    monkeypatch.setattr(runner, "run", calls.append)
+    runner.main(evaluation_argv(tmp_path, step=step))
+    assert len(calls) == 1
+    args = calls[0]
+    assert (args.root, args.route, args.step, args.arm) == (tmp_path, "dec_l20", step, "W005")
+    assert args.checkpoint == tmp_path / "weight.pt"
+    assert args.checkpoint_sha256 == "saved-hash" and not args.vanilla
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("route,step", [("dec_l0", 500), ("enc_l9", 1000),
+                                       ("dec_l20", 5000), ("dec_l20", 10000)])
+def test_parser_rejects_unsupported_route_or_step_before_runtime(route, step, tmp_path, monkeypatch):
+    from scripts.experiments import main_weight_screen_eval as runner
+    monkeypatch.setattr(runner, "run", lambda args: pytest.fail("must reject before runtime"))
+    with pytest.raises(SystemExit) as failure:
+        runner.main(evaluation_argv(tmp_path, route, step))
+    assert failure.value.code == 2
+    assert not list(tmp_path.iterdir())

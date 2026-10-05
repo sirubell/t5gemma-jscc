@@ -1,27 +1,26 @@
-"""E3: bounded teacher-forced loss/feature/component-VJP diagnostics; no optimizer.
+"""Retained E3 loss, feature, component-VJP and selection helpers; no optimizer.
 
-Run one route per invocation. The caller owns the global 256-VJP/GPU ledger.
-All 128 selection rows are measured; the seeded first 64 also receive VJPs.
+The historical executor is retired; imports preserve scientific interpretation.
 """
 from __future__ import annotations
 
-import argparse
+if __name__ == "__main__":
+    raise SystemExit(
+        "evening_gradients executor is retired; retained helpers are available by import."
+    )
+
 from contextlib import nullcontext
 import hashlib
-import json
 from pathlib import Path
 import random
 import time
 
 import torch
 
-from jscc.checkpoint_policy import validate_checkpoint_step
 from jscc.data.hellaswag import Collator
-from jscc.data.hellaswag_prompts import PromptBuilder, digest
+from jscc.data.hellaswag_prompts import PromptBuilder
 from jscc.models.channel import AWGNChannel
-from jscc.models.split_model import build_model
 from jscc.presentation import derived_seed, tensor_digest
-from jscc.runtime import configure_training_determinism, source_state
 from jscc.training import batch_losses, effective_batch_denominators
 
 SEED = 20260921
@@ -293,91 +292,3 @@ def run_diagnostic(model, rows, training, pad_id, budget, write, identity):
                                  'mean': v/float(selection_denominators[k])} for k, v in totals.items()}})
 
     forward_hook.remove()
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run', type=Path, required=True)
-    parser.add_argument('--checkpoint', default='step_010000.pt')
-    parser.add_argument('--route', choices=['enc_l9', 'dec_l0', 'dec_l20'], required=True)
-    parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--fixture', type=Path)
-    parser.add_argument('--seconds', type=int, default=2400)
-    parser.add_argument('--vjp-cap', type=int, default=48)
-    parser.add_argument('--deadline-epoch', type=float)
-    args = parser.parse_args()
-    if not 1 <= args.seconds <= 2400:
-        parser.error('seconds must be in 1..2400')
-    budget = Budget(args.vjp_cap, args.seconds)
-    if args.deadline_epoch is not None:
-        budget.deadline = min(budget.deadline, time.monotonic()+args.deadline_epoch-time.time())
-    started = time.monotonic()
-    args.output.mkdir(parents=True, exist_ok=False)
-    def write(name, value):
-        with (args.output/name).open('a') as stream:
-            stream.write(json.dumps(value, allow_nan=False)+'\n')
-    checkpoint = args.run/args.checkpoint
-    before = file_hash(checkpoint)
-    receipt = {'experiment': 'E3', 'route': args.route, 'checkpoint_sha256': before,
-               'checkpoint': str(checkpoint), 'checkpoint_step': 10000, 'status': 'MEASURED',
-               'source': source_state(), 'source_hashes': {str(p): file_hash(p) for p in
-                   [Path(__file__).resolve(), *sorted(Path('jscc').rglob('*.py'))]}}
-    try:
-        state = torch.load(checkpoint, map_location='cpu', weights_only=True)
-        validate_checkpoint_step(state, 10000)
-        config = state['config']
-        expected = {'enc_l9': ('enc', 9), 'dec_l0': ('dec', 0), 'dec_l20': ('dec', 20)}[args.route]
-        if (config['split']['stack'], config['split']['index']) != expected or config['split']['where'] != 'after_layer':
-            raise ValueError('route does not match saved checkpoint split')
-        if config['task'] != 'hellaswag' or config['channel']['type'] != 'awgn':
-            raise ValueError('E3 requires HellaSwag / AWGN checkpoint')
-        if config.get('protocol') != 'corrected-baseline-v2-native-decoder-inputs':
-            raise ValueError('native-v2 checkpoint required')
-        if config['codec'].get('snr_film', False) or config['codec'].get('memory', {}).get('snr_film', False):
-            raise ValueError('E3 requires FiLM off')
-        configure_training_determinism(config['training'])
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        tokenizer, model = build_model(config)
-        model.load_communication_state(state)
-        original_rows = selection_fixture(config, state['data_ids'], tokenizer)
-        if args.fixture:
-            payload = json.loads(args.fixture.read_text())
-            supplied = payload['rows'] if isinstance(payload, dict) else payload
-            expected_rows = {r['row_id']: r for r in original_rows}
-            for row in supplied:
-                for key in ['input_ids', 'attention_mask', 'label_ids']:
-                    if row[key] != expected_rows[row['row_id']][key]:
-                        raise ValueError(f'fixture token mismatch at {row["row_id"]}/{key}')
-            original_rows = supplied
-        rows = validate_fixture(original_rows, state['data_ids'])
-        (args.output/'fixture.json').write_text(json.dumps({'seed': SEED, 'rows': rows}, allow_nan=False))
-        (args.output/'saved-config.json').write_text(json.dumps(config, allow_nan=False))
-        (args.output/'saved-data-ids.json').write_text(json.dumps(state['data_ids'], allow_nan=False))
-        receipt['fixture_sha256'] = digest(rows)
-        receipt['gradient_row_ids'] = [r['row_id'] for r in rows[:64]]
-        expected_calls = 32 if args.route == 'enc_l9' else 48
-        if budget.cap < expected_calls:
-            raise ValueError('route VJP allowance insufficient before first forward')
-        identity = {key: receipt[key] for key in ['experiment', 'route', 'checkpoint_sha256', 'checkpoint_step', 'status', 'fixture_sha256']}
-        identity['source_hashes_digest'] = digest(receipt['source_hashes'])
-        run_diagnostic(model, rows, config['training'], tokenizer.pad_token_id, budget, write, identity)
-        if budget.calls != expected_calls:
-            raise RuntimeError('unexpected completed VJP count')
-        receipt['completion'] = 'COMPLETE'
-    except Exception as exc:
-        receipt.update(completion='FAILED', error=f'{type(exc).__name__}: {exc}')
-        raise
-    finally:
-        after = file_hash(checkpoint)
-        receipt.update(checkpoint_sha256_after=after, checkpoint_bytes_unchanged=before == after,
-                       optimizer_updates=0, component_vjp_calls=budget.calls,
-                       teacher_forwards=budget.teacher_forwards, student_forwards=budget.student_forwards,
-                       teacher_forced_selection_presentations=budget.presentations,
-                       candidate_requests=0, wall_seconds=time.monotonic()-started)
-        (args.output/'receipt.json').write_text(json.dumps(receipt, indent=2, allow_nan=False))
-        if before != after:
-            raise RuntimeError('checkpoint bytes changed during E3')
-
-
-if __name__ == '__main__':
-    main()

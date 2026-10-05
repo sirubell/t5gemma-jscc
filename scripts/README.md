@@ -11,7 +11,7 @@ Run commands from the repository root with the locked uv environment. The primar
 | `compare_evidence_json.py`, `recompute_coco.py` | Reusable offline evidence comparison and COCO CIDEr recomputation utilities. The latter consumes exported per-image JSONL evidence. |
 | `index_*.py`, `extract_compact_samples.py`, `verify_manifest.py`, `recompute_*.py` | Evidence indexing, extraction, verification and recomputation for specific saved artifact formats. Check each script's inputs before reuse. |
 | Other retained diagnostic, policy and Slurm scripts | Inspect or explicitly execute their documented bounded work. Their old source bindings and approvals remain historical evidence, not current execution authorization. |
-| [`experiments/`](experiments/README.md) | The relocated evening and main-weight screen modules, with exact old-to-new module names. |
+| [`experiments/`](experiments/README.md) | Retained evening scientific helpers and main-weight screen modules, with historical module names and explicit evening executor retirement. |
 
 For a reusable offline recomputation, for example:
 

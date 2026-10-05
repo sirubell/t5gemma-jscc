@@ -240,10 +240,10 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--route", choices=("dec_l0", "dec_l20", "enc_l9"), required=True)
+    parser.add_argument("--route", choices=("dec_l20",), required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint-sha256", required=True)
-    parser.add_argument("--step", type=int, choices=(500, 1000, 5000, 10000), required=True)
+    parser.add_argument("--step", type=int, choices=(500, 1000), required=True)
     parser.add_argument("--arm", choices=("W005", "W05", "W5"), required=True)
     parser.add_argument("--vanilla", action="store_true")
     run(parser.parse_args(argv))
