@@ -337,7 +337,7 @@ def load_recipe_cached_data(description, *, cache_manifest, checksum):
                 or receipt['karpathy']['revision'] != config['data']['karpathy_revision']):
             raise ValueError('COCO acquired dataset/processor/Karpathy pins differ')
         arrow, assets = _validate_coco_cache(receipt)
-        processor = AutoProcessor.from_pretrained(assets,local_files_only=True)
+        processor = AutoProcessor.from_pretrained(assets,local_files_only=True,trust_remote_code=False)
         _validate_coco_processor(processor,assets)
         return CocoCachedData(description,raw=Dataset.from_file(str(arrow)),processor=processor,
             model_config=AutoConfig.from_pretrained(assets,local_files_only=True),receipt=receipt)
@@ -686,6 +686,28 @@ def _read_coco_cache(reference):
     return receipt
 
 
+def _coco_loaded_tokenizer_identity(tokenizer):
+    """Bind the official loader's backend and live wrapper configuration."""
+    from tokenizers import Tokenizer
+    from transformers import PreTrainedTokenizerBase
+    # Encoding leaves call-specific padding/truncation on the backend. Reset
+    # copies through its API; preserve runtime state and compare every semantic
+    # backend field, with the live wrapper policies bound separately below.
+    backend = Tokenizer.from_str(tokenizer.backend_tokenizer.to_str())
+    backend.no_padding()
+    backend.no_truncation()
+    config = {key: getattr(tokenizer, key, value) for key, value in tokenizer.init_kwargs.items()}
+    config.update({key: getattr(tokenizer, key, None) for key in (
+        'model_max_length', 'padding_side', 'truncation_side', 'clean_up_tokenization_spaces',
+        'split_special_tokens', 'chat_template', 'special_tokens_map', 'extra_special_tokens',
+        'all_special_ids', 'added_tokens_decoder', 'pad_token_type_id', 'model_input_names')})
+    return {
+        'backend': json.loads(backend.to_str()),
+        'config': PreTrainedTokenizerBase.convert_added_tokens(config, save=True),
+        'init_kwargs': PreTrainedTokenizerBase.convert_added_tokens(tokenizer.init_kwargs, save=True),
+    }
+
+
 def _validate_coco_processor(processor, assets):
     """The runtime processor must come from the same acquired local snapshot."""
     from .asset_paths import normalize_asset_path
@@ -701,9 +723,26 @@ def _validate_coco_processor(processor, assets):
     actual = json.loads(json.dumps(actual if nested else {key: actual[key] for key in expected}, allow_nan=False))
     if actual != expected:
         raise ValueError('COCO runtime image preprocessing differs from acquired config')
-    backend = getattr(tokenizer,'backend_tokenizer',None)
-    if backend is None or json.loads(backend.to_str()) != json.loads(asset_file_path(assets,'tokenizer.json').read_text()):
-        raise ValueError('COCO runtime tokenizer differs from acquired tokenizer bytes')
+    # Tokenizer configuration can legitimately change raw added-token flags on
+    # load. Compare complete loaded semantics from the byte/stat-bound snapshot,
+    # rather than accepting selected differences in upstream tokenizer.json.
+    from transformers import AutoProcessor
+    expected_processor = AutoProcessor.from_pretrained(
+        assets, local_files_only=True, trust_remote_code=False)
+    expected_tokenizer = expected_processor.tokenizer
+    if (type(tokenizer) is not type(expected_tokenizer)
+            or _coco_loaded_tokenizer_identity(tokenizer) != _coco_loaded_tokenizer_identity(expected_tokenizer)):
+        raise ValueError('COCO runtime tokenizer differs from acquired local loader semantics')
+    # Processor serialization omits chat templates and derived prompt fields.
+    # Bind its non-component state too, without model-specific field names.
+    def state(value):
+        return json.loads(json.dumps({
+            'config': value.to_dict(),
+            'attributes': {key: item for key, item in vars(value).items()
+                           if key not in value.get_attributes()},
+        }, allow_nan=False))
+    if type(processor) is not type(expected_processor) or state(processor) != state(expected_processor):
+        raise ValueError('COCO runtime processor configuration differs from acquired local loader semantics')
 
 
 def load_coco_panel_data(request, processor):
