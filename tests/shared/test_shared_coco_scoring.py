@@ -309,3 +309,120 @@ def test_coco_scorer_rejects_hellaswag_checkpoint_task_before_output(scoring_inp
         panels._score_panel(model, processor, state=state, request=request,
                             site_id='enc_emb', condition='no_noise', output=tmp_path / 'forbidden', data=data)
     assert not (tmp_path / 'forbidden').exists()
+
+
+@pytest.fixture
+def model_free_coco_template():
+    """Acquired scoring metadata only; no model, processor or scoring execution."""
+    template = {'task': 'coco', 'input_ids': [9, 4], 'source_family_ids': [9, 4],
+                'cache': {'path': '/fixture/cache.json', 'sha256': 'a' * 64},
+                'data_settings': {'caption_policy': 'indexed-reference-v1', 'caption_seed': 7, 'num_demos': 0},
+                'reference_corpus': {'image_ids': [9, 4],
+                    'references': [['a cat', 'the cat rests'], ['a dog']],
+                    'demo_ids': [], 'demo_captions': [],
+                    'cache_identity': 'b' * 64, 'processor_identity': 'c' * 64},
+                'scorer': 'coco-ptb-cider-v1', 'precision': 'fp32', 'backend': 'eager',
+                'prompt_policy': 'native-demo-caption-v1', 'layout': 'native',
+                'noise': {'seed': 13, 'namespace': 'tiny-paired-coco'},
+                'settings': {'numerical_policy': 'native', 'vanilla': False}}
+    evaluation = {'items': 2, 'batch_size': 2, 'max_new_tokens': 3,
+                  'scoring_policy': 'coco-cider-v1'}
+    return template, evaluation
+
+
+@pytest.mark.parametrize('demo_ids,demo_captions', [([], []), ([31, 32], ['a cat', 'a dog'])],
+                         ids=['zero-demo', 'nonempty-demo'])
+def test_model_free_coco_template_preserves_acquired_metadata(model_free_coco_template, demo_ids, demo_captions):
+    template, evaluation = model_free_coco_template
+    template['reference_corpus'].update(demo_ids=demo_ids, demo_captions=demo_captions)
+    template['data_settings']['num_demos'] = len(demo_ids)
+    before, evaluation_before = deepcopy(template), deepcopy(evaluation)
+    policy = {'items': 1}
+    result = scoring_template(template, policy, evaluation)
+    assert result['input_ids'] == result['source_family_ids'] == result['reference_corpus']['image_ids'] == [9]
+    assert result['reference_corpus']['references'] == [['a cat', 'the cat rests']]
+    assert result['reference_corpus']['demo_ids'] == demo_ids
+    assert result['reference_corpus']['demo_captions'] == demo_captions
+    for field in ('cache_identity', 'processor_identity'):
+        assert result['reference_corpus'][field] == before['reference_corpus'][field]
+    for field in ('cache', 'data_settings', 'noise', 'scorer', 'prompt_policy', 'layout', 'precision', 'backend'):
+        assert result[field] == before[field]
+    assert result['expected_items'] == result['settings']['num_samples'] == 1
+    assert result['settings']['batch_size'] == 2 and result['settings']['max_new_tokens'] == 3
+    assert result['settings']['scoring_policy'] == 'coco-cider-v1'
+    assert template == before and evaluation == evaluation_before and policy == {'items': 1}
+    result['reference_corpus']['demo_ids'].append(99)
+    result['reference_corpus']['demo_captions'].append('result-only caption')
+    assert template == before
+
+
+@pytest.mark.parametrize('path,value', [
+    (('reference_corpus', 'demo_ids'), [31]),
+    (('reference_corpus', 'demo_ids'), []),
+    (('reference_corpus', 'demo_ids'), (31,)),
+    (('reference_corpus', 'demo_captions'), ('a cat',)),
+    (('reference_corpus', 'demo_ids'), [True]),
+    (('reference_corpus', 'demo_ids'), ['31']),
+    (('reference_corpus', 'demo_captions'), [7]),
+    (('reference_corpus', 'demo_captions'), ['']),
+    (('reference_corpus', 'demo_captions'), ['  ']),
+    (('input_ids',), []),
+    (('input_ids',), [9, 9]),
+    (('input_ids',), [True, 4]),
+    (('source_family_ids',), [4, 9]),
+    (('reference_corpus', 'image_ids'), [4, 9]),
+    (('reference_corpus', 'references'), [['a cat']]),
+    (('reference_corpus', 'references'), [[], ['a dog']]),
+    (('reference_corpus', 'references'), [['  '], ['a dog']]),
+    (('reference_corpus', 'references'), [[7], ['a dog']]),
+    (('reference_corpus', 'cache_identity'), ''),
+    (('reference_corpus', 'processor_identity'), ''),
+    (('scorer',), 'hellaswag'),
+    (('settings', 'numerical_policy'), 'changed'),
+    (('settings', 'vanilla'), True),
+    (('noise', 'seed'), True),
+    (('noise', 'namespace'), ''),
+    (('settings', 'num_fewshot'), 0),
+    (('settings', 'candidate_batch'), 1),
+    (('settings', 'fewshot'), 0),
+], ids=['demo-length', 'demo-reverse-length', 'demo-id-list', 'demo-caption-list', 'demo-bool-id', 'demo-string-id',
+        'demo-caption-type', 'demo-empty-caption', 'demo-blank-caption', 'empty-query',
+        'duplicate-query', 'bool-query', 'family-mismatch', 'report-mismatch',
+        'reference-cardinality', 'empty-references', 'blank-reference', 'nonstring-reference',
+        'empty-cache-identity', 'empty-processor-identity', 'wrong-scorer', 'nonnative',
+        'vanilla', 'bool-noise-seed', 'empty-noise-namespace', 'num-fewshot', 'candidate-batch', 'fewshot'])
+def test_model_free_coco_template_rejects_invalid_bound_metadata(model_free_coco_template, path, value):
+    template, evaluation = model_free_coco_template
+    # Start demo faults from a valid nonempty pair so each fault isolates its guard.
+    if path[-1] in ('demo_ids', 'demo_captions'):
+        template['reference_corpus'].update(demo_ids=[31], demo_captions=['a cat'])
+        template['data_settings']['num_demos'] = 1
+        if path[-1] == 'demo_ids' and value == [31]:
+            template['reference_corpus']['demo_captions'] = []
+    target = template
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    before = deepcopy(template)
+    with pytest.raises(ValueError):
+        scoring_template(template, {'items': 1}, evaluation)
+    assert template == before
+
+
+@pytest.mark.parametrize('field,value', [
+    ('items', 0), ('items', -1), ('items', True), ('items', 1.0), ('items', 3),
+    ('batch_size', 0), ('batch_size', -1), ('batch_size', True), ('batch_size', 1.0),
+    ('max_new_tokens', 0), ('max_new_tokens', -1), ('max_new_tokens', True), ('max_new_tokens', 1.0),
+    ('scoring_policy', 'hellaswag'),
+])
+def test_model_free_coco_template_rejects_invalid_resolved_policy(model_free_coco_template, field, value):
+    template, evaluation = model_free_coco_template
+    policy = {'items': 1}
+    if field == 'items':
+        policy[field] = value
+    else:
+        evaluation[field] = value
+    before = deepcopy(template)
+    with pytest.raises(ValueError):
+        scoring_template(template, policy, evaluation)
+    assert template == before

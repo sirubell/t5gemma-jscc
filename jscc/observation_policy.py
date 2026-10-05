@@ -66,7 +66,12 @@ def scoring_template(template, policy, evaluation):
                 or any(not isinstance(refs, list) or not refs
                        or any(not isinstance(text, str) or not text.strip() for text in refs)
                        for refs in corpus['references'])
-                or not corpus['demo_ids'] or len(corpus['demo_ids']) != len(corpus['demo_captions'])
+                or not isinstance(corpus['demo_ids'], list)
+                or not isinstance(corpus['demo_captions'], list)
+                or len(corpus['demo_ids']) != len(corpus['demo_captions'])
+                or any(type(image_id) is not int for image_id in corpus['demo_ids'])
+                or any(not isinstance(caption, str) or not caption.strip()
+                       for caption in corpus['demo_captions'])
                 or not corpus['cache_identity'] or not corpus['processor_identity']
                 or value['scorer'] != 'coco-ptb-cider-v1'
                 or evaluation['scoring_policy'] != 'coco-cider-v1'):
