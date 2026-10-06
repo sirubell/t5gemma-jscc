@@ -25,9 +25,9 @@ from jscc.panel_evaluation import ObservationScoringError
 from shared.test_recipe_training import setup_recipe
 
 
-def setup(tmp_path, channel=None):
+def setup(tmp_path, channel=None, *, ratio=50):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    learner, batch, events = setup_recipe(tmp_path, locations=['dec_l3', 'enc_l2'], channel=channel)
+    learner, batch, events = setup_recipe(tmp_path, locations=['dec_l3', 'enc_l2'], channel=channel, ratio=ratio)
     plan = learner.schedule
     metadata = {**learner.identity} if hasattr(learner, 'identity') else {}
     metadata.update(source_identity='tiny-source', config_identity=canonical_digest(plan.description['config']),
@@ -456,3 +456,66 @@ def test_scaler_enabled_status_mismatch_rejected_before_mutation(tmp_path, sourc
     with pytest.raises(ValueError, match='scaler enabled'):
         destination.restore(saved.reference)
     assert state_exact(recipe_observation_snapshot(destination), before)
+
+
+@pytest.mark.parametrize('position', [0, 3, 16])
+def test_r0_exact_continuation_and_terminal_finalize(tmp_path, position):
+    from jscc.panel_evaluation import open_recipe_terminal
+    state, batch, events = setup(tmp_path/'first', ratio=0)
+    plan = state.plan
+    assert len(plan.stages) == 1
+    assert plan.stages[0].phase_id == 'functional'
+    assert plan.stages[0].objective_kind == 'combined'
+    assert not plan.stages[0].reset_optimizer
+    assert plan.stages[0].horizon == plan.horizon
+    assert all(role not in {'reconstruction', 'pre_reset', 'post_reset'}
+               for _, role in plan.description['checkpoint_states'])
+    assert all(row['state'] == 'functional_observation' for row in plan.description['observations'])
+    advance(state, batch, position)
+    saved = state.save(tmp_path/'saved.pt')
+    assert saved.payload['metadata']['phase'] == 'functional'
+    assert saved.payload['stream']['reset_count'] == 0
+    assert saved.payload['metadata']['lineage'] == []
+    with pytest.raises(ValueError, match='does not declare'):
+        state.reset(saved)
+    advance(state, batch, plan.horizon)
+    expected = compare_state(state)
+    next_events = deepcopy(events[position:])
+    resumed, _, resumed_events = setup(tmp_path/'second', ratio=0)
+    resumed.restore(saved.reference)
+    advance(resumed, batch, plan.horizon)
+    actual_state = compare_state(resumed)
+    if position == plan.horizon:
+        # Gradients are transient scratch state, absent from durable checkpoints.
+        # Terminal restore performs no next update that would overwrite them.
+        expected.pop('grads')
+        actual_state.pop('grads')
+    assert state_exact(actual_state, expected)
+    for actual, uninterrupted in zip(resumed_events, next_events):
+        for key in ('lr_used', 'lr_next', 'objective', 'snr', 'audit', 'recipe_progress'):
+            assert state_exact(actual['payload'][key], uninterrupted['payload'][key])
+    for index, event in enumerate(events):
+        assert event['payload']['objective']['resolved_weights'] == plan.objective_at(index)
+        assert plan.objective_at(index)['kl'] == .7
+        assert event['payload']['lr_used'] == [.001 * plan.update_at(index).lr_factor]
+    terminal = resumed.save(tmp_path/'terminal.pt')
+    fresh, _, _ = setup(tmp_path/'final', ratio=0)
+    result = run(fresh, batch, tmp_path/'finalized', resume=terminal.reference, finalize_terminal=True)
+    assert result['segment_updates'] == 0
+    endpoint, _ = open_recipe_terminal(tmp_path/'finalized')
+    assert endpoint.payload['metadata']['phase_start_step'] == 0
+    assert state_exact(endpoint.payload['model'], terminal.payload['model'])
+
+
+def test_r0_runner_has_no_reset_and_initializer_resume(tmp_path):
+    state, batch, _ = setup(tmp_path/'full', ratio=0)
+    result = run(state, batch, tmp_path/'run')
+    expected = deepcopy(export_codec(state.learner.model))
+    assert result['observations_status'] == 'complete'
+    assert not any('reset' in row['role'] or row['role'] == 'reconstruction' for row in result['checkpoints'])
+    initial = next(row for row in result['checkpoints'] if row['role'] == 'initialization')
+    fresh, _, _ = setup(tmp_path/'resume', ratio=0)
+    continued = run(fresh, batch, tmp_path/'continued', resume=CheckpointRef(
+        **{key: initial[key] for key in ('path', 'sha256', 'size')}))
+    assert continued['segment_updates'] == state.plan.horizon
+    assert state_exact(export_codec(fresh.learner.model), expected)

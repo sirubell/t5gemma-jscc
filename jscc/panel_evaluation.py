@@ -52,7 +52,7 @@ def open_recipe_terminal(training_run):
             or campaign['plan_identity'] != plan.identity or freeze['plan_identity'] != plan.identity
             or campaign['completed_updates'] != plan.horizon
             or state.payload['metadata']['completed_updates'] != plan.horizon
-            or state.payload['metadata']['phase_start_step'] != plan.stages[1].start
+            or state.payload['metadata']['phase_start_step'] != plan.stages[-1].start
             or len(terminal) != 1
             or {k: terminal[0][k] for k in ('path', 'sha256', 'size')} != asdict(state.reference)
             or Path(state.reference.path).resolve().parent != root
@@ -322,7 +322,7 @@ def _recipe_observation_request(state, policy_request, template):
     if policy is None or policy_request != {**policy, 'plan_identity': plan.identity,
                                            'checkpoint_sha256': state.reference.sha256}:
         raise ValueError('recipe observation policy/checkpoint differs')
-    expected_phase = 0 if policy['state'] == 'pre_reset' else plan.stages[1].start
+    expected_phase = 0 if policy['state'] == 'pre_reset' else plan.stages[-1].start
     if state.payload['metadata']['phase_start_step'] != expected_phase:
         raise ValueError('recipe observation reset phase differs')
     value = scoring_template(template, policy, plan.description['evaluation'])

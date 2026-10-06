@@ -267,9 +267,12 @@ def resolve_recipe(path, *, model_config_path):
         if not isinstance(values, list) or not values or len(set(values)) != len(values):
             raise ValueError(f'{name} requires nonempty unique choices')
         for value in values:
-            _positive_int(value, name)
-    if any(r >= 100 or q * r % 100 for r in ratios):
-        raise ValueError('phase ratios require 0 < percent < 100 and integral per-location phase quotas')
+            if name == 'widths':
+                _positive_int(value, name)
+            elif type(value) is not int or not 0 <= value < 100:
+                raise ValueError('phase ratios require integer 0 <= percent < 100')
+    if any(q * r % 100 for r in ratios):
+        raise ValueError('phase ratios require integral per-location phase quotas')
     training = config['training']
     training.setdefault('betas', [0.9, 0.999])
     training.setdefault('eps', 1e-8)
@@ -352,6 +355,9 @@ def resolve_recipe(path, *, model_config_path):
                                 'start': 0, 'stop': stop, 'reset_optimizer': False},
                                {'phase_id': 'functional', 'objective_kind': 'combined',
                                 'start': stop, 'stop': n*q, 'reset_optimizer': True}]}
+            if ratio == 0:
+                item['phases'] = [{'phase_id': 'functional', 'objective_kind': 'combined',
+                                   'start': 0, 'stop': n*q, 'reset_optimizer': False}]
             item['identity'] = canonical_digest(item)
             trajectories.append(item)
     result = {'schema': RECIPE_SCHEMA, 'model_topology': topology, 'trajectories': trajectories,

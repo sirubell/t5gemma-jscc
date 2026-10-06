@@ -127,7 +127,9 @@ def run_recipe_training(model, processor, *, plan, batches, metadata, output, gu
             # the loop emits no optimizer update. Earlier observations remain
             # pending_prior_segment rather than inventing completion.
             publish('terminal')
-        if restored is not None and learner.completed == plan.stages[1].start and learner.phase_start_step == 0:
+        reset_stage = next((stage for stage in plan.stages if stage.reset_optimizer), None)
+        if (restored is not None and reset_stage is not None
+                and learner.completed == reset_stage.start and learner.phase_start_step == 0):
             state_machine.reset(restored)
             publish('post_reset')
         view_index, batch, binding = None, None, None

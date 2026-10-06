@@ -274,7 +274,10 @@ class RecipeTrainingState:
         from .site_routing import export_codec
         from .qualification import state_exact
         learner = self.learner
-        boundary = self.plan.stages[1].start
+        reset_stage = next((stage for stage in self.plan.stages if stage.reset_optimizer), None)
+        if reset_stage is None:
+            raise ValueError('recipe does not declare an optimizer reset')
+        boundary = reset_stage.start
         if learner.failed or learner.completed != boundary or learner.phase_start_step != 0 or self.reset_parent is not None:
             raise ValueError('recipe permits exactly one boundary reset')
         verified = self._open(parent.reference)

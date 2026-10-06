@@ -16,6 +16,8 @@ def checkpoint_policy(quota, ratio, n, policy):
                 or any(type(v) not in (int, float) or not math.isfinite(v) or not 0 < v <= 1 for v in fractions)
                 or fractions != sorted(set(fractions))):
             raise ValueError('save fractions must be increasing, unique and end at 1')
+        if q == 0:
+            continue
         for fraction in fractions:
             offset = q * fraction
             if not float(offset).is_integer():
@@ -33,10 +35,11 @@ def checkpoint_policy(quota, ratio, n, policy):
         result = [row for row in result if row[0] != step]
         result.append((step, 'functional_observation'))
         observation.append((step, 'functional_observation'))
-    result.append((recon * n, 'post_reset'))
+    if recon:
+        result.append((recon * n, 'post_reset'))
     # Pre and post reset deliberately remain distinct at the same update.
     result.sort(key=lambda value: (value[0], value[1] == 'post_reset'))
-    return [list(row) for row in result], [(recon * n, 'pre_reset'), *observation]
+    return [list(row) for row in result], ([(recon * n, 'pre_reset')] if recon else []) + observation
 
 
 def scoring_template(template, policy, evaluation):

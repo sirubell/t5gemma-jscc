@@ -313,3 +313,36 @@ def test_duplicate_author_conditions_reject_without_evaluation_outputs(joined_as
     # This failure must not create any evaluation output or execute a case.
     assert not list(root.glob('evaluations/*'))
     assert not list(root.glob('cases/*'))
+
+
+def test_r0_public_tiny_train_observe_evaluate_collect(joined_assets):
+    from request_helpers import invoke
+    from jscc.panel_evaluation import open_recipe_terminal
+    recipe, registrations, _ = registered(joined_assets)
+    authored = yaml.safe_load(recipe.read_text())
+    authored['reconstruction_percentages'] = [0]
+    recipe.write_text(yaml.safe_dump(authored))
+    root = joined_assets['root']/'r0-public'
+    public(recipe, registrations, root)
+    case = root/'cases/width-8-ratio-0'
+    checkpoint = read(case/'checkpoint.json')
+    state, _ = open_recipe_terminal(checkpoint['engine_path'])
+    assert state.payload['metadata']['phase'] == 'functional'
+    assert state.payload['metadata']['phase_start_step'] == 0
+    assert state.payload['metadata']['lineage'] == []
+    campaign = read(Path(checkpoint['engine_path'])/'campaign.json')
+    assert campaign['observations_status'] == 'complete'
+    assert [row['state'] for row in campaign['observations']] == ['functional_observation']
+    assert all(row['role'] not in {'reconstruction', 'pre_reset', 'post_reset'}
+               for row in campaign['checkpoints'])
+    aggregate = invoke(root.parent, 'shared', 'evaluate', {'root': str(root), 'attempt': '0001',
+                       'timeout_seconds': 120, 'evaluation': {}})
+    assert read(aggregate/'results.json')['status'] == 'complete'
+    assert read(aggregate/'gate.json')['final_eligible'] is True
+    receipts = panels(root, aggregate)
+    assert len(receipts) == 1 and receipts[0]['status'] == 'complete'
+    assert receipts[0]['checkpoint']['sha256'] == checkpoint['sha256']
+    collection = invoke(root.parent, 'shared', 'collect', {'root': str(root), 'collection': {
+        'snapshot': str(joined_assets['root']/'r0-snapshot'),
+        'destination': str(joined_assets['root']/'r0-collected')}})
+    assert collection['status'] == 'complete'

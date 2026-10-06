@@ -123,6 +123,10 @@ def test_yaml_changes_resolve_to_complete_settings_and_order(recipe_files):
     ({'updates_per_location': 13}, 'integral per-location'),
     ({'widths': [False]}, 'positive integer'),
     ({'reconstruction_percentages': [100]}, 'phase ratios'),
+    ({'reconstruction_percentages': [-1]}, 'phase ratios'),
+    ({'reconstruction_percentages': [True]}, 'phase ratios'),
+    ({'reconstruction_percentages': [0.0]}, 'phase ratios'),
+    ({'reconstruction_percentages': [1.5]}, 'phase ratios'),
 ])
 def test_invalid_recipe_fields(recipe_files, change, match):
     path, metadata, recipe = recipe_files
