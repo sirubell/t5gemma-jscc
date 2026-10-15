@@ -8,7 +8,7 @@ model:
 data:
   name: lmms-lab/COCO-Caption
   revision: c3213b54e173ae86517d481de17f31439d6f8c72
-  arrow: /work/ShaoYuLien/siru/mtk/t5gemma-jscc/campaigns/coco-b2304-r50-half-20261006/candidate-assets-attempt2/coco-historical-12516.arrow
+  arrow: $JSCC_DATA/coco-historical-12516.arrow   # 12,516 selected images (train+demo+selection+report)
   ids: data/coco-ids.json
   order_seed: 0
   caption_seed: 0

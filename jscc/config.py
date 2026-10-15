@@ -2,7 +2,9 @@
 
 Relative paths in ``base`` and in ``data.ids`` / ``data.arrow`` resolve against
 the file that declares them, so configs work from any working directory.
+``data.ids`` / ``data.arrow`` may use environment variables such as ``$JSCC_DATA``.
 """
+import os
 from pathlib import Path
 
 import yaml
@@ -22,6 +24,8 @@ def load_config(path) -> dict:
     raw = yaml.safe_load(path.read_text()) or {}
     for section, key in PATH_KEYS:
         value = raw.get(section, {}).get(key)
+        if isinstance(value, str):
+            value = raw[section][key] = os.path.expandvars(value)
         if isinstance(value, str) and not Path(value).is_absolute():
             raw[section][key] = str((path.parent / value).resolve())
     base = raw.pop("base", None)

@@ -39,7 +39,8 @@ class LearnedQAMChannel(nn.Module):
         pairs = z.reshape(*z.shape[:-1], -1, 2).float()           # [batch, tokens, b/2, (I, Q)]
         logits = self.mapper(pairs)
         onehot = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)
-        symbols = onehot @ self.points                             # [.., b/2, 2], unit power
+        points: torch.Tensor = self.points  # type: ignore[assignment]
+        symbols = onehot @ points                             # [.., b/2, 2], unit power
         # Encourage use of the whole constellation (entropy of the average symbol distribution).
         usage = logits.softmax(-1).reshape(-1, 16).mean(0)
         self.aux_loss = (usage * usage.clamp_min(1e-9).log()).sum()
