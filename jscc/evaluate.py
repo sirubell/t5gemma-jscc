@@ -4,7 +4,8 @@ Conditions: ``vanilla`` (codec and channel bypassed: the unsplit model),
 ``no_noise`` (codec + power normalization, no noise), or an SNR in dB.
 HellaSwag: lm-eval five-shot ``acc_norm`` on the official validation split.
 COCO: greedy captions on the report images, PTB tokenizer + CIDEr.
-Each (site, condition) panel reseeds the noise with ``evaluation.noise_seed``.
+Each (site, condition) panel reseeds the noise with ``evaluation.noise_seed``
+(for HellaSwag through lm-eval's ``torch_random_seed``, which would otherwise reset it to 0).
 """
 import copy
 import json
@@ -54,7 +55,7 @@ class HellaSwagScorer:
         with model.transmission(_snr(condition), bypass=condition == "vanilla"):
             result = simple_evaluate(model=adapter, tasks=[copy.deepcopy(self.task)], task_manager=self.manager,
                                      num_fewshot=5, limit=e.get("items"), bootstrap_iters=0,
-                                     random_seed=0, numpy_random_seed=1234, torch_random_seed=0,
+                                     random_seed=0, numpy_random_seed=1234, torch_random_seed=e.get("noise_seed", 0),
                                      fewshot_random_seed=1234)
         if result is None:
             raise RuntimeError("lm-eval returned no results")
