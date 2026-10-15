@@ -59,8 +59,8 @@ def site_loss(model: SplitModel, data, batch, snr, cfg, phase, teacher_logits=No
     aux = getattr(model.channel, "aux_loss", None)
     if aux is not None:
         loss = loss + cfg.get("channel_aux_weight", 0.0) * aux
-    return loss, {"kl": float(kl), "nmse_hidden": float(hidden),
-                  "nmse_memory": None if m_num is None else float(memory), "loss": float(loss)}
+    return loss, {"kl": kl.item(), "nmse_hidden": hidden.item(),
+                  "nmse_memory": None if m_num is None else memory.item(), "loss": loss.item()}
 
 
 def sample_snr(cfg_channel, batch_size, device, generator=None, per_batch=False):
