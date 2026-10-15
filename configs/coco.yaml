@@ -1,0 +1,22 @@
+# COCO base settings. Shares model/codec/channel/training choices with HellaSwag.
+base: hellaswag.yaml
+task: coco
+run:
+  name: coco
+model:
+  sdpa_flash_math: true          # COCO long prefixes: restrict SDPA to flash + math
+data:
+  name: lmms-lab/COCO-Caption
+  revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  arrow: /work/ShaoYuLien/siru/mtk/t5gemma-jscc/campaigns/coco-b2304-r50-half-20261006/candidate-assets-attempt2/coco-historical-12516.arrow
+  ids: data/coco-ids.json
+  order_seed: 0
+  caption_seed: 0
+  max_prompt_length: 1500
+  max_target_length: 64
+training:
+  weight_decay: 0.01
+evaluation:
+  batch_size: 16
+  max_new_tokens: 64
+  items: null                    # null = all 2,000 report images

@@ -1,161 +1,31 @@
-"""Compose one model design with task settings; save a complete resolved config."""
-import copy
-import math
+"""YAML configuration: a file may name ``base: other.yaml`` and override any of its keys.
+
+Relative paths in ``base`` and in ``data.ids`` / ``data.arrow`` resolve against
+the file that declares them, so configs work from any working directory.
+"""
 from pathlib import Path
-from typing import Any
 
 import yaml
 
-
-def validate_codec_architecture(codec):
-    """Validate explicit designs without rewriting historical saved configs."""
-    architecture = codec.get("architecture", "residual_mlp")
-    if architecture not in ("residual_mlp", "direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
-        raise ValueError("unsupported codec.architecture")
-    if architecture in ("direct_affine", "direct_outer_ln", "direct_outer_rms", "two_linear_gelu"):
-        required = {"n_res_blocks": 0, "snr_film": False}
-        if architecture != "two_linear_gelu":
-            required["layernorm"] = {"direct_affine": "none", "direct_outer_ln": "both",
-                                     "direct_outer_rms": "rms_both"}[architecture]
-        else:
-            required.update({"hidden_dim": 1152, "activation": "gelu"})
-            if codec.get("layernorm") not in ("none", "both", "rms_both"):
-                raise ValueError("two_linear_gelu requires codec.layernorm=none, both, or rms_both")
-        for key, value in required.items():
-            if codec.get(key) != value:
-                raise ValueError(f"{architecture} requires codec.{key}={value!r}")
-        if codec.get("dropout", 0.0) != 0.0:
-            raise ValueError(f"{architecture} requires codec.dropout=0")
-        if codec.get("layernorm") == "rms_both" and codec.get("rms_norm_eps") != 1e-6:
-            raise ValueError("backbone RMSNorm requires explicit codec.rms_norm_eps=1e-6")
-        if type(codec.get("bottleneck_dim")) is not int or codec["bottleneck_dim"] <= 0:
-            raise ValueError("codec.bottleneck_dim must be a positive integer")
+PATH_KEYS = (("data", "ids"), ("data", "arrow"))
 
 
-def resolve_codec_configs(codec):
-    """Return the main and receiver-memory codec configurations.
-
-    A flat codec configuration is the historical format: both communication
-    streams use the same settings.  ``codec.memory`` may provide overrides for
-    the receiver-memory stream while inheriting every unspecified setting from
-    the main codec.  Neither returned mapping aliases the input mapping.
-    """
-    if not isinstance(codec, dict):
-        raise TypeError("codec must be a mapping")
-
-    main = copy.deepcopy(codec)
-    memory = main.pop("memory", None)
-    if memory is None:
-        return main, copy.deepcopy(main)
-    if not isinstance(memory, dict):
-        raise TypeError("codec.memory must be a mapping of codec overrides")
-
-    resolved_memory = copy.deepcopy(main)
-    resolved_memory.update(copy.deepcopy(memory))
-    # A nested override is an override mapping, not another configuration
-    # level.  Removing this key also prevents accidental recursive expansion.
-    resolved_memory.pop("memory", None)
-    return main, resolved_memory
+def _merge(base, override):
+    out = dict(base)
+    for key, value in override.items():
+        out[key] = _merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
 
 
-def load_config(path, *, validate=True) -> dict[str, Any]:
+def load_config(path) -> dict:
     path = Path(path).resolve()
-    from .experiment import strict_yaml
-    config = strict_yaml(path)
-    request = isinstance(config, dict) and config.get("schema") == "jscc-experiment-v1"
-    if request:
-        if config.get("workflow") != "ordinary":
-            raise ValueError("ordinary config requires ordinary workflow")
-        from .experiment import ordinary_fields
-        config = copy.deepcopy(config["experiment"])
-        ordinary_fields(config)
-    width = None
-    if request and "model_config" in config and set(config.get("codec", {})) == {"bottleneck_dim"}:
-        width = config.pop("codec")["bottleneck_dim"]
-        if type(width) is not int or width < 1:
-            raise ValueError("codec.bottleneck_dim requires a positive integer")
-    model_file = config.pop("model_config", None)
-    if model_file is not None:
-        model_path = (path.parent / Path(model_file).expanduser()).resolve()
-        design = strict_yaml(model_path)
-        sections = {"model", "split", "codec", "channel"}
-        if set(design) != sections:
-            raise ValueError("model_config must contain model, split, codec and channel sections only")
-        if sections & config.keys():
-            raise ValueError("Put model/split/codec/channel settings in model_config, not in the task YAML")
-        if request:
-            from .experiment import fields, FIELDS
-            for section in sections:
-                fields(design[section], FIELDS[section], section)
-        config.update(design)
-        if width is not None:
-            config["codec"]["bottleneck_dim"] = width
-    runtime = config.pop("runtime", {})
-    if set(runtime) - {"device", "dtype", "sdpa_backend_policy", "numerical_policy"}:
-        raise ValueError("runtime overrides are limited to device, dtype, sdpa_backend_policy and numerical_policy")
-    if runtime:
-        config["model"].update(runtime)
-    for section, key in (("run", "output_dir"),):
-        value = config[section].get(key)
-        if value:
-            config[section][key] = str((path.parent / Path(value).expanduser()).resolve())
-    if request:
-        from .experiment import ordinary_fields
-        ordinary_fields(config)
-    if validate:
-        validate_config(config)
-    return config
-
-
-def validate_sdpa_backend_policy(policy):
-    if policy not in ("auto", "flash_math"):
-        raise ValueError("model.sdpa_backend_policy must be auto or flash_math")
-
-
-def validate_numerical_policy(model, split):
-    policy = model.get("numerical_policy", "native")
-    if policy not in ("native", "codec_receiver_fp32"):
-        raise ValueError("model.numerical_policy must be native or codec_receiver_fp32")
-    if policy == "codec_receiver_fp32":
-        if model.get("dtype") != "bfloat16":
-            raise ValueError("codec_receiver_fp32 requires model.dtype=bfloat16")
-        if model.get("sdpa_backend_policy", "auto") != "auto":
-            raise ValueError("codec_receiver_fp32 requires sdpa_backend_policy=auto")
-        if split != {"stack": "enc", "where": "after_final_norm"}:
-            raise ValueError("codec_receiver_fp32 requires encoder after_final_norm without index")
-
-
-def validate_config(config):
-    """Checks shared by file loading and study expansion."""
-    if config["task"] not in ("coco", "hellaswag"):
-        raise ValueError("task must be coco or hellaswag")
-    validate_sdpa_backend_policy(config.get("model", {}).get("sdpa_backend_policy", "auto"))
-    if config["task"] != "coco" and config.get("model", {}).get("sdpa_backend_policy", "auto") != "auto":
-        raise ValueError("flash_math is currently supported only for task=coco")
-    validate_numerical_policy(config.get("model", {}), config["split"])
-    training = config["training"]
-    if "loss_weights" in training:
-        weights = training["loss_weights"]
-        if not isinstance(weights, dict) or set(weights) != {"kl", "hidden", "memory"}:
-            raise ValueError("training.loss_weights requires exactly kl, hidden, memory")
-        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in weights.values()):
-            raise ValueError("loss_weights must be finite nonnegative numbers")
-        # Explicit weights take precedence; legacy values are retained for provenance.
-
-    for key in ("max_steps", "batch_size", "gradient_accumulation", "eval_every"):
-        if training[key] < 1:
-            raise ValueError(f"training.{key} must be positive")
-    schedule_steps = training.get("schedule_steps", training["max_steps"])
-    if type(schedule_steps) is not int or schedule_steps < training["max_steps"]:
-        raise ValueError("training.schedule_steps must be an integer >= training.max_steps")
-    if training["monitor"] not in ("kl", "loss"):
-        raise ValueError("training.monitor must be kl or loss")
-    if not training["validation_snrs"]:
-        raise ValueError("training.validation_snrs must contain at least one condition")
-    # Keep the historical flat codec schema valid, while rejecting malformed
-    # nested memory overrides before a model is constructed.
-    for codec in resolve_codec_configs(config["codec"]):
-        validate_codec_architecture(codec)
+    raw = yaml.safe_load(path.read_text()) or {}
+    for section, key in PATH_KEYS:
+        value = raw.get(section, {}).get(key)
+        if isinstance(value, str) and not Path(value).is_absolute():
+            raw[section][key] = str((path.parent / value).resolve())
+    base = raw.pop("base", None)
+    return _merge(load_config(path.parent / base), raw) if base else raw
 
 
 def save_config(config, path):

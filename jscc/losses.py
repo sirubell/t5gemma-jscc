@@ -1,156 +1,35 @@
-"""Losses used by the frozen-backbone JSCC distillation loop.
+"""Distillation (KL) and reconstruction (nMSE) statistics.
 
-The ``*_stats`` helpers expose numerators and denominators so the caller can
-form one objective over an effective batch (including gradient accumulation)
-instead of averaging already-normalised microbatch losses.  The reconstruction
-helper also retains the historical mean reduction for direct callers.
+Each helper returns ``(numerator, denominator)`` so an update made of several
+microbatches can be normalized over the whole effective batch.
+- KL: sum over valid target tokens of KL(teacher || student), FP32; denominator
+  is the number of valid target tokens.
+- nMSE: per sample, masked MSE divided by masked mean power of the original;
+  numerator sums those ratios, denominator counts samples with a valid position.
 """
-
-from __future__ import annotations
-
 import torch
 import torch.nn.functional as F
 
 
-def _valid_token_mask(labels: torch.Tensor) -> torch.Tensor:
-    """Return the labels mask used by both the KL loss and its accounting."""
-
-    return labels != -100
-
-
-def distillation_loss_stats(
-    student: torch.Tensor,
-    teacher: torch.Tensor,
-    labels: torch.Tensor,
-    temperature: float = 1.0,
-    *,
-    valid_only: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(sum of token KLs, number of valid target tokens)``.
-
-    KL is evaluated in float32 even when the backbone and the forward pass use
-    BF16.  Returning the unnormalised numerator is intentional: an effective
-    batch may contain different amounts of padding in its microbatches.
-    """
-
-    valid = _valid_token_mask(labels)
-    if valid_only:
-        # Selecting complete vocabulary rows after masking preserves the
-        # exact KL objective while avoiding softmax/log-softmax work for
-        # padded target positions.  Keep a differentiable zero for the
-        # degenerate all-padding fixture.
-        if not bool(valid.any()):
-            return student.float().sum() * 0.0, valid.sum()
-        # Keep native-logit rows packed once so backward has one mask scatter.
-        # Each chunk includes the complete vocabulary and retains FP32 scoring;
-        # only transient target-row work is bounded, not the physical batch.
-        student_rows, teacher_rows = student[valid], teacher[valid]
-        numerators = []
-        for student_chunk, teacher_chunk in zip(student_rows.split(32), teacher_rows.split(32)):
-            token_kl = F.kl_div(
-                F.log_softmax(student_chunk.float() / temperature, dim=-1),
-                F.softmax(teacher_chunk.float() / temperature, dim=-1),
-                reduction="none",
-            ).sum(dim=-1) * temperature**2
-            numerators.append(token_kl.sum())
-        return torch.stack(numerators).sum(), valid.sum()
-    student_float = student.float() / temperature
-    teacher_float = teacher.float() / temperature
-    token_kl = F.kl_div(
-        F.log_softmax(student_float, dim=-1),
-        F.softmax(teacher_float, dim=-1),
-        reduction="none",
-    ).sum(dim=-1) * temperature**2
-    numerator = token_kl.masked_select(valid).sum()
-    denominator = valid.sum()
-    return numerator, denominator
+def kl_stats(student, teacher, labels, temperature=1.0):
+    valid = labels != -100
+    if not bool(valid.any()):
+        return student.float().sum() * 0.0, valid.sum()
+    parts = []
+    for s, t in zip(student[valid].split(32), teacher[valid].split(32)):
+        token_kl = F.kl_div(F.log_softmax(s.float() / temperature, dim=-1),
+                            F.softmax(t.float() / temperature, dim=-1),
+                            reduction="none").sum(dim=-1) * temperature ** 2
+        parts.append(token_kl.sum())
+    return torch.stack(parts).sum(), valid.sum()
 
 
-def _expanded_mask(mask: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
-    """Broadcast a ``[batch, positions]`` validity mask over feature axes."""
-
-    if reference.ndim < 2:
-        raise ValueError("reconstruction tensors must have batch and feature dimensions")
-    if mask is None:
-        return torch.ones(reference.shape, dtype=torch.bool, device=reference.device)
-    mask = mask.to(device=reference.device, dtype=torch.bool)
-    if mask.ndim == 1:
-        mask = mask[:, None]
-    while mask.ndim < reference.ndim:
-        mask = mask.unsqueeze(-1)
-    try:
-        return torch.broadcast_to(mask, reference.shape)
-    except RuntimeError as exc:
-        raise ValueError(
-            f"valid mask shape {tuple(mask.shape)} cannot broadcast to "
-            f"reconstruction shape {tuple(reference.shape)}"
-        ) from exc
-
-
-def reconstruction_loss_stats(
-    reconstructed: torch.Tensor,
-    original: torch.Tensor,
-    mask: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return a per-sample nMSE numerator and valid-sample count."""
-
-    if reconstructed.shape != original.shape:
-        raise ValueError(
-            f"reconstruction shape {tuple(reconstructed.shape)} does not match "
-            f"original shape {tuple(original.shape)}"
-        )
-    valid = _expanded_mask(mask, original)
-    valid_float = valid.to(dtype=torch.float32)
-    reduce_axes = tuple(range(1, original.ndim))
-    counts = valid_float.sum(dim=reduce_axes)
-    sample_valid = counts > 0
-    error = (reconstructed.float() - original.float()).square() * valid_float
-    power = original.float().square() * valid_float
-    sample_error = error.sum(dim=reduce_axes) / counts.clamp_min(1.0)
-    sample_power = power.sum(dim=reduce_axes) / counts.clamp_min(1.0)
-    ratios = sample_error / (sample_power + 1e-8)
-    numerator = ratios.masked_select(sample_valid).sum()
-    denominator = sample_valid.sum()
-    return numerator, denominator
-
-
-def reconstruction_loss(
-    reconstructed: torch.Tensor,
-    original: torch.Tensor,
-    mask: torch.Tensor | None = None,
-    *,
-    reduction: str = "mean",
-) -> torch.Tensor:
-    """Compute normalized MSE.
-
-    The no-mask call keeps the historical global nMSE contract for direct
-    callers.  Corrected training passes a stream mask and uses the new
-    per-sample statistic instead.
-    """
-
-    if reduction not in {"mean", "sum"}:
-        raise ValueError("reduction must be mean or sum")
-    if mask is None:
-        original_float = original.float()
-        value = F.mse_loss(reconstructed.float(), original_float) / (
-            original_float.square().mean() + 1e-8
-        )
-        if reduction == "sum":
-            return value * reconstructed.numel()
-        return value
-    numerator, denominator = reconstruction_loss_stats(reconstructed, original, mask)
-    if reduction == "sum":
-        return numerator
-    return numerator / denominator.clamp_min(1).to(numerator.dtype)
-
-
-def aggregate_stream_numerators(
-    streams: list[tuple[torch.Tensor, torch.Tensor]],
-) -> torch.Tensor:
-    """Average stream nMSE means, keeping each stream equally weighted."""
-
-    if not streams:
-        raise ValueError("at least one reconstruction stream is required")
-    means = [numerator / count.clamp_min(1).to(numerator.dtype)
-             for numerator, count in streams]
-    return torch.stack(means).mean()
+def nmse_stats(reconstructed, original, mask):
+    """``mask``: [batch, tokens] bool."""
+    m = mask.to(device=original.device, dtype=torch.float32).unsqueeze(-1).expand_as(original)
+    counts = m.sum(dim=(1, 2))
+    error = ((reconstructed.float() - original.float()).square() * m).sum(dim=(1, 2)) / counts.clamp_min(1)
+    power = (original.float().square() * m).sum(dim=(1, 2)) / counts.clamp_min(1)
+    ratios = error / (power + 1e-8)
+    has = counts > 0
+    return ratios.masked_select(has).sum(), has.sum()

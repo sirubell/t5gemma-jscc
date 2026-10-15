@@ -1,75 +1,56 @@
-# Custom wireless channel integration
+# Plugging in a channel
 
-Current experiment calls use one YAML-selected operation through `experiment.py --config FILE`; see [request fields and effect boundaries](operations-workflow.md). The small tensor checker is a diagnostic.
-This guide is for collaborators implementing a physical wireless simulator. The project's normal research workflow is in the [README](../README.md). Integration starts by replacing the channel between codec encoding and decoding.
-
-Both tasks reference the same `configs/models/default.yaml`: an encoder-after-layer-9 residual-codec baseline with external LayerNorm `none` and SNR-FiLM disabled. All supplied training and smoke recipes reference it. Start channel integration with this baseline. The simulator still accepts SNR to model noise; it does not need to implement or coordinate FiLM. FiLM is reserved for an explicit later experiment.
-
-An H200 account is not needed to develop the channel. The tensor checker and automated tests run on CPU; full model checks can run on a compatible standalone CUDA GPU such as RTX 5090. Follow the [workstation guide](running.md#standalone-gpu-workstations-including-rtx-5090), starting with a small batch. The static analysis tools are installed with `uv sync --locked --extra dev`.
+A channel replaces what happens between the codec's transmitter (encoder) and receiver (decoder). The same channel works for one-site and shared (13-site) runs, at encoder and decoder sites, in training and evaluation.
 
 ## Contract
 
-Implement torch.nn.Module.forward(z, snr_db). See the [attenuation example](../examples/wireless_channel.py) and [built-in AWGN](../jscc/models/channel.py).
+```python
+class MyChannel(torch.nn.Module):
+    normalizes_power = False   # optional; True = you handle transmit power, the caller does not normalize
+    snr_mode = "per_sample"    # optional; "per_batch" = you receive one float per call
 
-| Item | Contract |
+    def forward(self, z, snr_db):
+        # z: real tensor [batch, tokens, b]
+        # snr_db: None (no noise), float, or tensor [batch, 1, 1] (per_sample mode)
+        # return a tensor with the same shape and dtype as z
+        # optionally set self.aux_loss = <scalar tensor> for an extra training loss
+```
+
+| Item | Rule |
 |---|---|
-| Input z | Real tensor [batch, tokens, bottleneck] |
-| Output | Received representation with the same shape, device and dtype |
-| Power | With normalize_power enabled, encoder hidden and receiver-memory streams use sequence-wide mean power over valid token/bottleneck coordinates in each sample; decoder hidden streams normalize each token over its bottleneck coordinates |
-| SNR | One numeric value per batch; None is the clean path, returned unchanged by the example |
-| Precision | Preserve the actual channel input dtype: normalization promotes BF16/FP16 latents to FP32 and keeps FP32/FP64 precision; the backbone dtype does not determine the channel input dtype |
-| Gradients | End-to-end training needs gradients back to z; evaluation may use a non-differentiable simulator |
+| Power | By default the caller scales `z` to unit average power per sample (encoder streams: over valid tokens; decoder hidden stream: per token). Set `normalizes_power = True` if your mapping (e.g. a QAM constellation) fixes power itself. |
+| SNR | AWGN uses noise std `10^(-SNR/20)` per real dimension at unit signal power. Define your own convention (Es/N0, per complex symbol) and keep it consistent. Training draws SNR uniformly from `channel.train_snr_range`. |
+| Trainable parameters | Optimized with the codec, saved in checkpoints, put in `train()`/`eval()` mode with the codec (BatchNorm/Dropout behave correctly). |
+| Auxiliary loss | `self.aux_loss` is added with weight `training.channel_aux_weight` (default 0). |
+| Gradients | Training needs gradients to reach `z` (straight-through estimators are fine). Evaluation-only channels may be non-differentiable. |
+| Decoder sites | Two streams pass through the channel: the decoder hidden state and the encoder memory used by receiver layers. Both use the same SNR. |
 
-AWGN adds real Gaussian noise with standard deviation 10 ** (−snr_db / 20), assuming approximately unit signal power. Define the relationship again when introducing complex I/Q, modulation or coding.
+## Steps
 
-The encoder/memory validity mask excludes padding from the sequence-wide power
-estimate. Without a mask, that policy averages all token/bottleneck coordinates.
-Decoder hidden normalization is tokenwise to preserve causality: later tokens
-cannot change an earlier token's normalization factor, and the mask does not
-couple tokens in this policy. Disabling normalize_power passes the encoded latent
-to the channel without normalization or its precision promotion.
+1. Put your module in an importable package (for example `examples/` or your own package on `PYTHONPATH`).
+2. Check it without a model: `python -m examples.check_channel your.module:YourChannel`.
+3. Use it in a run by overriding the channel in an experiment YAML:
 
-Internal float32/complex simulator computation is possible if the output restores
-the actual input dtype. With the default numerical policy, the caller decodes
-the received latent and casts the reconstructed stream back to the incoming
-backbone activation dtype. The opt-in `codec_receiver_fp32` policy keeps receiver
-computation in FP32; its separate stored reconstruction cast does not change the
-channel input/output contract. See [normalization](../jscc/models/channel.py) and
-[the transmission boundary](../jscc/models/split_model.py).
-
-## Integration steps
-
-1. Create an importable Python module and an nn.Module class with constructor options.
-2. Copy [wireless-options.yaml](../configs/requests/wireless-options.yaml); set channel.type to module:ClassName and channel.kwargs to your options.
-3. Check small tensors before loading a model:
-
-   ```bash
-   uv run --locked python -m examples.check_channel --config configs/requests/wireless-options.yaml
+   ```yaml
+   base: ../hellaswag.yaml
+   run: {name: shared13-qam}
+   channel:
+     type: examples.qam_channel:LearnedQAMChannel
+     kwargs: {tau: 1.0}
+   training:
+     channel_aux_weight: 0.01
    ```
 
-   Use your copied filename when applicable. This checker currently uses CPU/float32 and 0 dB. A message reporting no usable gradient means evaluation-only use until resolved, even if the process exits normally. Also test CUDA/BF16, clean operation, other SNRs and sequence lengths before training.
+4. Train: `python experiment.py train configs/examples/your-file.yaml` (or through `scripts/job.sh` on the cluster).
 
-4. Evaluate a saved codec with the replacement channel:
+`examples/qam_channel.py` is a worked example: a trainable mapping of coordinate pairs to 16-QAM symbols (straight-through Gumbel-softmax), complex AWGN and a trainable demapper. It uses `normalizes_power`, `snr_mode = "per_batch"` and `aux_loss`.
 
-   ```bash
-   uv run --locked python experiment.py --config /path/to/coco-wireless-request.yaml
-   uv run --locked python experiment.py --config /path/to/hellaswag-wireless-request.yaml
-   ```
+## Adapting a simulator written for one vector per sample
 
-   Copy [wireless.yaml](../configs/requests/wireless.yaml) for each bound ordinary root. Set `execution.root`, a fresh `execution.attempt` and `execution.evaluation.overrides` to the copied options file; paths resolve from the request. Ordinary COCO and HellaSwag support custom channels. Current shared requests support AWGN and identity only.
+Simulators built for image classifiers often take `[batch, m]`. Here every token carries a `b`-dimensional vector, so either treat `[batch * tokens, b]` as the batch (reshape in and out inside `forward`), or pack coordinates into symbols as the QAM example does. Note the cost: a sequence has hundreds to thousands of tokens.
 
-   A replacement channel is a new instance. Parameters from another channel checkpoint are not automatically imported.
+## Agree on the physical meaning
 
-   Evaluation restores the checkpoint's saved model settings. An older FiLM-enabled checkpoint stays FiLM-enabled even after editing a current YAML. Use a checkpoint saved with the intended shared baseline when comparing simulators; historical COCO decoder-split results are not equivalent to the new encoder-split baseline.
-
-5. For training, copy `configs/models/default.yaml` to a named design file and change its channel.type and channel.kwargs. Preserve normalize_power, train_noise, train_snr_range and clean_film_snr; keep codec.snr_film false. Point each task YAML's model_config at the new design file. Both tasks then use the same simulator and codec. Trainable channel parameters are included with codec parameters in the optimizer.
-
-## Agree on the physical interpretation
-
-- Representation and channel uses: the current interface sends floating-point representations, not a defined bitstream. Specify real/complex packing, modulation and symbols per token.
-- SNR: distinguish real-dimension power, complex-symbol power, Es/N0 and Eb/N0; identify where power is normalized.
-- State: generation may call the channel repeatedly. Define when fading, packet state and randomness reset.
-- Split: decoder receiver layers receive a second encoded memory stream; transmitter layers keep original memory. A custom channel sees both streams at the same configured SNR. Define shared fading/state and total channel uses; default AWGN draws independently per call.
-- Clean/vanilla: no-noise keeps the codec; vanilla bypasses codec/channel. clean_film_snr is inactive in the default FiLM-off baseline; it only conditions a clean path when FiLM is explicitly enabled.
-
-Only AWGN and the simple attenuation example have been validated so far. An initial collaboration deliverable is one channel module plus its power, SNR and state definitions; full model experimentation can follow when the interface is confirmed.
+- What one transmitted unit is (real coordinate, complex symbol, bit) and how many channel uses a sample costs.
+- Which SNR definition is used.
+- When channel state (fading, randomness) resets during autoregressive generation, where the channel is called once per generated token at decoder sites.

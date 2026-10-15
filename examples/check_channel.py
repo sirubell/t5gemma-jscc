@@ -1,35 +1,32 @@
-"""Check a channel without downloading a model or dataset.
+"""Check a channel class without loading a model or dataset.
 
-uv run --locked python -m examples.check_channel --config configs/requests/wireless-options.yaml
+    python -m examples.check_channel examples.qam_channel:LearnedQAMChannel
 """
-import argparse
-from pathlib import Path
+import importlib
+import sys
 
 import torch
-import yaml
 
-from jscc.models.channel import build_channel, normalize_power
+from jscc.channel import normalize_power
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-    config = yaml.safe_load(Path(args.config).read_text())
-    channel = build_channel(config["channel"])
-    z = normalize_power(torch.randn(2, 7, 512)).detach().requires_grad_(True)
-    received = channel(z, 0.0)
-    assert received.shape == z.shape, "channel must restore [batch, tokens, bottleneck]"
-    assert received.device == z.device and received.dtype == z.dtype
-    assert torch.isfinite(received).all(), "channel output contains NaN/Inf"
-    print("Tensor shape, dtype, device and finite values: PASS")
-    if received.requires_grad:
-        (received * torch.randn_like(received)).sum().backward()
-    if z.grad is not None and torch.isfinite(z.grad).all() and z.grad.abs().sum() > 0:
-        print("Gradient reaches transmitted tensor: PASS")
-    else:
-        print("No usable gradient reached the input; use this channel for evaluation until resolved.")
+def main(name):
+    module, _, cls = name.partition(":")
+    channel = getattr(importlib.import_module(module), cls)()
+    per_batch = getattr(channel, "snr_mode", "per_sample") == "per_batch"
+    z = normalize_power(torch.randn(2, 7, 64)).requires_grad_(True)
+    for snr in (None, 0.0 if per_batch else torch.zeros(2, 1, 1)):
+        out = channel(z, snr)
+        assert out.shape == z.shape and out.dtype == z.dtype, "output must keep shape and dtype"
+        assert torch.isfinite(out).all(), "output contains NaN/Inf"
+    out.sum().backward()
+    ok = z.grad is not None and z.grad.abs().sum() > 0
+    print("shape/dtype/finite: PASS")
+    print("gradient reaches z:", "PASS" if ok else "NO (evaluation-only channel)")
+    print("trainable parameters:", sum(p.numel() for p in channel.parameters() if p.requires_grad))
+    print("own power normalization:", getattr(channel, "normalizes_power", False), "| snr_mode:",
+          getattr(channel, "snr_mode", "per_sample"), "| aux_loss:", getattr(channel, "aux_loss", None) is not None)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1])

@@ -1,0 +1,4 @@
+# Deeper codec on COCO, shared over all sites.
+base: ../coco.yaml
+run: {name: shared13-mlp2-b2304-coco}
+codec: {architecture: mlp, depth: 2, hidden_dim: 2304}
