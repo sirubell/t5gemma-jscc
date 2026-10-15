@@ -43,7 +43,7 @@ class MyChannel(torch.nn.Module):
 
 4. Train: `python experiment.py train configs/examples/your-file.yaml` (or through `scripts/job.sh` on the cluster).
 
-`examples/qam_channel.py` is a worked example: a trainable mapping of coordinate pairs to 16-QAM symbols (straight-through Gumbel-softmax), complex AWGN and a trainable demapper. It uses `normalizes_power`, `snr_mode = "per_batch"` and `aux_loss`.
+`examples/qam_channel.py` is a worked example: a trainable mapping of coordinate pairs to 16-QAM symbols (straight-through Gumbel-softmax), complex AWGN and a trainable demapper. It uses `normalizes_power`, `snr_mode = "per_batch"` and `aux_loss`. It keeps float32 symbol logits for every coordinate pair (16 per pair), so it needs several extra GB: on a shared 32 GB RTX 5090 it ran at batch 8 but ran out of memory at batch 16.
 
 ## Adapting a simulator written for one vector per sample
 
