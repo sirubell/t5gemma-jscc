@@ -1,0 +1,3 @@
+# B2 HellaSwag: one linear b2304 codec shared by all 13 sites (same trainer, data and stopping rule as the per-site arm).
+base: ../hellaswag.yaml
+run: {name: b2-hs-shared13}

@@ -1,0 +1,6 @@
+# One codec for one site. Same data, loss, optimizer, stopping rule and evaluation as the shared run.
+base: ../hellaswag.yaml
+run: {name: site-enc_l9-linear-b2304}
+training:
+  sites: [enc_l9]
+  early_stopping: {every: 200, patience: 5, min_delta: 0.005}

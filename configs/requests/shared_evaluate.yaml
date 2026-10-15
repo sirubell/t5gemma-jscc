@@ -1,8 +1,0 @@
-schema: jscc-experiment-v1
-workflow: shared
-operation: evaluate
-execution:
-  root: /explicit/bound/shared-run
-  attempt: evaluation-NEW
-  evaluation:
-    scope: initial

@@ -1,57 +1,27 @@
 # Project guide
 
-## Research session quick start
+Read README.md first, then docs/design-v2.md before changing model, data, loss or training behavior. Research state, plans and the professor's requirements are in the git-ignored `docs/local/research/` (start at `HANDOFF.md`, `STATUS-*.md`, `PLAN-*.md`, `PROFESSOR-FEEDBACK.md`; list files with `rg --files --no-ignore docs/local/research`). Cluster and workstation access details are in `docs/local/environment.md`.
 
-For research planning, implementation or experiments, read the [current handoff](docs/local/research/HANDOFF.md), [session procedure](docs/local/research/wayfinder/codec-research/SESSION-GUIDE.md), and the explicitly assigned named ticket first. The handoff identifies source roles and campaign receipts; the procedure defines claims and completion; the ticket defines scope, ownership and authority. Read the [research workflow](docs/research-roadmap.md#research-workflow-2026-10-02) for shared conventions; Colab setup is in [the runbook](docs/running.md#colab-runbook-2026-10-02).
+## Principles
 
-## Read the relevant documents
-
-- Start with README.md for both task workflows.
-- Before changing model/data/loss behavior, read docs/architecture.md; for historical compatibility, read docs/migration.md. For local research changes, also follow HANDOFF.md to the frozen baseline record; preserve earlier baselines and create a new record when adopting a changed design.
-- For test coverage and known limits, read docs/validation.md.
-- For config layout, read configs/README.md; for study expansion and paired jobs, read docs/studies.md.
-- Before remote access or Slurm work, read docs/running.md and the local docs/local/environment.md if present.
-- For actual run IDs, paths and decisions, consult docs/local/experiments.md if present.
-- For backup work, read backup-status.md if present.
-- For custom channels, read docs/channel-integration.md.
-- For retrospective research, start with docs/local/research/reported-experiments.md when present: prioritize presented experiments and map each slide to raw evidence. Use docs/research-roadmap.md for the portable research scope.
-- For transmitter/receiver semantics, read CONTEXT.md and docs/adr/0001-transmission-boundary.md. For branch/worktree cleanup, use the assigned cleanup ticket and verify ownership, unique work and evidence references first. Retain experiment pins, source packages, checkpoints, datasets/model caches and local research evidence; storage deletion requires its own scoped authorization.
+- Keep the code small. Do not add identity hashes, receipts, manifests, admission gates or review layers. The code identity of a run is the git commit recorded in its run directory; run experiments from a clean checkout of the intended commit.
+- What protects results stays: stop on nonfinite loss/gradient, atomic checkpoint saves, best-validation checkpoint selection, pinned model revision.
+- Results must be converged and comparable: use the early-stopping rule, change one factor per comparison, and use the same data, loss and evaluation for per-site and shared codecs (they share one trainer).
+- Collaborators' channels plug in through the contract in docs/channel-integration.md; keep it working for every run type.
+- Research choices belong in YAML, not in Python.
 
 ## Working conventions
 
-Use `gpt-6.1-sol` for delegated work and reviews
-
-This project primarily supports the owner's research workflow. Keep the README centered on features and experiments. Put collaboration details in the channel guide and personal infrastructure details in docs/local/.
-
-Use uv. Public experiment requests select exactly one YAML operation through experiment.py --config FILE; see [operation fields and effects](docs/operations-workflow.md) when authoring or changing requests/callers. Both COCO and HellaSwag must remain visible in command documentation and task tests. Ordinary experiment YAMLs reference a named model_config file; the loader saves a complete resolved configuration in every run. Put architectural variations in a named model design file rather than duplicating them inside task YAMLs.
-
-Keep the supplied task and smoke model designs aligned with the shared baseline in docs/architecture.md. SNR-FiLM is off by default; enable it only for an explicitly requested FiLM experiment, not as part of routine channel integration.
-
-Study preview/export prepares configurations only. Do not treat a listed study or an exported manifest as authorization to run a full sweep. Use a fresh prepared directory for each new execution; evaluate an entry through its recorded training-run link rather than searching for the newest checkpoint.
-
-Git tracks code, configuration, uv.lock and portable docs. docs/local/ is intentionally ignored but remains readable by local agents. Discover research files with `rg --files --no-ignore docs/local/research` from the project root; default Git-aware searches omit them. When it is absent, use docs/environment.example.md and request the missing machine/account details before remote work. Do not guess another user's SSH aliases, VPN commands or filesystem paths.
-
-Keep passwords, access tokens and private keys out of both portable and local Markdown; refer to the installed credential mechanism. Update only current commits to remove personal notes; preserve existing Git history unless the user explicitly requests a rewrite.
-
-Earlier real-environment checks predate the receiver-only decoder-memory correction and HellaSwag selection holdout. CPU regression tests do not establish full-weight performance of those changes. New GPU work requires a concrete experiment scope and budget; a historical COCO timeout is not a pending request to resume training.
-
-## Research validation
-
-Validate fixed input/model/checkpoint identities when loading the experiment. During training, retain GPU-assignment, nonfinite-value and save-success checks. Record training, evaluation and collection status separately so reporting or upload failures do not erase verified scientific results.
+- Explain results to the owner in Traditional Chinese; write code, docs and agent prompts in English.
+- GPU jobs need an agreed scope; do not start extra jobs, retries or monitoring loops on your own.
+- Report observed results separately from estimates; a passing CPU test is not a GPU or scientific result.
+- Keep passwords, tokens and private keys out of all files. Machine paths go in an untracked `.env` or `docs/local/`.
 
 ## Checks
 
 ```bash
 uv sync --locked --extra dev
-uv run --locked --extra dev pyright
 uv run --locked --extra dev ruff check .
+uv run --locked --extra dev pyright
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python experiment.py --config configs/experiments/ordinary/coco.yaml
-uv run --locked python experiment.py --config configs/experiments/ordinary/hellaswag.yaml
 ```
-
-For documentation-only edits, check content, links and commands rather than starting model runs. Preserve unrelated user edits.
-
-Use the project's uv-managed Pyright/Ruff rather than assuming the owner's editor tools exist. Model code is CUDA-generic; Slurm is optional. Do not claim that a full configuration fits an RTX 5090 based on an H200 run, or that a full sweep has been GPU-tested because its small-model tests pass.
-
-When recording a real experiment, include the recipe, source revision, job/run identifiers, evaluation checkpoint and completion state in local experiment notes; distinguish observed results from estimates.

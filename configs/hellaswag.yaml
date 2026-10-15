@@ -1,0 +1,68 @@
+# HellaSwag base settings. Experiment files set `base: ../hellaswag.yaml` and override.
+task: hellaswag
+seed: 0
+run:
+  name: hellaswag
+  root: runs                     # relative to the working directory (the repo root on the server)
+model:
+  name: google/t5gemma-2-1b-1b
+  revision: dd0a2683227859151b1730ca3a63087df5b5f39b
+  dtype: bfloat16
+  device: cuda
+  attn_implementation: sdpa
+codec:
+  architecture: linear           # linear | mlp | residual
+  bottleneck_dim: 2304           # D = 1152, so 2304 is 2x expansion
+  hidden_dim: 1152               # mlp / residual only
+  depth: 1                       # mlp only: hidden layers per side
+  n_res_blocks: 2                # residual only
+  activation: gelu
+  norm: none                     # none | layernorm
+  film: false                    # SNR input at the receiver
+  memory: shared                 # decoder sites: memory stream uses the same codec (or: separate)
+channel:
+  type: awgn                     # awgn | identity | package.module:ClassName
+  kwargs: {}
+  normalize_power: true
+  train_noise: true
+  train_snr_range: [-6.0, 18.0]
+data:
+  name: Rowan/hellaswag
+  revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+  ids: data/hellaswag-ids.json
+  prompt_seed: 20260920
+  order_seed: 20260920
+training:
+  sites: [enc_emb, enc_l4, enc_l9, enc_l14, enc_l19, enc_fn, dec_l0, dec_l4, dec_l8, dec_l12, dec_l16, dec_l20, dec_l24]
+  batch_size: 16
+  lr: 2.0e-4
+  warmup_updates: 500
+  weight_decay: 0.0025
+  grad_clip: 1.0
+  temperature: 1.0
+  loss_weights:
+    kl: 1.0
+    encoder: {hidden: 0.1}
+    decoder: {hidden: 0.05, memory: 0.05}
+  max_updates: 200000            # safety cap; early stopping normally ends training first
+  early_stopping:
+    every: 2600                  # validate every N updates (200 per site with 13 sites)
+    patience: 5                  # stop after N validations without improvement
+    min_delta: 0.005             # relative improvement that counts
+  validation:
+    items: 256                   # selection rows used per validation
+    conditions: [no_noise, -6]
+    seed: 0
+  reconstruction:
+    enabled: false               # true: nMSE pretraining phase before distillation
+    lr: 2.0e-4
+    warmup_updates: 500
+    max_updates: 100000
+    early_stopping: {every: 2600, patience: 3, min_delta: 0.005}
+  log_every: 50
+evaluation:
+  after_training: true
+  conditions: [vanilla, no_noise, -6]
+  batch_size: 16
+  items: null                    # null = all 10,042 validation questions
+  noise_seed: 0

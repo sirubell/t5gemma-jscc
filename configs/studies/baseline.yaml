@@ -1,9 +1,0 @@
-name: baseline
-task_configs:
-- ../experiments/ordinary/coco.yaml
-- ../experiments/ordinary/hellaswag.yaml
-seeds:
-- 0
-experiments:
-- name: shared
-  model_overrides: {}

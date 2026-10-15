@@ -1,0 +1,9 @@
+# B2 HellaSwag: one linear b2304 codec for dec_l12 only. Validation every 200 updates of this site,
+# the same per-site cadence as the shared run (every 2600 updates over 13 sites). Vanilla comes from the shared run.
+base: ../hellaswag.yaml
+run: {name: b2-hs-site-dec_l12}
+training:
+  sites: [dec_l12]
+  early_stopping: {every: 200, patience: 5, min_delta: 0.005}
+evaluation:
+  conditions: [no_noise, -6]

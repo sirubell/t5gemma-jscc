@@ -1,0 +1,3 @@
+# One codec shared by all 13 sites, COCO captioning.
+base: ../coco.yaml
+run: {name: shared13-coco-linear-b2304}
