@@ -25,7 +25,7 @@ class FakeData:
         return nullcontext()
 
 
-def config(sites, recon=False, max_updates=40, patience=2):
+def config(sites, recon=False, max_updates=40, patience: int | None = 2):
     es = {"every": 4, "patience": patience, "min_delta": 0.0}
     return {"seed": 0, "channel": {"type": "awgn", "train_noise": True, "train_snr_range": [-6, 18]},
             "training": {"sites": sites, "lr": 1e-2, "weight_decay": 0.0, "grad_clip": 1.0,
@@ -211,3 +211,65 @@ def test_student_from_prefix_matches_full_forward(tmp_path, monkeypatch, data):
     full.train()
     assert records(new.run) == records(full.run)
     assert_same_state(new, full)
+
+
+def test_normalized_selection_keeps_its_own_best(tmp_path, monkeypatch):
+    # cell "b" dominates the raw mean while cell "a" gets worse: the two minima differ
+    cells = iter([{"a|x": 1.0, "b|x": 10.0}, {"a|x": 2.0, "b|x": 8.0}, {"a|x": 0.5, "b|x": 9.0},
+                  {"a|x": 3.0, "b|x": 6.0}])
+    monkeypatch.setattr("jscc.train.validate",
+                        lambda *a, **k: (lambda per: {"per_site": per, "mean": sum(per.values()) / 2})(next(cells)))
+    cfg = config(["enc_l1"], max_updates=16, patience=None)
+    cfg["training"]["selection"] = {"reference": {"a|x": 0.5, "b|x": 5.0}}
+    t = Trainer(tiny_model(), FakeData(), cfg, tmp_path)
+    assert t.train() == {"distillation": "max_updates"}
+    vals = [r for r in records(tmp_path) if r["type"] == "validation"]
+    assert [v["normalized"] for v in vals] == [2.0, 2.8, 1.4, 3.6]  # mean of (a / 0.5, b / 5)
+    assert [v["new_best_normalized"] for v in vals] == [True, False, True, False]
+    assert [v["new_best"] for v in vals] == [True, True, True, True]
+    raw = torch.load(tmp_path / "best_distillation.pt", weights_only=False)
+    norm = torch.load(tmp_path / "best_distillation_normalized.pt", weights_only=False)
+    assert (raw["update"], norm["update"]) == (16, 12) and norm["best_normalized"] == 1.4
+
+
+def test_continue_early_stopped_run_to_fixed_budget(tmp_path):
+    """The shared13 continuation: resume an early-stopped run from its best checkpoint with early stopping
+    off, a larger max_updates and selection.reference; it follows the same trajectory as a run that never
+    stopped (same data order, LR and losses)."""
+    import shutil
+    sites = ["enc_l1", "enc_fn", "dec_l0"]
+    stopped = config(sites, max_updates=60, patience=2)
+    stopped["training"]["lr"] = 0.1  # validation means 0.00348, 0.00350, 0.00364, 0.00279, ...
+    a = Trainer(tiny_model(), FakeData(), stopped, tmp_path / "a")
+    assert a.train() == {"distillation": "early_stopping"} and a.total_updates == 12
+    best_update = torch.load(tmp_path / "a" / "best_distillation.pt", weights_only=False)["update"]
+    assert best_update == 4  # like the B2 run, the best checkpoint is before the stop
+
+    budget = config(sites, max_updates=30, patience=None)
+    budget["training"]["lr"] = 0.1
+    full = Trainer(tiny_model(), FakeData(), budget, tmp_path / "full")
+    assert full.train() == {"distillation": "max_updates"}
+
+    shutil.copytree(tmp_path / "a", tmp_path / "c")
+    shutil.copy(tmp_path / "c" / "best_distillation.pt", tmp_path / "c" / "last.pt")
+    first = [r for r in records(tmp_path / "a") if r["type"] == "validation" and r["update"] == best_update][0]
+    reference = {k: 2 * v for k, v in first["per_site"].items()}
+    cont_cfg = {**budget, "training": {**budget["training"], "selection": {"reference": reference}}}
+    c = Trainer(tiny_model(), FakeData(), cont_cfg, tmp_path / "c")
+    c.load(tmp_path / "c" / "last.pt")
+    assert c.best_normalized == 0.5  # seeded from the resumed checkpoint's own validation
+    assert c.train() == {"distillation": "max_updates"} and c.total_updates == 30
+    assert c.site_updates == full.site_updates == {s: 10 for s in sites}
+
+    extra = ("normalized", "new_best_normalized")
+    assert [{k: v for k, v in r.items() if k not in extra} for r in records(c.run)] == records(full.run)
+    assert all("normalized" in r for r in records(c.run) if r["type"] == "validation" and r["update"] > best_update)
+    assert_same_state(c, full)  # both hold the raw-best weights after training
+    for name in ("last.pt", "best_distillation.pt"):
+        x, y = (torch.load(run / name, weights_only=False) for run in (c.run, full.run))
+        assert x["update"] == y["update"] and all(
+            torch.equal(p, q) for p, q in zip(x["communication"]["codec"].values(), y["communication"]["codec"].values()))
+    assert torch.load(c.run / "last.pt", weights_only=False)["update"] == 30  # final weights, not the best ones
+    norm = torch.load(c.run / "best_distillation_normalized.pt", weights_only=False)
+    vals = [r for r in records(c.run) if r["type"] == "validation" and r["update"] > best_update]
+    assert norm["best_normalized"] == min([0.5] + [v["normalized"] for v in vals])

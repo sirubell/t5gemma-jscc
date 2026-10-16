@@ -4,7 +4,9 @@
     python experiment.py train --resume RUN_DIR              # continue from RUN_DIR/last.pt
     python experiment.py evaluate RUN_DIR [--checkpoint best|last|PATH]
 
-``train`` evaluates the best checkpoint afterwards when ``evaluation.after_training`` is true.
+``train`` evaluates ``evaluation.checkpoints`` (default ``[best]``) afterwards when ``evaluation.after_training``
+is true. Checkpoint names: best (best_distillation.pt), best_normalized (best_distillation_normalized.pt),
+last (last.pt, the final weights), or a path.
 Every stage writes RUN_DIR/summary.json + SUMMARY.md and one line in <run.root>/INDEX.md.
 """
 import argparse
@@ -38,7 +40,8 @@ def _evaluate(run, config, checkpoint, processor=None, model=None, data=None):
         data = CocoData(config, processor)
     path = Path(checkpoint)
     if not path.is_absolute() and not path.exists():
-        path = run / ({"best": "best_distillation.pt", "last": "last.pt"}.get(str(checkpoint), str(checkpoint)))
+        path = run / ({"best": "best_distillation.pt", "best_normalized": "best_distillation_normalized.pt",
+                      "last": "last.pt"}.get(str(checkpoint), str(checkpoint)))
     model.load_communication_state(torch.load(path, map_location="cpu", weights_only=False)["communication"])
     sites = config["evaluation"].get("sites") or config["training"]["sites"]
     results = evaluate(model, processor, config, sites, run / "eval" / path.stem, data=data)
@@ -48,6 +51,12 @@ def _evaluate(run, config, checkpoint, processor=None, model=None, data=None):
         old = json.loads((run / "summary.json").read_text()).get("evaluations", {})
     write_summary(run, config, "evaluated", evaluations={**old, path.stem: results})
     return results
+
+
+def _report(run, config, results):
+    from jscc.report import append_index, score_table
+    append_index(run, config, "evaluate", "done", f"see {run.name}/SUMMARY.md")
+    print(score_table(results, config["task"]))
 
 
 def main(argv=None):
@@ -89,7 +98,7 @@ def main(argv=None):
     append_index(run, config, stage, "started", f"{source['commit'][:10]}{' dirty' if source['dirty'] else ''}")
     try:
         if stage == "evaluate":
-            results = _evaluate(run, config, args.checkpoint)
+            _report(run, config, _evaluate(run, config, args.checkpoint))
         else:
             import torch
             from jscc.tasks import load_task_data
@@ -103,17 +112,14 @@ def main(argv=None):
             stops = trainer.train()
             write_summary(run, config, "trained", stops=stops)
             append_index(run, config, "train", "done", ", ".join(f"{k}: {v}" for k, v in stops.items()))
-            results = None
             if config["evaluation"].get("after_training", True):
                 stage = "evaluate"
-                if trainer.stop_requested:  # SIGTERM arrived while the last phase was finishing
-                    raise KeyboardInterrupt("SIGTERM before evaluation")
-                append_index(run, config, stage, "started", "best checkpoint")
-                results = _evaluate(run, config, "best", processor, model, data if config["task"] == "coco" else None)
-        if results is not None:
-            from jscc.report import score_table
-            append_index(run, config, "evaluate", "done", f"see {run.name}/SUMMARY.md")
-            print(score_table(results, config["task"]))
+                for checkpoint in config["evaluation"].get("checkpoints", ["best"]):
+                    if trainer.stop_requested:  # SIGTERM arrived while the last phase was finishing
+                        raise KeyboardInterrupt("SIGTERM before evaluation")
+                    append_index(run, config, stage, "started", f"{checkpoint} checkpoint")
+                    _report(run, config, _evaluate(run, config, checkpoint, processor, model,
+                                                   data if config["task"] == "coco" else None))
         return 0
     except BaseException as exc:
         status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"

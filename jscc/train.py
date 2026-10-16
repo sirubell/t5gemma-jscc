@@ -4,7 +4,7 @@ A per-site codec is a run with one site; the shared codec is the same run with
 all sites. Each update trains one site and sites rotate round-robin, so the
 k-th update of every site uses training batch k (the same data in both arms).
 
-Phases (each stops by early stopping, or at its update cap):
+Phases (each stops by early stopping, or at its update cap; `patience: null` = no early stopping):
   reconstruction (optional): nMSE between clean and reconstructed features
   distillation: KL(teacher || student) + weighted nMSE
 The optimizer and LR schedule restart at the phase boundary.
@@ -13,6 +13,12 @@ Speed: in a shared run the sites of one batch k reuse its model inputs and
 teacher pass, and batch k + 1 is built in a background thread. The student
 starts at the split from the hidden state the teacher pass captured instead of
 recomputing the frozen prefix. None of this changes the arithmetic.
+
+Optional second selection (`selection.reference` in the phase's config): each validation also
+logs `normalized`, the mean over (site, condition) cells of the metric divided by that cell's
+reference value, and `best_<phase>_normalized.pt` is kept on every new normalized minimum.
+When training ends, last.pt holds the final weights and the model the best ones.
+
 SIGTERM (Slurm time limit) stops at the next update boundary or aborts a
 running validation, saves last.pt and raises KeyboardInterrupt;
 `train --resume` then re-runs the aborted validation.
@@ -132,6 +138,11 @@ def validate(model: SplitModel, data, sites, cfg, phase, stop=lambda: False):
     return {"per_site": per, "mean": sum(per.values()) / len(per)}
 
 
+def normalized_mean(per_site, reference):
+    """Mean over cells of metric / reference (KeyError if a cell has no reference)."""
+    return sum(v / reference[k] for k, v in per_site.items()) / len(per_site)
+
+
 # ---- checkpoints ------------------------------------------------------
 def atomic_save(obj, path: Path):
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -167,6 +178,7 @@ class Trainer:
         self.site_updates = {s: 0 for s in self.sites}
         self.best = math.inf     # lowest validation metric (the best checkpoint)
         self.reference = math.inf  # last value that beat its reference by min_delta (the patience counter)
+        self.best_normalized = math.inf  # lowest normalized validation metric (selection.reference only)
         self.bad = 0
         self.history = []
         self.generator = torch.Generator().manual_seed(config["seed"])
@@ -183,6 +195,9 @@ class Trainer:
     def _phase_cfg(self):
         return self.cfg["reconstruction"] if self.phase == "reconstruction" else self.cfg
 
+    def _selection_reference(self):
+        return (self._phase_cfg().get("selection") or {}).get("reference")
+
     def _new_optimizer(self):
         c = self._phase_cfg()
         self.optimizer = torch.optim.AdamW(self.params, lr=c["lr"], weight_decay=self.cfg["weight_decay"],
@@ -191,7 +206,7 @@ class Trainer:
         warmup = c.get("warmup_updates", 0)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda u: min(1.0, (u + 1) / warmup) if warmup else 1.0)
-        self.best, self.reference, self.bad = math.inf, math.inf, 0
+        self.best, self.reference, self.bad, self.best_normalized = math.inf, math.inf, 0, math.inf
 
     # ---- training batches ------------------------------------------------
     def _train_batch(self, k):
@@ -249,7 +264,8 @@ class Trainer:
         return {"communication": self.model.communication_state(), "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(), "phase_index": self.phase_index, "update": self.update,
                 "total_updates": self.total_updates, "site_updates": self.site_updates, "best": self.best,
-                "reference": self.reference, "bad": self.bad, "history": self.history,
+                "reference": self.reference, "best_normalized": self.best_normalized, "bad": self.bad,
+                "history": self.history,
                 "generator": self.generator.get_state(),
                 "rng": _rng_state(), "config": self.config}
 
@@ -266,20 +282,31 @@ class Trainer:
         for key in ("update", "total_updates", "site_updates", "best", "bad", "history"):
             setattr(self, key, state[key])
         self.reference = state.get("reference", self.best)
+        self.best_normalized = state.get("best_normalized", math.inf)
         self.generator.set_state(state["generator"])
         _set_rng_state(state["rng"])
         # Drop records written after this checkpoint (a hard kill); the resumed run writes them again.
         metrics = self.run / "metrics.jsonl"
+        kept = []
         if metrics.exists():
-            kept = []
             for line in metrics.read_text().splitlines():
                 record = json.loads(line)
                 total = record.get("total", 0)  # a phase_end at the checkpoint's total is logged again
                 if total < self.total_updates or (total == self.total_updates and record["type"] != "phase_end"):
-                    kept.append(line)
+                    kept.append((line, record))
             tmp = metrics.with_suffix(".tmp")
-            tmp.write_text("".join(line + "\n" for line in kept))
+            tmp.write_text("".join(line + "\n" for line, _ in kept))
             tmp.replace(metrics)
+        # A checkpoint saved at a validation (best_<phase>.pt is saved before that validation enters the
+        # history) counts it as done, and with no normalized best yet (a run started without
+        # selection.reference) it is the first normalized candidate.
+        own = [r for _, r in kept if r["type"] == "validation" and (r["phase"], r["update"]) == (self.phase, self.update)]
+        if own and (not self.history or (self.history[-1]["phase"], self.history[-1]["update"]) != (self.phase, self.update)):
+            self.history.append({k: own[-1][k] for k in ("phase", "update", "mean", "improved")})
+        ref = self._selection_reference()
+        if ref and math.isinf(self.best_normalized) and own:
+            self.best_normalized = normalized_mean(own[-1]["per_site"], ref)
+            self.save(f"best_{self.phase}_normalized.pt")
 
     def _request_stop(self, signum, frame):
         self.stop_requested = True
@@ -316,10 +343,17 @@ class Trainer:
                 entry = {"type": "validation", "phase": self.phase, "update": self.update,
                          "total": self.total_updates, "improved": improved, "new_best": new_best,
                          "bad": self.bad, **result}
+                ref = self._selection_reference()
+                if ref:
+                    entry["normalized"] = normalized_mean(result["per_site"], ref)
+                    entry["new_best_normalized"] = entry["normalized"] < self.best_normalized
+                    if entry["new_best_normalized"]:
+                        self.best_normalized = entry["normalized"]
+                        self.save(f"best_{self.phase}_normalized.pt")
                 self.history.append({k: entry[k] for k in ("phase", "update", "mean", "improved")})
                 self._log(entry)
                 self.save("last.pt")
-            if self.bad >= es["patience"]:
+            if es["patience"] is not None and self.bad >= es["patience"]:
                 return "early_stopping"
             if self.stop_requested:
                 raise self._interrupt()
@@ -344,14 +378,16 @@ class Trainer:
         stops = {}
         while self.phase_index < len(self.phases):
             stops[self.phase] = self.run_phase()
+            last = self.phase_index == len(self.phases) - 1
+            if last:  # the final weights, before the best ones are loaded below
+                self.save("last.pt")
             best = self.run / f"best_{self.phase}.pt"
             if best.exists():  # continue from the best weights of the finished phase
                 self.model.load_communication_state(
                     torch.load(best, map_location="cpu", weights_only=False)["communication"])
             self._log({"type": "phase_end", "phase": self.phase, "reason": stops[self.phase],
                        "update": self.update, "total": self.total_updates, "best": self.best})
-            if self.phase_index == len(self.phases) - 1:
-                self.save("last.pt")
+            if last:
                 return stops
             self.phase_index += 1
             self.update = 0

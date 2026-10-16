@@ -68,3 +68,21 @@ def test_sigterm_saves_and_resume_finishes(tmp_path, patched, monkeypatch):
     monkeypatch.setattr("jscc.train.Trainer.step", step)
     assert experiment.main(["train", "--resume", str(run)]) == 0
     assert json.loads((run / "summary.json").read_text())["training"]["updates"] == 8
+
+
+def test_after_training_evaluates_listed_checkpoints(tmp_path, patched, monkeypatch):
+    reference = {f"{s}|{c}": 1.0 for s in ("enc_l1", "dec_l0") for c in ("no_noise", "-6")}
+    path = write_config(tmp_path, selection={"reference": reference})
+    cfg = yaml.safe_load(path.read_text())
+    cfg["evaluation"] = {"after_training": True, "checkpoints": ["best", "best_normalized", "last"]}
+    path.write_text(yaml.safe_dump(cfg))
+    loaded = []
+
+    def fake_evaluate(model, processor, config, sites, output, data=None):
+        loaded.append(output.name)
+        return {"vanilla": {"acc_norm": 0.5}}
+    monkeypatch.setattr("jscc.evaluate.evaluate", fake_evaluate)
+    assert experiment.main(["train", str(path), "--name", "r4"]) == 0
+    assert loaded == ["best_distillation", "best_distillation_normalized", "last"]
+    summary = json.loads((tmp_path / "runs" / "r4" / "summary.json").read_text())
+    assert set(summary["evaluations"]) == set(loaded)

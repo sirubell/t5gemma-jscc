@@ -9,7 +9,7 @@ uv sync --locked --extra dev
 python experiment.py train configs/examples/shared-13-hellaswag.yaml       # one codec for all 13 sites
 python experiment.py train configs/examples/per-site-enc_l9-hellaswag.yaml # one codec for one site
 python experiment.py train --resume runs/<run>
-python experiment.py evaluate runs/<run> [--checkpoint best|last|PATH]
+python experiment.py evaluate runs/<run> [--checkpoint best|best_normalized|last|PATH]
 python scripts/results.py                                                  # recent runs and their status
 ```
 
@@ -28,9 +28,11 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.bottleneck_dim` | Transmitted width b (D = 1152; b > D is expansion) |
 | `codec.film` | Give the receiver the SNR |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
-| `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum |
+| `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates` |
+| `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |
 | `training.reconstruction.enabled` | Feature-reconstruction pretraining phase before distillation |
 | `evaluation.conditions` | `vanilla`, `no_noise`, SNR values in dB |
+| `evaluation.checkpoints` | Checkpoints evaluated after training (default `[best]`; also `best_normalized`, `last` = final weights) |
 
 ## Training rule
 
