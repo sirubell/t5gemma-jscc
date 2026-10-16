@@ -10,10 +10,12 @@ Phases (each stops by early stopping, or at its update cap):
 The optimizer and LR schedule restart at the phase boundary.
 
 Speed: in a shared run the sites of one batch k reuse its model inputs and
-teacher logits, and batch k + 1 is built in a background thread. Neither
-changes the arithmetic. SIGTERM (Slurm time limit) stops at the next update
-boundary or aborts a running validation, saves last.pt and raises
-KeyboardInterrupt; `train --resume` then re-runs the aborted validation.
+teacher pass, and batch k + 1 is built in a background thread. The student
+starts at the split from the hidden state the teacher pass captured instead of
+recomputing the frozen prefix. None of this changes the arithmetic.
+SIGTERM (Slurm time limit) stops at the next update boundary or aborts a
+running validation, saves last.pt and raises KeyboardInterrupt;
+`train --resume` then re-runs the aborted validation.
 """
 import json
 import math
@@ -43,19 +45,22 @@ def _weights(model: SplitModel, cfg, phase):
 
 
 @torch.no_grad()
-def teacher_logits(model: SplitModel, data, inputs, labels):
-    """Logits of the unsplit model (codec and channel bypassed); the same at every site."""
+def teacher_pass(model: SplitModel, data, inputs, labels, sites):
+    """Logits of the unsplit model (codec and channel bypassed; the same at every site) and the
+    hidden states the student starts from at each of ``sites``."""
     with data.autocast(model), model.transmission(bypass=True, encoder_mask=inputs["attention_mask"],
-                                                  decoder_mask=labels != -100):
-        return model(**inputs).logits
+                                                  decoder_mask=labels != -100), model.capture_prefix(sites) as prefix:
+        return model(**inputs).logits, prefix
 
 
-def site_loss(model: SplitModel, data, inputs, labels, teacher, snr, cfg, phase):
-    """Return (loss, stats) for one batch at the model's current site; ``teacher`` is None in reconstruction."""
+def site_loss(model: SplitModel, data, inputs, labels, teacher, prefix, snr, cfg, phase):
+    """Return (loss, stats) for one batch at the model's current site, starting from the teacher's ``prefix``
+    states; ``teacher`` (the logits) is None in reconstruction."""
     enc_mask, dec_mask = inputs["attention_mask"], labels != -100
     with data.autocast(model):
-        with model.transmission(snr, encoder_mask=enc_mask, decoder_mask=dec_mask):
-            student = model(**inputs).logits
+        with model.transmission(snr, encoder_mask=enc_mask, decoder_mask=dec_mask), \
+                model.from_prefix(inputs, prefix) as student_inputs:
+            student = model(**student_inputs).logits
         kl_num, kl_den = (kl_stats(student, teacher, labels, cfg.get("temperature", 1.0))
                           if phase == "distillation" else (student.new_zeros(()), labels.new_zeros(())))
         h_mask = dec_mask if model.is_decoder_site else enc_mask.bool()
@@ -90,7 +95,7 @@ def validate(model: SplitModel, data, sites, cfg, phase, stop=lambda: False):
     """Mean validation metric per site and condition on the held-out selection batches.
 
     The metric is the KL term in distillation and the hidden-state nMSE in reconstruction.
-    Teacher logits are computed once per batch and reused across sites/conditions.
+    The teacher pass (logits and prefix states) runs once per batch and is reused across sites/conditions.
     Noise uses a fixed seed so validations are comparable over time.
     Raises StopTraining when ``stop()`` becomes true (checked before every student pass).
     """
@@ -103,7 +108,8 @@ def validate(model: SplitModel, data, sites, cfg, phase, stop=lambda: False):
         torch.manual_seed(cfg["validation"].get("seed", 0))
         for batch in data.selection_batches():
             inputs, labels = data.model_inputs(batch, model)
-            teacher = teacher_logits(model, data, inputs, labels) if phase == "distillation" else None
+            logits, prefix = teacher_pass(model, data, inputs, labels, sites)
+            teacher = logits if phase == "distillation" else None
             for site in sites:
                 model.set_site(site)
                 for c in conditions:
@@ -113,7 +119,7 @@ def validate(model: SplitModel, data, sites, cfg, phase, stop=lambda: False):
                                                                   device=labels.device)
                     if snr is not None and getattr(model.channel, "snr_mode", "per_sample") == "per_batch":
                         snr = float(c)
-                    _, stats = site_loss(model, data, inputs, labels, teacher, snr, cfg, phase)
+                    _, stats = site_loss(model, data, inputs, labels, teacher, prefix, snr, cfg, phase)
                     metric = stats["kl"] if phase == "distillation" else stats["nmse_hidden"]
                     sums[(site, c)][0] += metric
                     sums[(site, c)][1] += 1
@@ -165,7 +171,7 @@ class Trainer:
         self.history = []
         self.generator = torch.Generator().manual_seed(config["seed"])
         self.stop_requested = False
-        self._batch = None     # ((phase, k), inputs, labels, teacher) of the current training batch
+        self._batch = None     # ((phase, k), inputs, labels, teacher, prefix) of the current training batch
         self._prefetch = None  # (k, future) building training batch k in the background
         self._pool = None
         self._new_optimizer()
@@ -198,12 +204,13 @@ class Trainer:
         return batch
 
     def _prepared(self, k):
-        """Model inputs and teacher logits of batch k, built once and reused by every site of a shared run."""
+        """Model inputs and teacher pass of batch k, built once and reused by every site of a shared run."""
         if self._batch is None or self._batch[0] != (self.phase, k):
             self._batch = None  # free the previous batch first
             inputs, labels = self.data.model_inputs(self._train_batch(k), self.model)
-            teacher = teacher_logits(self.model, self.data, inputs, labels) if self.phase == "distillation" else None
-            self._batch = ((self.phase, k), inputs, labels, teacher)
+            logits, prefix = teacher_pass(self.model, self.data, inputs, labels, self.sites)
+            teacher = logits if self.phase == "distillation" else None
+            self._batch = ((self.phase, k), inputs, labels, teacher, prefix)
         return self._batch[1:]
 
     # one optimizer update at one site
@@ -212,12 +219,12 @@ class Trainer:
         k = self.site_updates[site]
         self.model.set_site(site)
         self.model.train()
-        inputs, labels, teacher = self._prepared(k)
+        inputs, labels, teacher, prefix = self._prepared(k)
         per_batch = getattr(self.model.channel, "snr_mode", "per_sample") == "per_batch"
         snr = sample_snr(self.config["channel"], labels.shape[0], self.data.device,
                          self.generator, per_batch=per_batch)
         self.optimizer.zero_grad(set_to_none=True)
-        loss, stats = site_loss(self.model, self.data, inputs, labels, teacher, snr, self.cfg, self.phase)
+        loss, stats = site_loss(self.model, self.data, inputs, labels, teacher, prefix, snr, self.cfg, self.phase)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"nonfinite loss at update {self.total_updates + 1} ({site})")
         loss.backward()

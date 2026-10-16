@@ -5,8 +5,8 @@ from contextlib import nullcontext
 import pytest
 import torch
 
-from jscc.train import Trainer, teacher_logits
-from tests.helpers import text_batch, tiny_model
+from jscc.train import Trainer, teacher_pass
+from tests.helpers import image_batch, text_batch, tiny_model
 
 
 class FakeData:
@@ -78,8 +78,8 @@ class Rebuild(Trainer):
 
     def _prepared(self, k):
         inputs, labels = self.data.model_inputs(self.data.train_batch(k), self.model)
-        teacher = teacher_logits(self.model, self.data, inputs, labels) if self.phase == "distillation" else None
-        return inputs, labels, teacher
+        logits, prefix = teacher_pass(self.model, self.data, inputs, labels, self.sites)
+        return inputs, labels, logits if self.phase == "distillation" else None, prefix
 
 
 def records(run):
@@ -191,3 +191,23 @@ def test_best_checkpoint_on_every_new_minimum(tmp_path, monkeypatch):
     assert [v["improved"] for v in vals] == [True, False, False, False, False] and vals[-1]["bad"] == 4
     best = torch.load(tmp_path / "best_distillation.pt", weights_only=False)
     assert best["update"] == 20 and best["best"] == 0.97 and t.best == 0.97 and t.reference == 1.0
+
+
+class ImageData(FakeData):
+    def train_batch(self, k):
+        return image_batch(seed=100 + k % 7)
+
+    def selection_batches(self):
+        return [image_batch(seed=1), image_batch(seed=2)]
+
+
+@pytest.mark.parametrize("data", [FakeData, ImageData])
+def test_student_from_prefix_matches_full_forward(tmp_path, monkeypatch, data):
+    cfg = config(["enc_emb", "enc_l1", "enc_l2", "enc_fn", "dec_l0", "dec_l1"], recon=True, max_updates=24, patience=99)
+    new = Trainer(tiny_model(), data(), cfg, tmp_path / "new")
+    new.train()
+    monkeypatch.setattr("jscc.model.SplitModel.from_prefix", lambda self, inputs, states: nullcontext(inputs))
+    full = Trainer(tiny_model(), data(), cfg, tmp_path / "full")
+    full.train()
+    assert records(new.run) == records(full.run)
+    assert_same_state(new, full)

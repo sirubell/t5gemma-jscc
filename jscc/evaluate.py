@@ -3,7 +3,10 @@
 Conditions: ``vanilla`` (codec and channel bypassed: the unsplit model),
 ``no_noise`` (codec + power normalization, no noise), or an SNR in dB.
 HellaSwag: lm-eval five-shot ``acc_norm`` on the official validation split.
-COCO: greedy captions on the report images, PTB tokenizer + CIDEr.
+COCO: greedy captions on the report images, PTB tokenizer + CIDEr. The report images are
+preprocessed once and reused by every panel. Only the text before the first newline is scored
+(``clean_caption``), so generation stops there, except in noisy decoder-site panels: there every
+decode step draws noise, and stopping early would change the noise of the following batches.
 Each (site, condition) panel reseeds the noise with ``evaluation.noise_seed``
 (for HellaSwag through lm-eval's ``torch_random_seed``, which would otherwise reset it to 0).
 """
@@ -88,22 +91,40 @@ class CocoScorer:
         ids = data.ids["report_ids"][: config["evaluation"].get("items") or None]
         self.rows = [data.row(i) for i in ids]
         self.prompt = caption_prompt(data.demo_captions)
+        self.inputs = None  # (demo pixels, [(rows, input_ids, attention_mask, query pixels)]), built by the first panel
+
+    def _inputs(self):
+        """Processor outputs per report batch, computed once. The four demo images are the same in
+        every item, so only the query image's pixels are kept per item."""
+        if self.inputs is None:
+            size, batches, demos = self.config["evaluation"]["batch_size"], [], torch.empty(0)
+            for start in tqdm(range(0, len(self.rows), size), desc="preprocess"):
+                batch = self.rows[start:start + size]
+                inputs = self.processor(images=[self.data.demo_images + [r["image"].convert("RGB")] for r in batch],
+                                        text=[self.prompt] * len(batch), return_tensors="pt", padding=True,
+                                        truncation=False)
+                pixels = inputs["pixel_values"].unflatten(0, (len(batch), -1))
+                batches.append((batch, inputs["input_ids"], inputs["attention_mask"], pixels[:, -1].clone()))
+                demos = pixels[0, :-1].clone()  # the same in every item and batch
+            self.inputs = demos, batches
+        return self.inputs
 
     @torch.no_grad()
     def __call__(self, model, condition, output):
         e = self.config["evaluation"]
         param = next(model.base.parameters())
         refs, caps, lines = {}, {}, []
+        stop = {} if model.is_decoder_site and _snr(condition) is not None else {
+            "stop_strings": "\n", "tokenizer": self.processor.tokenizer}
         with model.transmission(_snr(condition), bypass=condition == "vanilla"):
-            for start in tqdm(range(0, len(self.rows), e["batch_size"]), desc=f"{model.site}:{condition}"):
-                batch = self.rows[start:start + e["batch_size"]]
-                inputs = self.processor(images=[self.data.demo_images + [r["image"].convert("RGB")] for r in batch],
-                                        text=[self.prompt] * len(batch), return_tensors="pt", padding=True,
-                                        truncation=False)
-                kwargs = {k: inputs[k].to(param.device, dtype=param.dtype if k == "pixel_values" else None)
-                          for k in ("input_ids", "attention_mask", "pixel_values")}
-                generated = model.generate(**kwargs, max_new_tokens=e["max_new_tokens"], do_sample=False,
-                                           num_beams=1, use_cache=True)
+            demos, batches = self._inputs()
+            for batch, input_ids, attention_mask, queries in tqdm(batches, desc=f"{model.site}:{condition}"):
+                pixels = torch.cat([demos.expand(len(batch), *demos.shape), queries[:, None]], dim=1).flatten(0, 1)
+                generated = model.generate(input_ids=input_ids.to(param.device),
+                                           attention_mask=attention_mask.to(param.device),
+                                           pixel_values=pixels.to(param.device, dtype=param.dtype),
+                                           max_new_tokens=e["max_new_tokens"], do_sample=False, num_beams=1,
+                                           use_cache=True, **stop)
                 for row, tokens in zip(batch, generated):
                     key = image_id(row)
                     caption = clean_caption(self.processor.tokenizer.decode(tokens, skip_special_tokens=True))

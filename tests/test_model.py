@@ -1,10 +1,12 @@
+from contextlib import nullcontext
 from typing import Any
 
 import pytest
 import torch
 
 from jscc.channel import normalize_power
-from tests.helpers import text_batch, tiny_model
+from jscc.model import encoder_stack
+from tests.helpers import image_batch, text_batch, tiny_model
 
 SITES = ["enc_emb", "enc_l0", "enc_l1", "enc_l2", "enc_fn", "dec_l0", "dec_l1"]
 
@@ -76,3 +78,54 @@ def test_qam_example_trains_through_the_split_model():
     (out.sum() + model.channel.aux_loss).backward()
     channel: Any = model.channel
     assert channel.mapper[0].weight.grad is not None and model.codec.encoder[0].weight.grad is not None
+
+
+PREFIX_SITES = ["enc_emb", "enc_l0", "enc_l1", "enc_l3", "enc_fn", "dec_l0", "dec_l1", "dec_l2"]
+
+
+def _student(model, inputs, masks, autocast, prefix):
+    """Logits, nMSE targets and codec gradients of one noisy student pass (full forward if ``prefix`` is None)."""
+    for p in model.codec.parameters():
+        p.grad = None
+    torch.manual_seed(123)
+    snr = torch.full((inputs["attention_mask"].shape[0], 1, 1), 3.0)
+    with autocast, model.transmission(snr, encoder_mask=masks[0], decoder_mask=masks[1]):
+        with model.from_prefix(inputs, prefix) if prefix is not None else nullcontext(inputs) as kwargs:
+            out = model(**kwargs).logits
+        loss = out.float().square().mean() + model.reconstruction.float().square().mean()
+        if model.memory_reconstruction is not None:
+            loss = loss + model.memory_reconstruction.float().square().mean()
+    loss.backward()
+    return [out.detach(), model.activation, model.memory_activation, *[p.grad.clone() for p in model.codec.parameters()]]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("images", [False, True])
+def test_student_from_teacher_prefix_is_exact(images, dtype):
+    """Guard for the frozen-prefix skip (pinned transformers internals): starting the student at the split
+    from the teacher's states gives the same logits, nMSE targets and codec gradients as the full forward."""
+    model = tiny_model(layers=4)
+    model.base.to(dtype)
+    model.train()
+    batch = image_batch() if images else text_batch(batch=3, src=7, tgt=5)
+    labels = batch["labels"]
+    inputs: dict[str, Any] = {k: v for k, v in batch.items() if k != "labels"}
+    inputs.update(decoder_input_ids=model.base.prepare_decoder_input_ids_from_labels(labels=labels), use_cache=False)
+    if images:
+        inputs["pixel_values"] = inputs["pixel_values"].to(dtype)
+    masks = (inputs["attention_mask"], labels != -100)
+    autocast = torch.autocast("cpu", dtype=dtype, enabled=dtype != torch.float32)
+    vision = []
+    model.base.get_encoder().vision_tower.register_forward_hook(lambda *a: vision.append(1))
+    with torch.no_grad(), autocast, model.transmission(bypass=True, encoder_mask=masks[0], decoder_mask=masks[1]), \
+            model.capture_prefix(PREFIX_SITES) as prefix:
+        model(**inputs)
+    assert sorted(prefix, key=str) == [-1, 0, 1, 3, "memory"]  # enc_fn starts from the last layer's output
+    for site in PREFIX_SITES:
+        model.set_site(site)
+        ref = _student(model, inputs, masks, autocast, None)
+        vision.clear()
+        new = _student(model, inputs, masks, autocast, prefix)
+        assert not vision
+        assert all(a is b is None or (a is not None and b is not None and torch.equal(a, b)) for a, b in zip(ref, new)), site
+        assert not any("forward" in vars(layer) for layer in encoder_stack(model.base).layers)

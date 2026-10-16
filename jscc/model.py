@@ -5,6 +5,10 @@ Sites: ``enc_emb`` (input of encoder layer 0, after image scatter),
 ``dec_l{k}`` (output of decoder layer k). At a decoder site the transmitter
 layers 0..k use the clean encoder memory; the receiver layers k+1.. use encoder
 memory that is itself sent once per forward through the memory codec.
+
+The frozen prefix before a site is the same in the teacher (bypass) and the
+student, so the student can start at the split from the teacher's hidden state
+(``capture_prefix`` / ``from_prefix``): same values, same codec gradients.
 """
 import re
 from contextlib import contextmanager, nullcontext
@@ -23,6 +27,10 @@ def encoder_stack(base):
 
 def decoder_stack(base):
     return base.get_decoder()
+
+
+def _passthrough(hidden, *args, **kwargs):
+    return hidden
 
 
 def parse_site(site: str):
@@ -179,6 +187,57 @@ class SplitModel(nn.Module):
             self.memory_activation = memory.detach()
             self.memory_reconstruction = self.transmit(memory, self.memory_codec, "memory", self._source_mask(memory))
         return args, {**kwargs, "encoder_hidden_states": self.memory_reconstruction}
+
+    # ---- starting at the split from the teacher's prefix ------------------
+    def _entry(self, site):
+        """The teacher state a student at ``site`` starts from: ``"memory"`` (decoder sites) or the
+        encoder layer whose output it takes (-1: the input of layer 0; ``enc_fn``: the last layer)."""
+        stack_name, where, index = parse_site(site)
+        if stack_name == "dec":
+            return "memory"
+        return {"emb": -1, "fn": len(encoder_stack(self.base).layers) - 1}[where] if index is None else index
+
+    @contextmanager
+    def capture_prefix(self, sites):
+        """Collect, during the enclosed (teacher) forward, the hidden states that ``from_prefix`` needs for ``sites``."""
+        stack, entries, states = encoder_stack(self.base), {self._entry(s) for s in sites}, {}
+
+        def keep(key):
+            return lambda module, args, output: states.__setitem__(key, output)
+        handles = [stack.layers[j].register_forward_hook(keep(j)) for j in entries if j not in ("memory", -1)]
+        if -1 in entries:
+            handles.append(stack.layers[0].register_forward_pre_hook(lambda module, args: states.__setitem__(-1, args[0])))
+        if "memory" in entries:
+            handles.append(self.base.get_encoder().register_forward_hook(
+                lambda module, args, output: states.__setitem__("memory", output.last_hidden_state)))
+        try:
+            yield states
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    @contextmanager
+    def from_prefix(self, inputs, states):
+        """Model inputs that run the current site's forward from the teacher's ``states``.
+
+        Decoder sites get the encoder memory as ``encoder_outputs``. Encoder sites get the input of the
+        first layer that must run as ``inputs_embeds``; the layers before it (and the hooked one) pass
+        their input through, so the site hook sees the teacher's output of that layer.
+        """
+        entry = self._entry(self.site)
+        inputs = {k: v for k, v in inputs.items() if k not in ("input_ids", "pixel_values")}
+        if entry == "memory":
+            from transformers.modeling_outputs import BaseModelOutput
+            yield {**inputs, "encoder_outputs": BaseModelOutput(last_hidden_state=states["memory"])}
+            return
+        skipped = encoder_stack(self.base).layers[:entry + 1]
+        for layer in skipped:
+            layer.forward = _passthrough
+        try:
+            yield {**inputs, "inputs_embeds": states[entry]}
+        finally:
+            for layer in skipped:
+                del layer.forward
 
     # ---- forwards -------------------------------------------------------
     def forward(self, **kwargs):
