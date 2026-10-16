@@ -8,11 +8,19 @@ Phases (each stops by early stopping, or at its update cap):
   reconstruction (optional): nMSE between clean and reconstructed features
   distillation: KL(teacher || student) + weighted nMSE
 The optimizer and LR schedule restart at the phase boundary.
+
+Speed: in a shared run the sites of one batch k reuse its model inputs and
+teacher logits, and batch k + 1 is built in a background thread. Neither
+changes the arithmetic. SIGTERM (Slurm time limit) stops at the next update
+boundary or aborts a running validation, saves last.pt and raises
+KeyboardInterrupt; `train --resume` then re-runs the aborted validation.
 """
 import json
 import math
 import random
+import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -34,17 +42,21 @@ def _weights(model: SplitModel, cfg, phase):
     return kl, hidden, memory
 
 
-def site_loss(model: SplitModel, data, batch, snr, cfg, phase, teacher_logits=None):
-    """Return (loss, stats) for one batch at the model's current site."""
-    inputs, labels = data.model_inputs(batch, model)
+@torch.no_grad()
+def teacher_logits(model: SplitModel, data, inputs, labels):
+    """Logits of the unsplit model (codec and channel bypassed); the same at every site."""
+    with data.autocast(model), model.transmission(bypass=True, encoder_mask=inputs["attention_mask"],
+                                                  decoder_mask=labels != -100):
+        return model(**inputs).logits
+
+
+def site_loss(model: SplitModel, data, inputs, labels, teacher, snr, cfg, phase):
+    """Return (loss, stats) for one batch at the model's current site; ``teacher`` is None in reconstruction."""
     enc_mask, dec_mask = inputs["attention_mask"], labels != -100
     with data.autocast(model):
-        if teacher_logits is None and phase == "distillation":
-            with torch.no_grad(), model.transmission(bypass=True, encoder_mask=enc_mask, decoder_mask=dec_mask):
-                teacher_logits = model(**inputs).logits
         with model.transmission(snr, encoder_mask=enc_mask, decoder_mask=dec_mask):
             student = model(**inputs).logits
-        kl_num, kl_den = (kl_stats(student, teacher_logits, labels, cfg.get("temperature", 1.0))
+        kl_num, kl_den = (kl_stats(student, teacher, labels, cfg.get("temperature", 1.0))
                           if phase == "distillation" else (student.new_zeros(()), labels.new_zeros(())))
         h_mask = dec_mask if model.is_decoder_site else enc_mask.bool()
         h_num, h_den = nmse_stats(model.reconstruction, model.activation, h_mask)
@@ -74,11 +86,13 @@ def sample_snr(cfg_channel, batch_size, device, generator=None, per_batch=False)
 
 # ---- validation -------------------------------------------------------
 @torch.no_grad()
-def validate(model: SplitModel, data, sites, cfg, phase):
+def validate(model: SplitModel, data, sites, cfg, phase, stop=lambda: False):
     """Mean validation metric per site and condition on the held-out selection batches.
 
+    The metric is the KL term in distillation and the hidden-state nMSE in reconstruction.
     Teacher logits are computed once per batch and reused across sites/conditions.
     Noise uses a fixed seed so validations are comparable over time.
+    Raises StopTraining when ``stop()`` becomes true (checked before every student pass).
     """
     was_training = model.training
     model.eval()
@@ -89,19 +103,17 @@ def validate(model: SplitModel, data, sites, cfg, phase):
         torch.manual_seed(cfg["validation"].get("seed", 0))
         for batch in data.selection_batches():
             inputs, labels = data.model_inputs(batch, model)
-            teacher = None
-            if phase == "distillation":
-                with data.autocast(model), model.transmission(bypass=True, encoder_mask=inputs["attention_mask"],
-                                                              decoder_mask=labels != -100):
-                    teacher = model(**inputs).logits
+            teacher = teacher_logits(model, data, inputs, labels) if phase == "distillation" else None
             for site in sites:
                 model.set_site(site)
                 for c in conditions:
+                    if stop():
+                        raise StopTraining("validation aborted")
                     snr = None if c == "no_noise" else torch.full((labels.shape[0], 1, 1), float(c),
                                                                   device=labels.device)
                     if snr is not None and getattr(model.channel, "snr_mode", "per_sample") == "per_batch":
                         snr = float(c)
-                    _, stats = site_loss(model, data, batch, snr, cfg, phase, teacher_logits=teacher)
+                    _, stats = site_loss(model, data, inputs, labels, teacher, snr, cfg, phase)
                     metric = stats["kl"] if phase == "distillation" else stats["nmse_hidden"]
                     sums[(site, c)][0] += metric
                     sums[(site, c)][1] += 1
@@ -147,10 +159,15 @@ class Trainer:
         self.update = 0          # updates within the current phase
         self.total_updates = 0
         self.site_updates = {s: 0 for s in self.sites}
-        self.best = math.inf
+        self.best = math.inf     # lowest validation metric (the best checkpoint)
+        self.reference = math.inf  # last value that beat its reference by min_delta (the patience counter)
         self.bad = 0
         self.history = []
         self.generator = torch.Generator().manual_seed(config["seed"])
+        self.stop_requested = False
+        self._batch = None     # ((phase, k), inputs, labels, teacher) of the current training batch
+        self._prefetch = None  # (k, future) building training batch k in the background
+        self._pool = None
         self._new_optimizer()
 
     @property
@@ -168,7 +185,26 @@ class Trainer:
         warmup = c.get("warmup_updates", 0)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda u: min(1.0, (u + 1) / warmup) if warmup else 1.0)
-        self.best, self.bad = math.inf, 0
+        self.best, self.reference, self.bad = math.inf, math.inf, 0
+
+    # ---- training batches ------------------------------------------------
+    def _train_batch(self, k):
+        """CPU batch k; batch k + 1 is then built in the background while the GPU works."""
+        pending, self._prefetch = self._prefetch, None
+        ready = pending[1].result() if pending else None  # always join: task data is not thread-safe
+        batch = ready if pending and pending[0] == k else self.data.train_batch(k)
+        if self._pool is not None:
+            self._prefetch = (k + 1, self._pool.submit(self.data.train_batch, k + 1))
+        return batch
+
+    def _prepared(self, k):
+        """Model inputs and teacher logits of batch k, built once and reused by every site of a shared run."""
+        if self._batch is None or self._batch[0] != (self.phase, k):
+            self._batch = None  # free the previous batch first
+            inputs, labels = self.data.model_inputs(self._train_batch(k), self.model)
+            teacher = teacher_logits(self.model, self.data, inputs, labels) if self.phase == "distillation" else None
+            self._batch = ((self.phase, k), inputs, labels, teacher)
+        return self._batch[1:]
 
     # one optimizer update at one site
     def step(self):
@@ -176,12 +212,12 @@ class Trainer:
         k = self.site_updates[site]
         self.model.set_site(site)
         self.model.train()
-        batch = self.data.train_batch(k)
+        inputs, labels, teacher = self._prepared(k)
         per_batch = getattr(self.model.channel, "snr_mode", "per_sample") == "per_batch"
-        snr = sample_snr(self.config["channel"], batch["labels"].shape[0], self.data.device,
+        snr = sample_snr(self.config["channel"], labels.shape[0], self.data.device,
                          self.generator, per_batch=per_batch)
         self.optimizer.zero_grad(set_to_none=True)
-        loss, stats = site_loss(self.model, self.data, batch, snr, self.cfg, self.phase)
+        loss, stats = site_loss(self.model, self.data, inputs, labels, teacher, snr, self.cfg, self.phase)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"nonfinite loss at update {self.total_updates + 1} ({site})")
         loss.backward()
@@ -206,7 +242,8 @@ class Trainer:
         return {"communication": self.model.communication_state(), "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(), "phase_index": self.phase_index, "update": self.update,
                 "total_updates": self.total_updates, "site_updates": self.site_updates, "best": self.best,
-                "bad": self.bad, "history": self.history, "generator": self.generator.get_state(),
+                "reference": self.reference, "bad": self.bad, "history": self.history,
+                "generator": self.generator.get_state(),
                 "rng": _rng_state(), "config": self.config}
 
     def save(self, name):
@@ -221,37 +258,82 @@ class Trainer:
         self.scheduler.load_state_dict(state["scheduler"])
         for key in ("update", "total_updates", "site_updates", "best", "bad", "history"):
             setattr(self, key, state[key])
+        self.reference = state.get("reference", self.best)
         self.generator.set_state(state["generator"])
         _set_rng_state(state["rng"])
+        # Drop records written after this checkpoint (a hard kill); the resumed run writes them again.
+        metrics = self.run / "metrics.jsonl"
+        if metrics.exists():
+            kept = []
+            for line in metrics.read_text().splitlines():
+                record = json.loads(line)
+                total = record.get("total", 0)  # a phase_end at the checkpoint's total is logged again
+                if total < self.total_updates or (total == self.total_updates and record["type"] != "phase_end"):
+                    kept.append(line)
+            tmp = metrics.with_suffix(".tmp")
+            tmp.write_text("".join(line + "\n" for line in kept))
+            tmp.replace(metrics)
+
+    def _request_stop(self, signum, frame):
+        self.stop_requested = True
+
+    def _interrupt(self):
+        self.save("last.pt")
+        return KeyboardInterrupt(f"SIGTERM: saved last.pt at {self.phase} update {self.update}")
 
     def run_phase(self):
         c = self._phase_cfg()
         es = c["early_stopping"]
         log_every = self.cfg.get("log_every", 50)
         while True:
+            # validation due (after a resume this repeats one aborted by SIGTERM)
+            done = bool(self.history) and (self.history[-1]["phase"], self.history[-1]["update"]) == (
+                self.phase, self.update)
+            if self.update and self.update % es["every"] == 0 and not done:
+                if self._prefetch:
+                    self._prefetch[1].result()  # task data is not thread-safe
+                try:
+                    result = validate(self.model, self.data, self.sites, self.cfg, self.phase,
+                                      stop=lambda: self.stop_requested)
+                except StopTraining:
+                    raise self._interrupt() from None
+                improved = result["mean"] < self.reference * (1 - es["min_delta"])
+                if improved:
+                    self.reference, self.bad = result["mean"], 0
+                else:
+                    self.bad += 1
+                new_best = result["mean"] < self.best
+                if new_best:  # every new minimum is kept; min_delta only drives patience
+                    self.best = result["mean"]
+                    self.save(f"best_{self.phase}.pt")
+                entry = {"type": "validation", "phase": self.phase, "update": self.update,
+                         "total": self.total_updates, "improved": improved, "new_best": new_best,
+                         "bad": self.bad, **result}
+                self.history.append({k: entry[k] for k in ("phase", "update", "mean", "improved")})
+                self._log(entry)
+                self.save("last.pt")
+            if self.bad >= es["patience"]:
+                return "early_stopping"
+            if self.stop_requested:
+                raise self._interrupt()
             if self.update >= c["max_updates"]:
                 return "max_updates"
             record = self.step()
             if self.update % log_every == 0 or self.update == 1:
                 self._log(record)
-            if self.update % es["every"] == 0:
-                result = validate(self.model, self.data, self.sites, self.cfg, self.phase)
-                improved = result["mean"] < self.best * (1 - es["min_delta"])
-                if improved:
-                    self.best, self.bad = result["mean"], 0
-                    self.save(f"best_{self.phase}.pt")
-                else:
-                    self.bad += 1
-                entry = {"type": "validation", "phase": self.phase, "update": self.update,
-                         "total": self.total_updates, "improved": improved, "bad": self.bad, **result}
-                self.history.append({k: entry[k] for k in ("phase", "update", "mean", "improved")})
-                self._log(entry)
-                self.save("last.pt")
-                if self.bad >= es["patience"]:
-                    return "early_stopping"
 
     def train(self):
         self.run.mkdir(parents=True, exist_ok=True)
+        previous = signal.signal(signal.SIGTERM, self._request_stop)
+        self._pool = ThreadPoolExecutor(1)
+        try:
+            return self._train()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            self._pool.shutdown()
+            self._pool = self._prefetch = self._batch = None
+
+    def _train(self):
         stops = {}
         while self.phase_index < len(self.phases):
             stops[self.phase] = self.run_phase()
@@ -260,7 +342,7 @@ class Trainer:
                 self.model.load_communication_state(
                     torch.load(best, map_location="cpu", weights_only=False)["communication"])
             self._log({"type": "phase_end", "phase": self.phase, "reason": stops[self.phase],
-                       "update": self.update, "best": self.best})
+                       "update": self.update, "total": self.total_updates, "best": self.best})
             if self.phase_index == len(self.phases) - 1:
                 self.save("last.pt")
                 return stops

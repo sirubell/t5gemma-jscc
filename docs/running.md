@@ -27,6 +27,6 @@ At b = 2304 with batch 16, HellaSwag training used about 25 GB on the GPU and CO
 1. Update the checkout on the server to the intended commit (`git pull`), keep it clean.
 2. Submit: `sbatch scripts/job.sh train configs/examples/<file>.yaml`, or run `python experiment.py ...` directly on a workstation (inside `tmux`).
 3. Check: `python scripts/results.py` (index and status of recent runs), then open `runs/<run>/SUMMARY.md`.
-4. A run that hit the time limit shows `interrupted`; continue with `train --resume runs/<run>`.
+4. A run that hit the time limit shows `interrupted` (`scripts/job.sh` asks Slurm for SIGTERM two minutes early; training then saves `last.pt`); continue with `train --resume runs/<run>`.
 
 Personal access details (SSH aliases, VPN, scheduler account) belong in `docs/local/environment.md`.

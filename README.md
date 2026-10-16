@@ -15,7 +15,7 @@ python scripts/results.py                                                  # rec
 
 On a Slurm cluster: `sbatch scripts/job.sh train CONFIG`. Put machine-specific settings in an untracked `.env` (for example `HF_HOME`, `JSCC_DATA` for the COCO image file, `JSCC_PYTHON`).
 
-Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation curves), `best_*.pt`, `last.pt`, `eval/<checkpoint>/results.json`, and a human-readable `SUMMARY.md`. Every start, finish, failure or time-limit interruption adds a line to `runs/INDEX.md`.
+Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation curves), `best_*.pt`, `last.pt`, `eval/<checkpoint>/results.json`, and a human-readable `SUMMARY.md`. Every start, finish, failure or time-limit interruption adds a line to `runs/INDEX.md`. On SIGTERM (the Slurm time limit) training saves `last.pt` at the next update, or aborts a running validation, which `--resume` then repeats; the resumed run continues exactly.
 
 ## Configuration
 
@@ -28,12 +28,12 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.bottleneck_dim` | Transmitted width b (D = 1152; b > D is expansion) |
 | `codec.film` | Give the receiver the SNR |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
-| `training.early_stopping` | Validate every N updates; stop after `patience` validations without `min_delta` relative improvement |
+| `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum |
 | `training.reconstruction.enabled` | Feature-reconstruction pretraining phase before distillation |
 | `evaluation.conditions` | `vanilla`, `no_noise`, SNR values in dB |
 
 ## Training rule
 
-Each update trains one site; sites rotate, so every site gets the same number of updates and the k-th update of every site uses the same batch k in per-site and shared runs. Validation runs on a held-out part of the training data (never the reported evaluation set) for every site under no noise and −6 dB. Training stops when the mean validation loss stops improving, and the best-validation checkpoint is evaluated. The LR is constant after warmup, so a plateau reflects the model rather than a decayed schedule.
+Each update trains one site; sites rotate, so every site gets the same number of updates and the k-th update of every site uses the same batch k in per-site and shared runs. Validation runs on a held-out part of the training data (never the reported evaluation set) for every site under no noise and −6 dB. The stopping metric is the mean validation KL: the teacher–student KL per target token (the nMSE terms of the training loss are not included), averaged over the selection batches and then over every site × condition cell (in the reconstruction phase, the hidden-state nMSE instead). Training stops when it has not improved by `min_delta` (relative) for `patience` validations, and the checkpoint with the lowest value is evaluated. The LR is constant after warmup, so a plateau reflects the model rather than a decayed schedule.
 
 See [design](docs/design-v2.md), [vocabulary](CONTEXT.md), [running](docs/running.md) and [channel integration](docs/channel-integration.md). Code before the 2026-10 rewrite is at tag `archive/codex-v1`.

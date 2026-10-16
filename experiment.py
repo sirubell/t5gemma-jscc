@@ -61,7 +61,9 @@ def main(argv=None):
     e.add_argument("run", type=Path)
     e.add_argument("--checkpoint", default="best")
     args = parser.parse_args(argv)
-    signal.signal(signal.SIGTERM, _interrupt)  # Slurm time limit -> summary says "interrupted"
+    # Slurm time limit -> summary says "interrupted". During training the trainer handles SIGTERM itself:
+    # it saves last.pt at the next safe point, then raises KeyboardInterrupt.
+    signal.signal(signal.SIGTERM, _interrupt)
 
     from jscc.config import load_config, save_config
     from jscc.report import append_index, source_state, write_summary
@@ -104,6 +106,8 @@ def main(argv=None):
             results = None
             if config["evaluation"].get("after_training", True):
                 stage = "evaluate"
+                if trainer.stop_requested:  # SIGTERM arrived while the last phase was finishing
+                    raise KeyboardInterrupt("SIGTERM before evaluation")
                 append_index(run, config, stage, "started", "best checkpoint")
                 results = _evaluate(run, config, "best", processor, model, data if config["task"] == "coco" else None)
         if results is not None:

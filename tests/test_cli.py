@@ -47,3 +47,24 @@ def test_failure_is_recorded(tmp_path, patched, monkeypatch):
     assert json.loads((run / "summary.json").read_text())["status"] == "failed"
     assert "nonfinite loss" in (run / "SUMMARY.md").read_text()
     assert "| r2 | train | failed |" in (tmp_path / "runs" / "INDEX.md").read_text()
+
+
+def test_sigterm_saves_and_resume_finishes(tmp_path, patched, monkeypatch):
+    import signal
+    from jscc.train import Trainer
+    step = Trainer.step
+
+    def step_then_sigterm(self):
+        record = step(self)
+        if self.total_updates == 3:
+            signal.raise_signal(signal.SIGTERM)
+        return record
+    monkeypatch.setattr("jscc.train.Trainer.step", step_then_sigterm)
+    with pytest.raises(KeyboardInterrupt):
+        experiment.main(["train", str(write_config(tmp_path)), "--name", "r3"])
+    run = tmp_path / "runs" / "r3"
+    assert json.loads((run / "summary.json").read_text())["status"] == "interrupted"
+    assert "| r3 | train | interrupted |" in (tmp_path / "runs" / "INDEX.md").read_text()
+    monkeypatch.setattr("jscc.train.Trainer.step", step)
+    assert experiment.main(["train", "--resume", str(run)]) == 0
+    assert json.loads((run / "summary.json").read_text())["training"]["updates"] == 8
