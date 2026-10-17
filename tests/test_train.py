@@ -273,3 +273,19 @@ def test_continue_early_stopped_run_to_fixed_budget(tmp_path):
     norm = torch.load(c.run / "best_distillation_normalized.pt", weights_only=False)
     vals = [r for r in records(c.run) if r["type"] == "validation" and r["update"] > best_update]
     assert norm["best_normalized"] == min([0.5] + [v["normalized"] for v in vals])
+
+
+def test_loss_normalization_scales_each_site_kl(tmp_path):
+    # site references 0.1 (enc_l1, mean of its cells) and 0.4 (dec_l0): factors 1/0.1 and 1/0.4 scaled to mean 1
+    reference = {"enc_l1|no_noise": 0.05, "enc_l1|-6": 0.15, "dec_l0|no_noise": 0.3, "dec_l0|-6": 0.5}
+    cfg = config(["enc_l1", "dec_l0"], max_updates=4, patience=99)
+    cfg["training"]["loss_normalization"] = {"reference": reference}
+    t = Trainer(tiny_model(), FakeData(), cfg, tmp_path)
+    assert t.kl_scale == pytest.approx({"enc_l1": 1.6, "dec_l0": 0.4})
+    t.train()
+    updates = [r for r in records(tmp_path) if r["type"] == "update"]
+    assert {r["site"] for r in updates} == {"enc_l1", "dec_l0"}
+    for r in updates:
+        hidden = 0.1 * r["nmse_hidden"] if r["site"] == "enc_l1" else 0.05 * (r["nmse_hidden"] + r["nmse_memory"])
+        assert r["loss"] == pytest.approx(t.kl_scale[r["site"]] * r["kl"] + hidden, rel=1e-5)
+    assert Trainer(tiny_model(), FakeData(), config(["enc_l1"]), tmp_path / "p").kl_scale == {"enc_l1": 1.0}

@@ -19,6 +19,11 @@ logs `normalized`, the mean over (site, condition) cells of the metric divided b
 reference value, and `best_<phase>_normalized.pt` is kept on every new normalized minimum.
 When training ends, last.pt holds the final weights and the model the best ones.
 
+Optional per-site loss normalization (`training.loss_normalization.reference`, the same
+"site|condition" cells): in distillation each site's KL term is divided by that site's reference
+(the mean of its cells), with the factors scaled to average 1 over the sites so the overall KL
+scale stays that of the unnormalized loss. Validation metrics stay raw.
+
 SIGTERM (Slurm time limit) stops at the next update boundary or aborts a
 running validation, saves last.pt and raises KeyboardInterrupt;
 `train --resume` then re-runs the aborted validation.
@@ -59,9 +64,9 @@ def teacher_pass(model: SplitModel, data, inputs, labels, sites):
         return model(**inputs).logits, prefix
 
 
-def site_loss(model: SplitModel, data, inputs, labels, teacher, prefix, snr, cfg, phase):
+def site_loss(model: SplitModel, data, inputs, labels, teacher, prefix, snr, cfg, phase, kl_scale=1.0):
     """Return (loss, stats) for one batch at the model's current site, starting from the teacher's ``prefix``
-    states; ``teacher`` (the logits) is None in reconstruction."""
+    states; ``teacher`` (the logits) is None in reconstruction. ``kl_scale`` multiplies the KL term."""
     enc_mask, dec_mask = inputs["attention_mask"], labels != -100
     with data.autocast(model):
         with model.transmission(snr, encoder_mask=enc_mask, decoder_mask=dec_mask), \
@@ -78,7 +83,7 @@ def site_loss(model: SplitModel, data, inputs, labels, teacher, prefix, snr, cfg
     kl = kl_num / kl_den.clamp_min(1)
     hidden = h_num / h_den.clamp_min(1)
     memory = m_num / m_den.clamp_min(1) if m_num is not None and m_den is not None else hidden.new_zeros(())
-    loss = w_kl * kl + w_h * hidden + w_m * memory
+    loss = kl_scale * w_kl * kl + w_h * hidden + w_m * memory
     aux = getattr(model.channel, "aux_loss", None)
     if aux is not None:
         loss = loss + cfg.get("channel_aux_weight", 0.0) * aux
@@ -143,6 +148,18 @@ def normalized_mean(per_site, reference):
     return sum(v / reference[k] for k, v in per_site.items()) / len(per_site)
 
 
+def kl_scales(sites, reference):
+    """Per-site KL factors proportional to 1 / (mean of the site's reference cells), averaging 1 over sites."""
+    inverse = {}
+    for s in sites:
+        cells = [v for k, v in reference.items() if k.split("|")[0] == s]
+        if not cells:
+            raise KeyError(f"loss_normalization.reference has no cell for site {s}")
+        inverse[s] = len(cells) / sum(cells)
+    mean = sum(inverse.values()) / len(inverse)
+    return {s: v / mean for s, v in inverse.items()}
+
+
 # ---- checkpoints ------------------------------------------------------
 def atomic_save(obj, path: Path):
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -168,6 +185,8 @@ class Trainer:
         self.model, self.data, self.config, self.run = model, data, config, Path(run_dir)
         self.cfg = config["training"]
         self.sites = list(self.cfg["sites"])
+        norm = (self.cfg.get("loss_normalization") or {}).get("reference")
+        self.kl_scale = kl_scales(self.sites, norm) if norm else {s: 1.0 for s in self.sites}
         self.phases = (["reconstruction"] if self.cfg.get("reconstruction", {}).get("enabled") else []) + ["distillation"]
         self.params = [p for p in model.parameters() if p.requires_grad]
         if any(p.requires_grad for p in model.base.parameters()):
@@ -239,7 +258,8 @@ class Trainer:
         snr = sample_snr(self.config["channel"], labels.shape[0], self.data.device,
                          self.generator, per_batch=per_batch)
         self.optimizer.zero_grad(set_to_none=True)
-        loss, stats = site_loss(self.model, self.data, inputs, labels, teacher, prefix, snr, self.cfg, self.phase)
+        loss, stats = site_loss(self.model, self.data, inputs, labels, teacher, prefix, snr, self.cfg, self.phase,
+                                kl_scale=self.kl_scale[site])
         if not torch.isfinite(loss):
             raise FloatingPointError(f"nonfinite loss at update {self.total_updates + 1} ({site})")
         loss.backward()

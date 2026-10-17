@@ -30,6 +30,7 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
 | `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates` |
 | `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |
+| `training.loss_normalization.reference` | Per-`site\|condition` KL references: each site's KL is divided by its mean reference (factors scaled to average 1); validation stays raw |
 | `training.reconstruction.enabled` | Feature-reconstruction pretraining phase before distillation |
 | `evaluation.conditions` | `vanilla`, `no_noise`, SNR values in dB |
 | `evaluation.checkpoints` | Checkpoints evaluated after training (default `[best]`; also `best_normalized`, `last` = final weights) |

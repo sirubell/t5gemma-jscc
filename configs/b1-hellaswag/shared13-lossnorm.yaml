@@ -1,0 +1,41 @@
+# B1 screening: B2 shared13 (linear b2304) with per-site KL normalization, at a fixed 119,600 updates.
+# Each site's KL is divided by its B2 per-site reference (mean of its no_noise and -6 validation KL at the
+# per-site run's best checkpoint; values from shared13-budget-reference.yaml), factors scaled to average 1.
+# selection.reference only logs the normalized validation mean; the raw-mean best checkpoint is evaluated.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-lossnorm}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+  loss_normalization:
+    reference: &reference
+      enc_emb|no_noise: 0.05207961308769882
+      enc_emb|-6: 0.1042923373170197
+      enc_l4|no_noise: 0.03322877932805568
+      enc_l4|-6: 0.05090858926996589
+      enc_l9|no_noise: 0.04011084092780948
+      enc_l9|-6: 0.05441168788820505
+      enc_l14|no_noise: 0.10257833125069737
+      enc_l14|-6: 0.13617181358858943
+      enc_l19|no_noise: 0.055862213019281626
+      enc_l19|-6: 0.08755580987781286
+      enc_fn|no_noise: 0.027464141021482646
+      enc_fn|-6: 0.08282672287896276
+      dec_l0|no_noise: 0.07947541167959571
+      dec_l0|-6: 0.24855230003595352
+      dec_l4|no_noise: 0.07712843455374241
+      dec_l4|-6: 0.23408264387398958
+      dec_l8|no_noise: 0.08730161748826504
+      dec_l8|-6: 0.26234323531389236
+      dec_l12|no_noise: 0.09801765345036983
+      dec_l12|-6: 0.2978529818356037
+      dec_l16|no_noise: 0.3599271681159735
+      dec_l16|-6: 0.6994875743985176
+      dec_l20|no_noise: 0.31033066660165787
+      dec_l20|-6: 0.6874754168093204
+      dec_l24|no_noise: 0.22671038005501032
+      dec_l24|-6: 0.6827523224055767
+  selection:
+    reference: *reference
+evaluation:
+  checkpoints: [best]
