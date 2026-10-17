@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage (from the repo root on the cluster):
+# Usage (from the repo root; on a workstation without Slurm, run it directly or through pueue):
 #   sbatch scripts/job.sh train configs/examples/shared-13-hellaswag.yaml
 #   sbatch scripts/job.sh evaluate runs/<run>
 #   sbatch --time=48:00:00 scripts/job.sh train --resume runs/<run>
@@ -11,7 +11,7 @@
 #SBATCH --signal=TERM@120
 #SBATCH --output=runs/slurm-%j.out
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:?submit from the repo root}"
+cd "${SLURM_SUBMIT_DIR:-.}"
 # Machine-specific settings (HF_HOME, JSCC_DATA, JSCC_PYTHON) go in an untracked .env file.
 [[ -f .env ]] && source .env
 export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
