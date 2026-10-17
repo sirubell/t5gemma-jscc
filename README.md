@@ -27,6 +27,7 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.architecture` | `linear`, `mlp` (`depth`, `hidden_dim`), `residual` |
 | `codec.bottleneck_dim` | Transmitted width b (D = 1152; b > D is expansion) |
 | `codec.film` | Give the receiver the SNR |
+| `codec.site_norm` | `none`, `fixed` (codec sees (h − mean) / std per site and dimension, output de-standardized; statistics from `codec.site_stats`) or `learned` (plus per-site scale/shift initialized to that) |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
 | `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates` |
 | `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |

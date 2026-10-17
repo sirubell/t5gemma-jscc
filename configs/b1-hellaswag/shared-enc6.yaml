@@ -1,0 +1,10 @@
+# B1 screening B3a: one linear b2304 codec shared by the 6 encoder sites; 55,200 updates = 9,200 per site
+# (as in the 119,600-update shared13 runs); validation every 1,200 updates = 200 per site, as in shared13.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared-enc6}
+training:
+  sites: [enc_emb, enc_l4, enc_l9, enc_l14, enc_l19, enc_fn]
+  max_updates: 55200
+  early_stopping: {every: 1200, patience: null}
+evaluation:
+  checkpoints: [best]

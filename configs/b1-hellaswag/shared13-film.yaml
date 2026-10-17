@@ -1,0 +1,9 @@
+# B1 screening B2: B2 shared13 (linear b2304) with the receiver SNR FiLM on.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-film}
+codec: {film: true}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

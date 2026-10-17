@@ -1,0 +1,10 @@
+# B1 screening A2: as A1, plus learned per-site per-dim scale/shift at the codec input and output,
+# initialized to the fixed standardization (identity affine around it); ~1.2 % of the linear codec.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

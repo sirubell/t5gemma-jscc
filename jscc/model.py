@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from .channel import build_channel, normalize_power, token_mask
-from .codec import Codec
+from .codec import Codec, SiteNorm
 
 
 def encoder_stack(base):
@@ -44,13 +44,15 @@ def parse_site(site: str):
 
 class SplitModel(nn.Module):
     def __init__(self, base, codec: Codec, channel: nn.Module, channel_config: dict, *,
-                 memory_codec: Codec | None = None, sdpa_flash_math: bool = False):
+                 memory_codec: Codec | None = None, sdpa_flash_math: bool = False,
+                 site_norm: SiteNorm | None = None):
         super().__init__()
         self.base = base.requires_grad_(False).eval()
         self.codec = codec
         # Receiver-memory codec: the same module (shared) unless a separate one is given.
         self.memory_codec = memory_codec if memory_codec is not None else codec
         self.channel = channel
+        self.site_norm = site_norm
         self.normalize = channel_config.get("normalize_power", True) and not getattr(channel, "normalizes_power", False)
         self.sdpa_flash_math = sdpa_flash_math
         self.site = None
@@ -142,14 +144,18 @@ class SplitModel(nn.Module):
     # ---- the communication path --------------------------------------
     def transmit(self, hidden, codec, stream, mask=None, *, token_wise=False):
         dtype = next(self.base.parameters()).dtype
+        key = (self.site or "") if stream == "hidden" else "memory"  # the site-norm stream
         with torch.autocast(device_type=hidden.device.type, dtype=dtype,
                             enabled=dtype in (torch.bfloat16, torch.float16)):
-            z = codec.encode(hidden)
+            z = codec.encode(hidden if self.site_norm is None else self.site_norm.normalize(hidden, key))
             self.uses[stream] += int(z.numel() if mask is None else mask.sum().item() * z.shape[-1])
             if self.normalize:
                 z = normalize_power(z, mask, token_wise=token_wise)
             received = self.channel(z, self.snr_db)
-            return codec.decode(received, self.snr_db).to(dtype=hidden.dtype)
+            out = codec.decode(received, self.snr_db)
+            if self.site_norm is not None:
+                out = self.site_norm.denormalize(out, key)
+            return out.to(dtype=hidden.dtype)
 
     def _roundtrip(self, hidden):
         self.activation = hidden.detach()
@@ -254,6 +260,8 @@ class SplitModel(nn.Module):
         state = {"codec": self.codec.state_dict(), "channel": self.channel.state_dict()}
         if self.memory_codec is not self.codec:
             state["memory_codec"] = self.memory_codec.state_dict()
+        if self.site_norm is not None:
+            state["site_norm"] = self.site_norm.state_dict()
         return state
 
     def load_communication_state(self, state):
@@ -261,6 +269,8 @@ class SplitModel(nn.Module):
         self.channel.load_state_dict(state.get("channel", {}))
         if self.memory_codec is not self.codec:
             self.memory_codec.load_state_dict(state["memory_codec"])
+        if self.site_norm is not None:
+            self.site_norm.load_state_dict(state["site_norm"])
 
 
 def build_model(config, *, local_files_only=False):
@@ -284,5 +294,14 @@ def wrap(base, config):
     width = int(base.config.decoder.hidden_size)
     codec = Codec(width, config["codec"])
     memory = Codec(width, config["codec"]) if config["codec"].get("memory") == "separate" else None
-    return SplitModel(base, codec, build_channel(config["channel"]), config["channel"],
-                      memory_codec=memory, sdpa_flash_math=config["model"].get("sdpa_flash_math", False))
+    mode = config["codec"].get("site_norm", "none")
+    site_norm = None
+    if mode != "none":
+        if mode not in ("fixed", "learned"):
+            raise ValueError("codec.site_norm must be none, fixed or learned")
+        sites = list(config["training"]["sites"])
+        streams = sites + (["memory"] if any(s.startswith("dec_") for s in sites) else [])
+        stats = torch.load(config["codec"]["site_stats"], map_location="cpu", weights_only=True)["stats"]
+        site_norm = SiteNorm(stats, streams, learned=mode == "learned")
+    return SplitModel(base, codec, build_channel(config["channel"]), config["channel"], memory_codec=memory,
+                      sdpa_flash_math=config["model"].get("sdpa_flash_math", False), site_norm=site_norm)

@@ -1,0 +1,11 @@
+# B1 screening A1: B2 shared13 (linear b2304) with fixed per-site standardization (ticket 10).
+# The codec input is (h - mean) / std and its output y * std + mean, per site and per dimension, from the
+# frozen-backbone statistics in hellaswag-site-stats.pt (training batches 0-127); no learned per-site part.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-fixed}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

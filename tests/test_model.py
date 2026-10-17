@@ -129,3 +129,50 @@ def test_student_from_teacher_prefix_is_exact(images, dtype):
         assert not vision
         assert all(a is b is None or (a is not None and b is not None and torch.equal(a, b)) for a, b in zip(ref, new)), site
         assert not any("forward" in vars(layer) for layer in encoder_stack(model.base).layers)
+
+
+@pytest.mark.parametrize("mode", ["fixed", "learned"])
+def test_site_norm_standardizes_each_stream(tmp_path, mode):
+    from jscc.model import wrap
+    from tests.helpers import CHANNEL, CODEC, tiny_backbone
+    g = torch.Generator().manual_seed(0)
+    stats = {s: {"mean": torch.randn(16, generator=g), "std": torch.rand(16, generator=g) + 0.5}
+             for s in ("enc_l1", "dec_l0", "memory", "enc_fn")}
+    torch.save({"stats": stats}, tmp_path / "stats.pt")
+    config = {"codec": {**CODEC, "site_norm": mode, "site_stats": str(tmp_path / "stats.pt")}, "channel": dict(CHANNEL),
+              "model": {}, "training": {"sites": ["enc_l1", "dec_l0"]}}
+    model = wrap(tiny_backbone(), config)
+    assert model.site_norm is not None and model.site_norm.streams == ["enc_l1", "dec_l0", "memory"]
+    trainable = sum(p.numel() for p in model.site_norm.parameters() if p.requires_grad)
+    assert trainable == (4 * 3 * 16 if mode == "learned" else 0)
+    seen: list[Any] = []
+    model.codec.encoder.register_forward_hook(lambda m, args, out: seen.append(("in", args[0])))
+    model.codec.output_norm.register_forward_hook(lambda m, args, out: seen.append(("out", out)))  # decoder output
+    batch = text_batch()
+    for site, streams in (("enc_l1", ["enc_l1"]), ("dec_l0", ["dec_l0", "memory"])):
+        seen.clear()
+        model.set_site(site)
+        _, rec, mem = logits(model, batch, snr_db=None)
+        inputs = [x for kind, x in seen if kind == "in"]
+        outputs = [x for kind, x in seen if kind == "out"]
+        assert len(inputs) == len(outputs) == len(streams)
+        sources = {"enc_l1": model.activation, "dec_l0": model.activation, "memory": model.memory_activation}
+        received = {"enc_l1": rec, "dec_l0": rec, "memory": mem}
+        for stream in streams:  # matched by content: the streams are coded in forward order, not list order
+            s, h, r = stats[stream], sources[stream], received[stream]
+            assert h is not None and r is not None
+            matches = [j for j, x in enumerate(inputs) if x.shape == h.shape and torch.allclose(
+                x.float(), (h.float() - s["mean"]) / s["std"], atol=1e-5)]  # identity affine at init
+            assert matches, (site, stream)
+            assert torch.allclose(r.float(), outputs[matches[0]].float() * s["std"] + s["mean"], atol=1e-4)
+    if mode == "learned":  # the per-site parameters get gradients only for the streams that were coded
+        assert rec is not None and mem is not None
+        (rec.float().sum() + mem.float().sum()).backward()
+        grad = model.site_norm.affine["b_out"].grad
+        assert grad is not None and grad[1:].abs().sum() > 0 and grad[0].abs().sum() == 0
+    state = model.communication_state()
+    assert {"mean", "std"} <= set(state["site_norm"])
+    other = wrap(tiny_backbone(), config)
+    other.load_communication_state(state)
+    assert other.site_norm is not None
+    assert all(torch.equal(a, b) for a, b in zip(other.site_norm.state_dict().values(), state["site_norm"].values()))
