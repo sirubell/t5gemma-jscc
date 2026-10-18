@@ -1,0 +1,9 @@
+# Wave 2 W4: A2 at bottleneck 512 (compression to 0.44 D).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-b512}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt, bottleneck_dim: 512}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

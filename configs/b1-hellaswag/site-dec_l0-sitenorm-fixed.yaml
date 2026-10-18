@@ -1,0 +1,5 @@
+# Wave 2 W1 (fairness control): the B2 per-site dec_l0 run with fixed per-site standardization, the per-site
+# analogue of the shared A1/A2 arms. Everything else (early stopping, linear b2304, data, evaluation) is B2's.
+base: ../b2-hellaswag/site-dec_l0.yaml
+run: {name: b1-hs-site-dec_l0-sitenorm-fixed}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats.pt}

@@ -1,0 +1,10 @@
+# Wave 2 W2: A2 (shared13, learned per-site normalization) at the matched budget of 227,600 updates
+# (the 13 B2 per-site runs combined, as in ticket 14); best and final checkpoints evaluated.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-227600}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 227600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best, last]
