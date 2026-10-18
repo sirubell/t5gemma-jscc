@@ -1,0 +1,12 @@
+# Wave 4 R1: A2 at b512 with nMSE reconstruction pretraining first (the base reconstruction block:
+# LR 2e-4, warmup 500, early stopping every 2600 / patience 3 / min_delta 0.005, cap 100,000), then
+# 119,600 distillation updates (patience null).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-b512-recon}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt, bottleneck_dim: 512}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+  reconstruction: {enabled: true}
+evaluation:
+  checkpoints: [best]

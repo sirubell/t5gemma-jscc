@@ -3,6 +3,7 @@
     python experiment.py train CONFIG.yaml [--name NAME]     # new run under run.root
     python experiment.py train --resume RUN_DIR              # continue from RUN_DIR/last.pt
     python experiment.py evaluate RUN_DIR [--checkpoint best|last|PATH]
+    python experiment.py evaluate RUN_DIR --conditions -10 0 6 --out DIR   # extra panels into DIR only
 
 ``train`` evaluates ``evaluation.checkpoints`` (default ``[best]``) afterwards when ``evaluation.after_training``
 is true. Checkpoint names: best (best_distillation.pt), best_normalized (best_distillation_normalized.pt),
@@ -29,7 +30,7 @@ def _load_model(config):
     return build_model(config, local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1")
 
 
-def _evaluate(run, config, checkpoint, processor=None, model=None, data=None):
+def _evaluate(run, config, checkpoint, processor=None, model=None, data=None, out=None):
     import torch
     from jscc.evaluate import evaluate
     from jscc.report import write_summary
@@ -44,13 +45,40 @@ def _evaluate(run, config, checkpoint, processor=None, model=None, data=None):
                       "last": "last.pt"}.get(str(checkpoint), str(checkpoint)))
     model.load_communication_state(torch.load(path, map_location="cpu", weights_only=False)["communication"])
     sites = config["evaluation"].get("sites") or config["training"]["sites"]
-    results = evaluate(model, processor, config, sites, run / "eval" / path.stem, data=data)
+    results = evaluate(model, processor, config, sites, out or run / "eval" / path.stem, data=data)
+    if out is not None:
+        return results
     old = {}
     import json
     if (run / "summary.json").exists():
         old = json.loads((run / "summary.json").read_text()).get("evaluations", {})
     write_summary(run, config, "evaluated", evaluations={**old, path.stem: results})
     return results
+
+
+def _condition(text):
+    """A condition from the command line: vanilla, no_noise, or an SNR in dB (int when integral)."""
+    if text in ("vanilla", "no_noise"):
+        return text
+    value = float(text)
+    return int(value) if value.is_integer() else value
+
+
+def _evaluate_elsewhere(args):
+    """``evaluate --out``: score a run's checkpoint into another directory; the run dir is not written."""
+    from jscc.config import load_config, save_config
+    from jscc.report import score_table, source_state
+    run, out = args.run.resolve(), args.out.resolve()
+    config = load_config(run / "config.yaml")
+    if args.conditions:
+        config["evaluation"]["conditions"] = [_condition(c) for c in args.conditions]
+    out.mkdir(parents=True, exist_ok=True)
+    save_config(config, out / "config.yaml")
+    import json
+    (out / "source.json").write_text(json.dumps({"run": str(run), "checkpoint": args.checkpoint,
+                                                 "source": source_state(REPO)}, indent=1) + "\n")
+    print(score_table(_evaluate(run, config, args.checkpoint, out=out), config["task"]))
+    return 0
 
 
 def _report(run, config, results):
@@ -69,7 +97,11 @@ def main(argv=None):
     e = sub.add_parser("evaluate")
     e.add_argument("run", type=Path)
     e.add_argument("--checkpoint", default="best")
+    e.add_argument("--conditions", nargs="+", help="replace evaluation.conditions (needs --out)")
+    e.add_argument("--out", type=Path, help="write results.json/items.npz here and leave the run dir untouched")
     args = parser.parse_args(argv)
+    if args.command == "evaluate" and args.conditions and not args.out:
+        parser.error("--conditions needs --out")
     # Slurm time limit -> summary says "interrupted". During training the trainer handles SIGTERM itself:
     # it saves last.pt at the next safe point, then raises KeyboardInterrupt.
     signal.signal(signal.SIGTERM, _interrupt)
@@ -77,6 +109,8 @@ def main(argv=None):
     from jscc.config import load_config, save_config
     from jscc.report import append_index, source_state, write_summary
 
+    if args.command == "evaluate" and args.out:
+        return _evaluate_elsewhere(args)
     if args.command == "evaluate":
         run = args.run.resolve()
         config = load_config(run / "config.yaml")

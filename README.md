@@ -10,12 +10,14 @@ python experiment.py train configs/examples/shared-13-hellaswag.yaml       # one
 python experiment.py train configs/examples/per-site-enc_l9-hellaswag.yaml # one codec for one site
 python experiment.py train --resume runs/<run>
 python experiment.py evaluate runs/<run> [--checkpoint best|best_normalized|last|PATH]
+python experiment.py evaluate runs/<run> --conditions -10 0 6 --out DIR             # extra SNR panels into DIR; the run is not written
+python -m jscc.site_stats CONFIG 128 OUT.pt                                   # per-site mean/std for codec.site_stats
 python scripts/results.py                                                  # recent runs and their status
 ```
 
-On a Slurm cluster: `sbatch scripts/job.sh train CONFIG`. Put machine-specific settings in an untracked `.env` (for example `HF_HOME`, `JSCC_DATA` for the COCO image file, `JSCC_PYTHON`).
+On a Slurm cluster: `sbatch scripts/job.sh train CONFIG`. For a batch of runs: `sbatch --array=1-N scripts/array.sh LIST`, where line i of LIST is the experiment.py arguments of task i. Put machine-specific settings in an untracked `.env` (for example `HF_HOME`, `JSCC_DATA` for the COCO image file, `JSCC_PYTHON`).
 
-Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation curves), `best_*.pt`, `last.pt`, `eval/<checkpoint>/results.json`, and a human-readable `SUMMARY.md`. Every start, finish, failure or time-limit interruption adds a line to `runs/INDEX.md`. On SIGTERM (the Slurm time limit) training saves `last.pt` at the next update, or aborts a running validation, which `--resume` then repeats; the resumed run continues exactly.
+Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation curves), `best_*.pt`, `last.pt`, `eval/<checkpoint>/results.json`, and a human-readable `SUMMARY.md`; HellaSwag evaluations also save per-item acc_norm in `eval/<checkpoint>/items.npz` for paired comparisons. Every start, finish, failure or time-limit interruption adds a line to `runs/INDEX.md`. On SIGTERM (the Slurm time limit) training saves `last.pt` at the next update, or aborts a running validation, which `--resume` then repeats; the resumed run continues exactly.
 
 ## Configuration
 
@@ -28,6 +30,7 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.bottleneck_dim` | Transmitted width b (D = 1152; b > D is expansion) |
 | `codec.film` | Give the receiver the SNR |
 | `codec.site_norm` | `none`, `fixed` (codec sees (h − mean) / std per site and dimension, output de-standardized; statistics from `codec.site_stats`) or `learned` (plus per-site scale/shift initialized to that) |
+| `codec.site_norm_sides` | `both` (default), `input` or `output`: which end applies the site norm |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
 | `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates` |
 | `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |

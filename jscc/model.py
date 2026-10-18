@@ -302,6 +302,6 @@ def wrap(base, config):
         sites = list(config["training"]["sites"])
         streams = sites + (["memory"] if any(s.startswith("dec_") for s in sites) else [])
         stats = torch.load(config["codec"]["site_stats"], map_location="cpu", weights_only=True)["stats"]
-        site_norm = SiteNorm(stats, streams, learned=mode == "learned")
+        site_norm = SiteNorm(stats, streams, learned=mode == "learned", sides=config["codec"].get("site_norm_sides", "both"))
     return SplitModel(base, codec, build_channel(config["channel"]), config["channel"], memory_codec=memory,
                       sdpa_flash_math=config["model"].get("sdpa_flash_math", False), site_norm=site_norm)

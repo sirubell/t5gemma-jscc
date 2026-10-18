@@ -9,12 +9,15 @@ preprocessed once and reused by every panel. Only the text before the first newl
 decode step draws noise, and stopping early would change the noise of the following batches.
 Each (site, condition) panel reseeds the noise with ``evaluation.noise_seed``
 (for HellaSwag through lm-eval's ``torch_random_seed``, which would otherwise reset it to 0).
+HellaSwag also saves per-item acc_norm (0/1, in document order) per panel in ``items.npz`` next to
+``results.json``, for paired comparisons; COCO's per-image CIDEr is in the captions files.
 """
 import copy
 import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -45,6 +48,7 @@ class HellaSwagScorer:
         task_config["dataset_path"] = config["data"]["name"]
         task_config.setdefault("dataset_kwargs", {})["revision"] = config["data"]["revision"]
         self.task = ConfigurableTask(config=task_config)
+        self.per_item = None  # acc_norm per document of the last panel
 
     def __call__(self, model, condition, output):
         from lm_eval.api.registry import get_model
@@ -64,6 +68,9 @@ class HellaSwagScorer:
             raise RuntimeError("lm-eval returned no results")
         out: Any = result
         m = out["results"]["hellaswag"]
+        samples = sorted(out["samples"]["hellaswag"], key=lambda r: r["doc_id"])
+        self.per_item = np.array([r["acc_norm"] for r in samples], dtype=np.int8)
+        assert len(samples) == len(self.per_item) and abs(self.per_item.mean() - m["acc_norm,none"]) < 1e-9
         return {"acc_norm": m["acc_norm,none"], "acc": m["acc,none"],
                 "items": out.get("n-samples", {}).get("hellaswag", {}).get("effective"), "channel_uses": dict(model.uses)}
 
@@ -150,9 +157,10 @@ def evaluate(model, processor, config, sites, output: Path, data=None):
               else HellaSwagScorer(config, processor))
     model.eval()
     results = {}
-    path = output / "results.json"
+    path, items_path = output / "results.json", output / "items.npz"
     if path.exists():  # resume a partially scored checkpoint
         results = json.loads(path.read_text())
+    items = dict(np.load(items_path)) if items_path.exists() else {}
     panels = [(sites[0], "vanilla")] if "vanilla" in e["conditions"] else []
     panels += [(s, str(c)) for s in sites for c in e["conditions"] if c != "vanilla"]
     for site, condition in panels:
@@ -163,5 +171,9 @@ def evaluate(model, processor, config, sites, output: Path, data=None):
         _seed(e.get("noise_seed", 0))
         results[key] = scorer(model, condition, output)
         output.mkdir(parents=True, exist_ok=True)
+        per_item = getattr(scorer, "per_item", None)
+        if per_item is not None:
+            items[key] = per_item
+            np.savez_compressed(items_path, **items)
         path.write_text(json.dumps(results, indent=1) + "\n")
     return results

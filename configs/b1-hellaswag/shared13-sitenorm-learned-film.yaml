@@ -1,0 +1,9 @@
+# Wave 3 V3: A2 with the receiver SNR FiLM on (codec.film).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-film}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt, film: true}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

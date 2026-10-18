@@ -1,0 +1,9 @@
+# Wave 3 V4: A1 (fixed per-site norm) with standardization at the codec input only.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-fixed-input}
+codec: {site_norm: fixed, site_norm_sides: input, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

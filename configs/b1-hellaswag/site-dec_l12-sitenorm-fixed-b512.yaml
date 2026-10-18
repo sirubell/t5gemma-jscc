@@ -1,0 +1,4 @@
+# Wave 4 R4: W1 (dec_l12 per-site codec, fixed site norm) at bottleneck 512; pairs with W4 b512.
+base: site-dec_l12-sitenorm-fixed.yaml
+run: {name: b1-hs-site-dec_l12-sitenorm-fixed-b512}
+codec: {bottleneck_dim: 512}
