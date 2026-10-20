@@ -1,0 +1,11 @@
+# Wave 5 COCO per-site (W1 analogue on COCO): one linear b2304 codec for enc_l4 with fixed per-site
+# standardization from COCO statistics. Validation every 200 updates of this site, the per-site cadence
+# of the shared run (every 2600 over 13 sites); evaluated without vanilla, which comes from the shared run.
+base: ../coco.yaml
+run: {name: b1-coco-site-enc_l4-sitenorm-fixed}
+codec: {site_norm: fixed, site_stats: ../../runs/coco-site-stats.pt}
+training:
+  sites: [enc_l4]
+  early_stopping: {every: 200, patience: 5, min_delta: 0.005}
+evaluation:
+  conditions: [no_noise, -6]

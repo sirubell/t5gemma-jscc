@@ -1,0 +1,4 @@
+# Wave 5 E2: A2 trained on SNR U[-10, 18] dB instead of U[-6, 18] (lower end only; R2 also cut the top).
+base: shared13-sitenorm-learned.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-snr-10to18}
+channel: {train_snr_range: [-10.0, 18.0]}
