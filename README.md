@@ -32,7 +32,7 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.site_norm` | `none`, `fixed` (codec sees (h − mean) / std per site and dimension, output de-standardized; statistics from `codec.site_stats`) or `learned` (plus per-site scale/shift initialized to that) |
 | `codec.site_norm_sides` | `both` (default), `input` or `output`: which end applies the site norm |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
-| `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates` |
+| `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates`; `stop: false` trains to `max_updates` and keeps the best at the rule's stop as `best_distillation_early_stop.pt` |
 | `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |
 | `training.loss_normalization.reference` | Per-`site\|condition` KL references: each site's KL is divided by its mean reference (factors scaled to average 1); validation stays raw |
 | `training.reconstruction.enabled` | Feature-reconstruction pretraining phase before distillation |

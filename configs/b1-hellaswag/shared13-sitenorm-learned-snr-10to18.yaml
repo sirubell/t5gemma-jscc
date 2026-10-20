@@ -2,3 +2,5 @@
 base: shared13-sitenorm-learned.yaml
 run: {name: b1-hs-shared13-sitenorm-learned-snr-10to18}
 channel: {train_snr_range: [-10.0, 18.0]}
+training:
+  early_stopping: {patience: 5, stop: false}  # fixed budget, plus the early-stopped best (owner, 2026-10-20)

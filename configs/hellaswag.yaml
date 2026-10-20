@@ -49,6 +49,7 @@ training:
     every: 2600                  # validate every N updates (200 per site with 13 sites)
     patience: 5                  # stop after N validations without improvement
     min_delta: 0.005             # relative improvement that counts
+    stop: true                   # false: train on to max_updates, keeping the best at the rule's stop (early_stop)
   validation:
     items: 256                   # selection rows used per validation
     conditions: [no_noise, -6]

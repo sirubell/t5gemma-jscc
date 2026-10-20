@@ -4,7 +4,9 @@ A per-site codec is a run with one site; the shared codec is the same run with
 all sites. Each update trains one site and sites rotate round-robin, so the
 k-th update of every site uses training batch k (the same data in both arms).
 
-Phases (each stops by early stopping, or at its update cap; `patience: null` = no early stopping):
+Phases (each stops by early stopping, or at its update cap; `patience: null` = no early stopping;
+`stop: false` = train on to the cap, but copy the best checkpoint at the rule's first stop to
+`best_<phase>_early_stop.pt`, so one run gives both the early-stopped and the fixed-budget result):
   reconstruction (optional): nMSE between clean and reconstructed features
   distillation: KL(teacher || student) + weighted nMSE
 The optimizer and LR schedule restart at the phase boundary.
@@ -374,7 +376,14 @@ class Trainer:
                 self._log(entry)
                 self.save("last.pt")
             if es["patience"] is not None and self.bad >= es["patience"]:
-                return "early_stopping"
+                if es.get("stop", True):
+                    return "early_stopping"
+                mark = self.run / f"best_{self.phase}_early_stop.pt"
+                if not mark.exists():  # the rule's first stop: keep its best checkpoint, train on
+                    atomic_save(torch.load(self.run / f"best_{self.phase}.pt", map_location="cpu",
+                                           weights_only=False), mark)
+                    self._log({"type": "early_stop_point", "phase": self.phase, "update": self.update,
+                               "total": self.total_updates, "best": self.best})
             if self.stop_requested:
                 raise self._interrupt()
             if self.update >= c["max_updates"]:

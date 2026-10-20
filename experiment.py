@@ -2,7 +2,7 @@
 
     python experiment.py train CONFIG.yaml [--name NAME]     # new run under run.root
     python experiment.py train --resume RUN_DIR              # continue from RUN_DIR/last.pt
-    python experiment.py evaluate RUN_DIR [--checkpoint best|last|PATH]
+    python experiment.py evaluate RUN_DIR [--checkpoint best|early_stop|last|PATH]
     python experiment.py evaluate RUN_DIR --conditions -10 0 6 --out DIR   # extra panels into DIR only
 
 ``train`` evaluates ``evaluation.checkpoints`` (default ``[best]``) afterwards when ``evaluation.after_training``
@@ -42,7 +42,7 @@ def _evaluate(run, config, checkpoint, processor=None, model=None, data=None, ou
     path = Path(checkpoint)
     if not path.is_absolute() and not path.exists():
         path = run / ({"best": "best_distillation.pt", "best_normalized": "best_distillation_normalized.pt",
-                      "last": "last.pt"}.get(str(checkpoint), str(checkpoint)))
+                      "early_stop": "best_distillation_early_stop.pt", "last": "last.pt"}.get(str(checkpoint), str(checkpoint)))
     model.load_communication_state(torch.load(path, map_location="cpu", weights_only=False)["communication"])
     sites = config["evaluation"].get("sites") or config["training"]["sites"]
     results = evaluate(model, processor, config, sites, out or run / "eval" / path.stem, data=data)

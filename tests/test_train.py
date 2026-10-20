@@ -289,3 +289,17 @@ def test_loss_normalization_scales_each_site_kl(tmp_path):
         hidden = 0.1 * r["nmse_hidden"] if r["site"] == "enc_l1" else 0.05 * (r["nmse_hidden"] + r["nmse_memory"])
         assert r["loss"] == pytest.approx(t.kl_scale[r["site"]] * r["kl"] + hidden, rel=1e-5)
     assert Trainer(tiny_model(), FakeData(), config(["enc_l1"]), tmp_path / "p").kl_scale == {"enc_l1": 1.0}
+
+
+def test_early_stop_point_kept_while_training_on(tmp_path, monkeypatch):
+    means = iter([1.0, 0.99, 0.98, 0.985, 0.97, 0.96])
+    monkeypatch.setattr("jscc.train.validate", lambda *a, **k: {"per_site": {}, "mean": next(means)})
+    cfg = config(["enc_l1"], max_updates=24, patience=2)
+    cfg["training"]["early_stopping"].update(min_delta=0.05, stop=False)  # the rule fires at update 12
+    t = Trainer(tiny_model(), FakeData(), cfg, tmp_path)
+    assert t.train() == {"distillation": "max_updates"}
+    marks = [r for r in records(tmp_path) if r["type"] == "early_stop_point"]
+    assert [(m["update"], m["best"]) for m in marks] == [(12, 0.98)]
+    early = torch.load(tmp_path / "best_distillation_early_stop.pt", weights_only=False)
+    best = torch.load(tmp_path / "best_distillation.pt", weights_only=False)
+    assert (early["update"], early["best"]) == (12, 0.98) and (best["update"], best["best"]) == (24, 0.96)
