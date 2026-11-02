@@ -1,0 +1,11 @@
+# Wave 3 V2: A2 with training seed 2 (codec initialization and training SNR/noise draws). The data
+# order (data.order_seed) and prompts (data.prompt_seed) stay the B2 ones.
+base: ../hellaswag.yaml
+seed: 2
+run: {name: b1-hs-shared13-sitenorm-learned-seed2}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

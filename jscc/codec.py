@@ -101,3 +101,48 @@ class Codec(nn.Module):
         for layer in list(self.decoder.children())[1:]:
             x = layer(x)
         return self.output_norm(x)
+
+
+class SiteNorm(nn.Module):
+    """Per-site normalization around the shared codec (``codec.site_norm``).
+
+    ``fixed``: the transmitter encodes (h - mean) / std and the receiver outputs y * std + mean, with
+    per-dimension mean/std measured for each stream (a site, or ``memory`` for the encoder memory sent
+    at decoder sites); both ends know the site. ``learned`` adds per-stream scale/shift parameters
+    around that, initialized to the identity: x * (1 + g_in) + b_in into the encoder and
+    (y * (1 + g_out) + b_out) * std + mean out of the decoder.
+    ``sides`` (``codec.site_norm_sides``): ``both``, ``input`` (transmitter only) or ``output`` (receiver only).
+    """
+
+    mean: torch.Tensor
+    std: torch.Tensor
+
+    def __init__(self, stats: dict, streams, learned: bool, sides: str = "both"):
+        super().__init__()
+        if sides not in ("both", "input", "output"):
+            raise ValueError("codec.site_norm_sides must be both, input or output")
+        self.streams, self.input, self.output = list(streams), sides != "output", sides != "input"
+        mean = torch.stack([stats[s]["mean"] for s in self.streams]).float()
+        self.register_buffer("mean", mean)
+        self.register_buffer("std", torch.stack([stats[s]["std"] for s in self.streams]).float())
+        self.affine = nn.ParameterDict(
+            {k: nn.Parameter(torch.zeros_like(mean)) for k in ("g_in", "b_in", "g_out", "b_out")
+             if learned and (self.input if k.endswith("_in") else self.output)})
+
+    def normalize(self, hidden: torch.Tensor, stream: str) -> torch.Tensor:
+        if not self.input:
+            return hidden
+        i = self.streams.index(stream)
+        x = (hidden.float() - self.mean[i]) / self.std[i]
+        if "g_in" in self.affine:
+            x = x * (1 + self.affine["g_in"][i]) + self.affine["b_in"][i]
+        return x
+
+    def denormalize(self, y: torch.Tensor, stream: str) -> torch.Tensor:
+        if not self.output:
+            return y
+        i = self.streams.index(stream)
+        y = y.float()
+        if "g_out" in self.affine:
+            y = y * (1 + self.affine["g_out"][i]) + self.affine["b_out"][i]
+        return y * self.std[i] + self.mean[i]

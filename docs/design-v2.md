@@ -33,11 +33,11 @@ Everything else (sha256 bindings, cache/batch identities, manifests, receipts, a
 | `jscc/channel.py` | Power normalization, AWGN, identity, plugin loader and the channel contract |
 | `jscc/model.py` | Load backbone/processor; `SplitModel` hooks for all 13 sites, route switching, decoder receiver-memory stream |
 | `jscc/losses.py` | KL distillation and nMSE reconstruction statistics |
-| `jscc/data/hellaswag.py`, `jscc/data/coco.py` | Train stream, selection (validation) batches, report set, collation |
-| `jscc/train.py` | The single trainer: site schedule, optional reconstruction phase, AdamW, LR schedule, periodic validation, early stopping, checkpoints, metrics |
-| `jscc/evaluate.py` | HellaSwag (lm-eval, five-shot `acc_norm`) and COCO (greedy captions, PTB + CIDEr) per site × condition |
+| `jscc/tasks.py` | HellaSwag and COCO data: train stream, selection (validation) batches, collation, model inputs |
+| `jscc/train.py` | The single trainer: site schedule, optional reconstruction phase, AdamW, LR schedule, periodic validation, early stopping, checkpoints, metrics, SIGTERM stop |
+| `jscc/evaluate.py` | HellaSwag (lm-eval, five-shot `acc_norm`) and COCO (greedy captions, PTB + CIDEr) per site × condition. COCO report images are preprocessed once for all panels; generation stops at the first newline (only the text before it is scored), except in noisy decoder-site panels, where it would shift later batches' noise |
 | `jscc/report.py` | `summary.json` / `SUMMARY.md` per run and the shared results index |
-| `scripts/slurm/` | Job templates: train then evaluate, each writing its summary |
+| `scripts/job.sh` | Slurm job: train (then evaluate) or evaluate, each writing its summary |
 | `scripts/results.py` | Print the results index (newest first) |
 
 ## Training engine
@@ -46,9 +46,11 @@ Everything else (sha256 bindings, cache/batch identities, manifests, receipts, a
 - Phases: optional reconstruction phase (nMSE only) of a given fraction, then task distillation (KL + weighted nMSE). Ratio 0 means distillation only.
 - Optimizer: AdamW, gradient clipping, warmup then constant LR (optionally reduce-on-plateau). No cosine-to-zero, so a plateau reflects the model, not the schedule.
 - Validation every `val_every` updates on the held-out selection split, for every site, under `no_noise` and one noisy SNR. Logged per site.
-- Early stopping: stop when the mean validation loss over sites has not improved by `min_delta` (relative) for `patience` validations, or at `max_updates`. Keep `best.pt` (best validation) and `last.pt`.
+- Validation metric: in distillation, the KL(teacher ‖ student) per valid target token of each selection batch (the training loss's nMSE terms are not included), averaged over batches for each site × condition cell, then over all cells; in reconstruction, the hidden-state nMSE.
+- Early stopping: stop when that mean has not improved by `min_delta` (relative to the last value that did) for `patience` validations, or at `max_updates`. `best_<phase>.pt` is saved at every new minimum, however small; `min_delta` only drives the patience counter. `last.pt` is saved at every validation and holds the final weights when training ends. `patience: null` disables early stopping (fixed budget of `max_updates`). `stop: false` trains on to `max_updates` but copies the best checkpoint at the rule's first stop to `best_<phase>_early_stop.pt` (`evaluate --checkpoint early_stop`), so one run gives both the early-stopped and the fixed-budget result. With `selection.reference` (per site|condition reference KL) each validation also logs the normalized mean (KL ÷ reference, averaged over cells) and `best_<phase>_normalized.pt` is kept at every new normalized minimum.
 - Metrics: one JSON line per logged update and per validation, in `metrics.jsonl`.
-- Resume: from `last.pt` (codec, channel, optimizer, scheduler, step, RNG, early-stopping state). Data order is a deterministic function of seed and step, so resuming continues the same stream.
+- Speed without changing the arithmetic: the sites of one batch k share its model inputs and teacher pass (built once, freed when k changes), and batch k + 1 is built in a background thread. The teacher pass also keeps the frozen-prefix hidden states the run's sites need (the input of encoder layer 0, the outputs of the split encoder layers and of the last one, the encoder memory); each student pass, in training and validation, starts at its split from them instead of recomputing the vision tower and the layers before the split. This is exact because the backbone is frozen, runs without dropout under the same autocast and masks, and the teacher draws no noise. `tests/test_model.py` guards it for every site kind, with images, against the full forward.
+- Resume: from `last.pt` (codec, channel, optimizer, scheduler, step, RNG, early-stopping state). Data order is a deterministic function of seed and step, so resuming continues the same stream. On SIGTERM the trainer saves `last.pt` at the next update boundary; a validation in progress is aborted (not logged) and repeated on resume. Records in `metrics.jsonl` written after the checkpoint (a hard kill) are dropped on resume, so each update and validation appears once. A run can also be resumed from a copy of its `best_<phase>.pt` renamed to `last.pt` (e.g. to continue an early-stopped run with a changed config); the validation it was saved at counts as done.
 
 ## Channel contract
 

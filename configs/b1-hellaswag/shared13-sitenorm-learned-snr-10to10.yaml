@@ -1,0 +1,10 @@
+# Wave 4 R2: A2 trained on SNR U[-10, 10] dB instead of U[-6, 18].
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-snr-10to10}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt}
+channel: {train_snr_range: [-10.0, 10.0]}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

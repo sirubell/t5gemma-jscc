@@ -34,3 +34,19 @@ def text_batch(batch=2, src=6, tgt=4, seed=1):
     labels = torch.randint(1, 28, (batch, tgt), generator=g)
     labels[1, -1] = -100
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+
+def image_batch(batch=2, images=2, text=3, tgt=4, seed=1):
+    """Batch with ``images`` images per item: [BOI, 4 image tokens, EOI] per image, then text; last item padded."""
+    g = torch.Generator().manual_seed(seed)
+    rows = [sum(([29, 31, 31, 31, 31, 30] for _ in range(images)), []) + torch.randint(1, 28, (text,), generator=g).tolist()
+            for _ in range(batch)]
+    input_ids = torch.tensor([r + [0, 0] for r in rows])
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:-1, -2:] = 0
+    input_ids[:-1, -2:] = 0
+    input_ids[-1, -2:] = torch.randint(1, 28, (2,), generator=g)
+    labels = torch.randint(1, 28, (batch, tgt), generator=g)
+    labels[-1, -1] = -100
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels,
+            "pixel_values": torch.randn(batch * images, 3, 8, 8, generator=g)}

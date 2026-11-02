@@ -1,6 +1,6 @@
 """YAML configuration: a file may name ``base: other.yaml`` and override any of its keys.
 
-Relative paths in ``base`` and in ``data.ids`` / ``data.arrow`` resolve against
+Relative paths in ``base`` and in ``data.ids`` / ``data.arrow`` / ``codec.site_stats`` resolve against
 the file that declares them, so configs work from any working directory.
 ``data.ids`` / ``data.arrow`` may use environment variables such as ``$JSCC_DATA``.
 """
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-PATH_KEYS = (("data", "ids"), ("data", "arrow"))
+PATH_KEYS = (("data", "ids"), ("data", "arrow"), ("codec", "site_stats"))
 
 
 def _merge(base, override):

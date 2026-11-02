@@ -4,11 +4,12 @@
 #   sbatch scripts/job.sh evaluate runs/<run>
 #   sbatch --time=48:00:00 scripts/job.sh train --resume runs/<run>
 # The job writes runs/<run>/SUMMARY.md and a line in runs/INDEX.md when it starts,
-# finishes, fails or hits the time limit (Slurm sends SIGTERM two minutes before).
+# finishes, fails or hits the time limit (Slurm sends SIGTERM to the batch shell, which is
+# the exec'd Python process, two minutes before; training then saves last.pt and stops).
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=24:00:00
-#SBATCH --signal=TERM@120
+#SBATCH --signal=B:TERM@120
 #SBATCH --output=runs/slurm-%j.out
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"

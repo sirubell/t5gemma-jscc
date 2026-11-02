@@ -47,3 +47,42 @@ def test_failure_is_recorded(tmp_path, patched, monkeypatch):
     assert json.loads((run / "summary.json").read_text())["status"] == "failed"
     assert "nonfinite loss" in (run / "SUMMARY.md").read_text()
     assert "| r2 | train | failed |" in (tmp_path / "runs" / "INDEX.md").read_text()
+
+
+def test_sigterm_saves_and_resume_finishes(tmp_path, patched, monkeypatch):
+    import signal
+    from jscc.train import Trainer
+    step = Trainer.step
+
+    def step_then_sigterm(self):
+        record = step(self)
+        if self.total_updates == 3:
+            signal.raise_signal(signal.SIGTERM)
+        return record
+    monkeypatch.setattr("jscc.train.Trainer.step", step_then_sigterm)
+    with pytest.raises(KeyboardInterrupt):
+        experiment.main(["train", str(write_config(tmp_path)), "--name", "r3"])
+    run = tmp_path / "runs" / "r3"
+    assert json.loads((run / "summary.json").read_text())["status"] == "interrupted"
+    assert "| r3 | train | interrupted |" in (tmp_path / "runs" / "INDEX.md").read_text()
+    monkeypatch.setattr("jscc.train.Trainer.step", step)
+    assert experiment.main(["train", "--resume", str(run)]) == 0
+    assert json.loads((run / "summary.json").read_text())["training"]["updates"] == 8
+
+
+def test_after_training_evaluates_listed_checkpoints(tmp_path, patched, monkeypatch):
+    reference = {f"{s}|{c}": 1.0 for s in ("enc_l1", "dec_l0") for c in ("no_noise", "-6")}
+    path = write_config(tmp_path, selection={"reference": reference})
+    cfg = yaml.safe_load(path.read_text())
+    cfg["evaluation"] = {"after_training": True, "checkpoints": ["best", "best_normalized", "last"]}
+    path.write_text(yaml.safe_dump(cfg))
+    loaded = []
+
+    def fake_evaluate(model, processor, config, sites, output, data=None):
+        loaded.append(output.name)
+        return {"vanilla": {"acc_norm": 0.5}}
+    monkeypatch.setattr("jscc.evaluate.evaluate", fake_evaluate)
+    assert experiment.main(["train", str(path), "--name", "r4"]) == 0
+    assert loaded == ["best_distillation", "best_distillation_normalized", "last"]
+    summary = json.loads((tmp_path / "runs" / "r4" / "summary.json").read_text())
+    assert set(summary["evaluations"]) == set(loaded)

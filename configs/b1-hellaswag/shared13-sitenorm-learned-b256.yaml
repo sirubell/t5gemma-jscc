@@ -1,0 +1,9 @@
+# Wave 4 R3: A2 at bottleneck 256.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-b256}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt, bottleneck_dim: 256}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

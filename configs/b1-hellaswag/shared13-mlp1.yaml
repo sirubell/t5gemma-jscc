@@ -1,0 +1,9 @@
+# B1 screening B1: B2 shared13 with a deeper codec: mlp, one hidden layer of width 1152 per side, b2304.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-mlp1}
+codec: {architecture: mlp, depth: 1, hidden_dim: 1152}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

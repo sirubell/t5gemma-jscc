@@ -1,0 +1,4 @@
+# Wave 5 E4: W1 per-site enc_emb trained on SNR U[-10, 18] dB instead of U[-6, 18] (fair control for E2).
+base: site-enc_emb-sitenorm-fixed.yaml
+run: {name: b1-hs-site-enc_emb-sitenorm-fixed-snr-10to18}
+channel: {train_snr_range: [-10.0, 18.0]}

@@ -1,0 +1,9 @@
+# Wave 2 W3: A2 with the deeper codec of B1 (mlp, one hidden layer of width 1152 per side).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-learned-mlp1}
+codec: {site_norm: learned, site_stats: ../data/hellaswag-site-stats.pt, architecture: mlp, depth: 1, hidden_dim: 1152}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

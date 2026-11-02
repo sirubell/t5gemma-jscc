@@ -1,0 +1,6 @@
+# Wave 3 V5: COCO shared13 with learned per-site normalization (A2), otherwise the COCO shared13 run 20661
+# (configs/coco.yaml: fixed demos, early stopping every 2600 / patience 5, best evaluated). The statistics come
+# from COCO training batches (python -m jscc.site_stats configs/coco.yaml 128 runs/coco-site-stats.pt).
+base: ../coco.yaml
+run: {name: b1-coco-shared13-sitenorm-learned}
+codec: {site_norm: learned, site_stats: ../../runs/coco-site-stats.pt}
