@@ -35,6 +35,16 @@ At b = 2304 with batch 16, HellaSwag training used about 25 GB on the GPU and CO
 
 Running it again with the same run and checkpoint resumes: panels already in `DIR/results.json` are kept and only the missing ones are scored. A different run or checkpoint name is refused with an error, because `source.json` records the pair, so give each checkpoint its own directory (a failed attempt, such as `early_stop` when the rule never fired, also leaves its `source.json`). Only the names are compared: if the file behind a name changed, for example `last` after more training, use a new directory.
 
+## Moving a run or checkout
+
+`runs/<run>/config.yaml` stores absolute paths: `run.root`, `data.ids`, `data.arrow` (COCO) and `codec.site_stats`. After a move, `evaluate` and `train --resume` raise `FileNotFoundError` for whichever one is gone first, although the checkpoint itself holds the site-norm mean and std. Edit the paths in the run's `config.yaml` to the new locations:
+
+```bash
+sed -i 's|/old/checkout|/new/checkout|g' runs/<run>/config.yaml
+```
+
+Scores are unaffected, because the checkpoint's mean and std replace the file's values when it is loaded.
+
 ## Job queue on lab workstations (pueue)
 
 The lab workstations without Slurm (5090B, Spark) queue jobs with [pueue](https://github.com/Nukesor/pueue): a user-level daemon whose queue survives restarts. Install the static `pueue` and `pueued` release binaries for the machine's architecture into `~/.local/bin` (no sudo), and start the daemon at boot with a user crontab line:

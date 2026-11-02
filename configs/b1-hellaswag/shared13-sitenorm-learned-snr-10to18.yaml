@@ -1,6 +1,8 @@
 # Wave 5 E2: A2 trained on SNR U[-10, 18] dB instead of U[-6, 18] (lower end only; R2 also cut the top).
+# Fixed budget (owner, 2026-10-20). If the rule fires, the early-stopped checkpoint is saved but not evaluated by
+# the run (evaluation.checkpoints stays [best]); evaluate it manually: evaluate RUN --checkpoint early_stop.
 base: shared13-sitenorm-learned.yaml
 run: {name: b1-hs-shared13-sitenorm-learned-snr-10to18}
 channel: {train_snr_range: [-10.0, 18.0]}
 training:
-  early_stopping: {patience: 5, stop: false}  # fixed budget, plus the early-stopped best (owner, 2026-10-20)
+  early_stopping: {patience: 5, stop: false}

@@ -29,15 +29,17 @@ Everything else (sha256 bindings, cache/batch identities, manifests, receipts, a
 |---|---|
 | `experiment.py` | CLI: `python experiment.py {train,evaluate} CONFIG.yaml [--resume RUN_DIR]` |
 | `jscc/config.py` | Load task YAML, merge its `model_config` design file, fill defaults, save resolved config |
-| `jscc/codec.py` | Codec designs: `linear`, `mlp` (depth, hidden width, activation), `residual`; optional boundary norm and SNR-FiLM |
+| `jscc/codec.py` | Codec designs: `linear`, `mlp` (depth, hidden width, activation), `residual`; optional boundary norm and SNR-FiLM; `SiteNorm`, the per-site split normalization |
 | `jscc/channel.py` | Power normalization, AWGN, identity, plugin loader and the channel contract |
 | `jscc/model.py` | Load backbone/processor; `SplitModel` hooks for all 13 sites, route switching, decoder receiver-memory stream |
 | `jscc/losses.py` | KL distillation and nMSE reconstruction statistics |
 | `jscc/tasks.py` | HellaSwag and COCO data: train stream, selection (validation) batches, collation, model inputs |
 | `jscc/train.py` | The single trainer: site schedule, optional reconstruction phase, AdamW, LR schedule, periodic validation, early stopping, checkpoints, metrics, SIGTERM stop |
 | `jscc/evaluate.py` | HellaSwag (lm-eval, five-shot `acc_norm`) and COCO (greedy captions, PTB + CIDEr) per site × condition. COCO report images are preprocessed once for all panels; generation stops at the first newline (only the text before it is scored), except in noisy decoder-site panels, where it would shift later batches' noise |
+| `jscc/site_stats.py` | Measure the per-site mean/std that `codec.site_stats` reads |
 | `jscc/report.py` | `summary.json` / `SUMMARY.md` per run and the shared results index |
 | `scripts/job.sh` | Slurm job: train (then evaluate) or evaluate, each writing its summary |
+| `scripts/array.sh` | Slurm array over a list file: task i runs line i through `scripts/job.sh`, as `sbatch --array=1-N scripts/array.sh LIST`. Each line is word-split and globbed at run time, so `runs/name-*` finds a run an earlier job created |
 | `scripts/results.py` | Print the results index (newest first) |
 
 ## Training engine
@@ -48,9 +50,22 @@ Everything else (sha256 bindings, cache/batch identities, manifests, receipts, a
 - Validation every `val_every` updates on the held-out selection split, for every site, under `no_noise` and one noisy SNR. Logged per site.
 - Validation metric: in distillation, the KL(teacher ‖ student) per valid target token of each selection batch (the training loss's nMSE terms are not included), averaged over batches for each site × condition cell, then over all cells; in reconstruction, the hidden-state nMSE.
 - Early stopping: stop when that mean has not improved by `min_delta` (relative to the last value that did) for `patience` validations, or at `max_updates`. `best_<phase>.pt` is saved at every new minimum, however small; `min_delta` only drives the patience counter. `last.pt` is saved at every validation and holds the final weights when training ends. `patience: null` disables early stopping (fixed budget of `max_updates`). `stop: false` trains on to `max_updates` but copies the best checkpoint at the rule's first stop to `best_<phase>_early_stop.pt` (`evaluate --checkpoint early_stop`), so one run gives both the early-stopped and the fixed-budget result. With `selection.reference` (per site|condition reference KL) each validation also logs the normalized mean (KL ÷ reference, averaged over cells) and `best_<phase>_normalized.pt` is kept at every new normalized minimum.
+- Loss normalization: with `training.loss_normalization.reference` (per `site|condition` KL values), each site's KL term in distillation is divided by the mean of that site's reference cells, with the factors scaled to average 1 over the sites so the overall KL scale is unchanged. Every site in `sites` needs a cell. Validation stays raw, so it does not change the stopping metric.
 - Metrics: one JSON line per logged update and per validation, in `metrics.jsonl`.
 - Speed without changing the arithmetic: the sites of one batch k share its model inputs and teacher pass (built once, freed when k changes), and batch k + 1 is built in a background thread. The teacher pass also keeps the frozen-prefix hidden states the run's sites need (the input of encoder layer 0, the outputs of the split encoder layers and of the last one, the encoder memory); each student pass, in training and validation, starts at its split from them instead of recomputing the vision tower and the layers before the split. This is exact because the backbone is frozen, runs without dropout under the same autocast and masks, and the teacher draws no noise. `tests/test_model.py` guards it for every site kind, with images, against the full forward.
 - Resume: from `last.pt` (codec, channel, optimizer, scheduler, step, RNG, early-stopping state). Data order is a deterministic function of seed and step, so resuming continues the same stream. On SIGTERM the trainer saves `last.pt` at the next update boundary; a validation in progress is aborted (not logged) and repeated on resume. Records in `metrics.jsonl` written after the checkpoint (a hard kill) are dropped on resume, so each update and validation appears once. A run can also be resumed from a copy of its `best_<phase>.pt` renamed to `last.pt` (e.g. to continue an early-stopped run with a changed config); the validation it was saved at counts as done.
+
+## Split normalization
+
+`codec.site_norm` wraps the codec in per-site normalization. Each stream (a site, or `memory`, the encoder memory sent at decoder sites) has its own per-dimension mean and std; both ends know the site.
+
+- `none` (default): the codec sees the raw hidden state.
+- `fixed`: the transmitter encodes (h − mean) / std and the receiver outputs y · std + mean.
+- `learned`: as `fixed`, plus per-stream scale and shift parameters trained with the codec and initialized to the identity: x · (1 + g_in) + b_in into the encoder, (y · (1 + g_out) + b_out) · std + mean out of the decoder.
+
+`codec.site_norm_sides` selects which end applies it: `both` (default), `input` (transmitter only) or `output` (receiver only).
+
+`codec.site_stats` names the statistics file, relative to the YAML that declares it. Generate one with `python -m jscc.site_stats CONFIG N_BATCHES OUT.pt`: it runs the frozen backbone over training batches 0..N-1 with the site norm off and measures valid tokens at the config's `training.sites` and `memory`. The tracked `configs/data/hellaswag-site-stats.pt` and `configs/data/coco-site-stats.pt` use 128 batches of 16. A run with `site_norm` other than `none` fails if the file is missing. The mean and std are also saved in checkpoints, which replace the file's values when loaded, but the file is still read when the model is built (see [running](running.md#moving-a-run-or-checkout)).
 
 ## Channel contract
 

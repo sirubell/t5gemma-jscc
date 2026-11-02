@@ -9,7 +9,7 @@ uv sync --locked --extra dev
 python experiment.py train configs/examples/shared-13-hellaswag.yaml       # one codec for all 13 sites
 python experiment.py train configs/examples/per-site-enc_l9-hellaswag.yaml # one codec for one site
 python experiment.py train --resume runs/<run>
-python experiment.py evaluate runs/<run> [--checkpoint best|best_normalized|last|PATH]
+python experiment.py evaluate runs/<run> [--checkpoint best|best_normalized|early_stop|last|PATH]
 python experiment.py evaluate runs/<run> --conditions -10 0 6 --out DIR             # extra SNR panels into DIR; the run is not written
 python -m jscc.site_stats CONFIG 128 OUT.pt                                   # per-site mean/std for codec.site_stats
 python scripts/results.py                                                  # recent runs and their status
@@ -37,7 +37,7 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `training.loss_normalization.reference` | Per-`site\|condition` KL references: each site's KL is divided by its mean reference (factors scaled to average 1); validation stays raw |
 | `training.reconstruction.enabled` | Feature-reconstruction pretraining phase before distillation |
 | `evaluation.conditions` | `vanilla`, `no_noise`, SNR values in dB |
-| `evaluation.checkpoints` | Checkpoints evaluated after training (default `[best]`; also `best_normalized`, `last` = final weights) |
+| `evaluation.checkpoints` | Checkpoints evaluated after training (default `[best]`; also `best_normalized`, `last` = final weights). `early_stop` exists only if the rule fired in a `stop: false` run, and listing it here fails after training if it did not, so evaluate it by hand: `evaluate RUN --checkpoint early_stop` |
 
 ## Training rule
 
