@@ -3,7 +3,7 @@
 # of the shared run (every 2600 over 13 sites); evaluated without vanilla, which comes from the shared run.
 base: ../coco.yaml
 run: {name: b1-coco-site-dec_l0-sitenorm-fixed}
-codec: {site_norm: fixed, site_stats: ../../runs/coco-site-stats.pt}
+codec: {site_norm: fixed, site_stats: ../data/coco-site-stats.pt}
 training:
   sites: [dec_l0]
   early_stopping: {every: 200, patience: 5, min_delta: 0.005}
