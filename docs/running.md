@@ -5,7 +5,7 @@ The code needs a CUDA GPU with a CUDA-enabled PyTorch build (the lock file pins 
 ## Setup
 
 ```bash
-uv sync --locked            # add --extra dev for tests and linters
+uv sync --locked            # add --extra dev for tests and linters; uses the Python pinned in .python-version
 ```
 
 Create an untracked `.env` in the repo root for machine-specific settings; `scripts/job.sh` sources it:
