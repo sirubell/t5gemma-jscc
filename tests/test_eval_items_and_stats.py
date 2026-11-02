@@ -1,5 +1,6 @@
 """Per-item evaluation records, evaluate --out, site_norm_sides and the site-statistics collector."""
 import json
+import shutil
 
 import numpy as np
 import pytest
@@ -65,6 +66,28 @@ def test_evaluate_out_leaves_the_run_untouched(tmp_path, patched, monkeypatch): 
     assert (tmp_path / "runs" / "INDEX.md").read_text() == index and not (run / "eval").exists()
     with pytest.raises(SystemExit):
         experiment.main(["evaluate", str(run), "--conditions", "-10"])  # --conditions needs --out
+
+
+def test_evaluate_out_refuses_scores_of_another_checkpoint(tmp_path, patched, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(evaluate, "HellaSwagScorer", FakeScorer)
+    assert experiment.main(["train", str(write_config(tmp_path)), "--name", "r"]) == 0
+    run = tmp_path / "runs" / "r"
+    shutil.copy(run / "best_distillation.pt", run / "best_distillation_early_stop.pt")
+    out = tmp_path / "v1"
+    best = ["evaluate", str(run), "--checkpoint", "best", "--out", str(out)]
+    FakeScorer.calls = []
+    assert experiment.main([*best, "--conditions", "no_noise"]) == 0
+    assert FakeScorer.calls == [("enc_l1", "no_noise"), ("dec_l0", "no_noise")]
+    scores, source = (out / "results.json").read_text(), (out / "source.json").read_text()
+    with pytest.raises(SystemExit, match="best"):
+        experiment.main(["evaluate", str(run), "--checkpoint", "early_stop", "--out", str(out), "--conditions", "no_noise"])
+    shutil.copytree(run, tmp_path / "runs" / "other")
+    with pytest.raises(SystemExit, match="best"):
+        experiment.main(["evaluate", str(tmp_path / "runs" / "other"), "--checkpoint", "best", "--out", str(out)])
+    assert (out / "results.json").read_text() == scores and (out / "source.json").read_text() == source
+    FakeScorer.calls = []  # the same checkpoint resumes: only the new panels run
+    assert experiment.main([*best, "--conditions", "no_noise", "-6"]) == 0
+    assert FakeScorer.calls == [("enc_l1", "-6"), ("dec_l0", "-6")]
 
 
 @pytest.mark.parametrize("sides", ["input", "output"])

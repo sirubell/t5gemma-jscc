@@ -7,7 +7,9 @@
 
 ``train`` evaluates ``evaluation.checkpoints`` (default ``[best]``) afterwards when ``evaluation.after_training``
 is true. Checkpoint names: best (best_distillation.pt), best_normalized (best_distillation_normalized.pt),
-last (last.pt, the final weights), or a path.
+early_stop (best_distillation_early_stop.pt, only exists if a ``stop: false`` run's rule fired), last (last.pt,
+the final weights), or a path. ``--out DIR`` resumes in a directory holding the same run and checkpoint and
+refuses any other.
 Every stage writes RUN_DIR/summary.json + SUMMARY.md and one line in <run.root>/INDEX.md.
 """
 import argparse
@@ -68,13 +70,18 @@ def _evaluate_elsewhere(args):
     """``evaluate --out``: score a run's checkpoint into another directory; the run dir is not written."""
     from jscc.config import load_config, save_config
     from jscc.report import score_table, source_state
+    import json
     run, out = args.run.resolve(), args.out.resolve()
+    if (out / "source.json").exists():  # DIR resumes one checkpoint's panels; another's scores must not be reused
+        old = json.loads((out / "source.json").read_text())
+        if (old["run"], old["checkpoint"]) != (str(run), args.checkpoint):
+            raise SystemExit(f"{out} holds scores of {old['run']} --checkpoint {old['checkpoint']}, "
+                             f"not {run} --checkpoint {args.checkpoint}; use another --out directory")
     config = load_config(run / "config.yaml")
     if args.conditions:
         config["evaluation"]["conditions"] = [_condition(c) for c in args.conditions]
     out.mkdir(parents=True, exist_ok=True)
     save_config(config, out / "config.yaml")
-    import json
     (out / "source.json").write_text(json.dumps({"run": str(run), "checkpoint": args.checkpoint,
                                                  "source": source_state(REPO)}, indent=1) + "\n")
     print(score_table(_evaluate(run, config, args.checkpoint, out=out), config["task"]))

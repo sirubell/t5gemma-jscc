@@ -29,6 +29,12 @@ At b = 2304 with batch 16, HellaSwag training used about 25 GB on the GPU and CO
 3. Check: `python scripts/results.py` (index and status of recent runs), then open `runs/<run>/SUMMARY.md`.
 4. A run that hit the time limit shows `interrupted` (`scripts/job.sh` asks Slurm for SIGTERM two minutes early; training then saves `last.pt`); continue with `train --resume runs/<run>`.
 
+## Extra panels into another directory
+
+`python experiment.py evaluate runs/<run> --checkpoint best --conditions -10 0 6 --out DIR` scores a checkpoint into `DIR` (`config.yaml`, `source.json`, `results.json`, plus `items.npz` for HellaSwag or the captions files for COCO); the run directory and `runs/INDEX.md` are not written. `--checkpoint` defaults to `best`.
+
+Running it again with the same run and checkpoint resumes: panels already in `DIR/results.json` are kept and only the missing ones are scored. A different run or checkpoint name is refused with an error, because `source.json` records the pair, so give each checkpoint its own directory (a failed attempt, such as `early_stop` when the rule never fired, also leaves its `source.json`). Only the names are compared: if the file behind a name changed, for example `last` after more training, use a new directory.
+
 ## Job queue on lab workstations (pueue)
 
 The lab workstations without Slurm (5090B, Spark) queue jobs with [pueue](https://github.com/Nukesor/pueue): a user-level daemon whose queue survives restarts. Install the static `pueue` and `pueued` release binaries for the machine's architecture into `~/.local/bin` (no sudo), and start the daemon at boot with a user crontab line:
