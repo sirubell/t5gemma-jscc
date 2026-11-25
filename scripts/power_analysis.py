@@ -195,6 +195,8 @@ def weights(config, state):
 
 def best_validation(run: Path):
     best = None
+    if not (run / "metrics.jsonl").exists():  # some moved runs kept only checkpoints and results
+        return None
     for line in (run / "metrics.jsonl").read_text().splitlines():
         r = json.loads(line)
         if r.get("type") == "validation" and r.get("phase") == "distillation" and (best is None or r["mean"] < best["mean"]):
