@@ -3,7 +3,8 @@
     python scripts/power_analysis.py OUT.json RUN_DIR [RUN_DIR ...]
 
 Forward passes only (no training, ``jscc/`` unchanged). Each run is loaded as ``experiment.py evaluate`` does
-(its ``config.yaml`` and ``best_distillation.pt``) and scored on the validation selection batches (the 256
+(its ``config.yaml`` and ``best_distillation.pt``; a missing ``data.ids`` or ``codec.site_stats`` path, as in runs moved
+from another machine, is taken from this checkout's ``configs/data/``) and scored on the validation selection batches (the 256
 held-out rows, the trainer's masks) at every site it was trained on, under no noise and -6 dB, twice:
 ``normal`` and ``const_scale`` (the per-sample / per-token sqrt(P) replaced by the per-site, per-stream
 constant sqrt(mean P) of the normal no-noise pass). Hooks: forward hook on ``codec.encoder`` (z before power
@@ -71,6 +72,11 @@ def _valid(t, mask):
 def analyse(run: Path, device: str):
     config = load_config(run / "config.yaml")
     config["model"]["device"] = device
+    for section, key in (("data", "ids"), ("codec", "site_stats")):  # runs moved from another machine
+        path = config.get(section, {}).get(key)
+        if path and not Path(path).exists():
+            config[section][key] = str(REPO / "configs/data" / Path(path).name)
+            print(f"{run.name}: {section}.{key} {path} missing, using {config[section][key]}", flush=True)
     processor, model = jm.build_model(config, local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1")
     state = torch.load(run / "best_distillation.pt", map_location="cpu", weights_only=False)["communication"]
     model.load_communication_state(state)
