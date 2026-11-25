@@ -1,0 +1,11 @@
+# Power vs split norm, arm 1: A1 (shared13-sitenorm-fixed.yaml) with a scalar-only site norm: mean 0 and one std per
+# site, r_s = RMS of h (hellaswag-site-stats-scalar.pt). Restores the per-site scale only.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-scalar}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats-scalar.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]
+  conditions: [no_noise, -6]

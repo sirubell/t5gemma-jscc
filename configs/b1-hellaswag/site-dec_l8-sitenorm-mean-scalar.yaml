@@ -1,0 +1,5 @@
+# Power vs split norm, arm 5b: mean + scalar site norm (std rc_s): W1 (site-dec_l8-sitenorm-fixed.yaml) with
+# hellaswag-site-stats-mean-scalar.pt; early stopping and evaluation as W1 (B2 per-site).
+base: ../b2-hellaswag/site-dec_l8.yaml
+run: {name: b1-hs-site-dec_l8-sitenorm-mean-scalar}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats-mean-scalar.pt}

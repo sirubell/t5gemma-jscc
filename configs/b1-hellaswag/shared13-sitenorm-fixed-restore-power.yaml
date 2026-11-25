@@ -9,3 +9,4 @@ training:
   early_stopping: {patience: null}
 evaluation:
   checkpoints: [best]
+  conditions: [no_noise, -6]

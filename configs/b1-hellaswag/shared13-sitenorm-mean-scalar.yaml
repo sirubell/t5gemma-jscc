@@ -1,0 +1,11 @@
+# Power vs split norm, arm 2: A1 with per-dimension mean but one std per site, rc_s = RMS of h - mean
+# (hellaswag-site-stats-mean-scalar.pt).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-mean-scalar}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats-mean-scalar.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]
+  conditions: [no_noise, -6]

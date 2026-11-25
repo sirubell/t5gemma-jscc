@@ -1,0 +1,12 @@
+# Power vs split norm, arm 6: A1 with channel.normalize_power: false. Demonstration only: transmit power is
+# unconstrained, so the -6 dB panel is not a valid SNR result.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-fixed-no-power-norm}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats.pt}
+channel: {normalize_power: false}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]
+  conditions: [no_noise, -6]

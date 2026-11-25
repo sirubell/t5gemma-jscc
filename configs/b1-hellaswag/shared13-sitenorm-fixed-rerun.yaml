@@ -1,0 +1,11 @@
+# Power vs split norm, arm R: rerun of A1 (shared13-sitenorm-fixed.yaml) on this commit; control for the new code
+# and the cluster. Only the vanilla panel is skipped.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-fixed-rerun}
+codec: {site_norm: fixed, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]
+  conditions: [no_noise, -6]
