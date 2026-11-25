@@ -1,0 +1,11 @@
+# Power vs split norm (a): B2 shared13 (linear b2304, no site norm; configs/b2-hellaswag/shared13.yaml) with
+# channel.restore_power: the receiver multiplies the channel output by the transmit power scale (ideal side info).
+# Screening budget of the B1 arms: fixed 119,600 updates (where the B2 run's stopping rule ended it), best checkpoint.
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-restore-power}
+channel: {restore_power: true}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]

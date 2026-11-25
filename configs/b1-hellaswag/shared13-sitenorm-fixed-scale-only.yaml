@@ -1,0 +1,10 @@
+# Power vs split norm (c): A1 (shared13-sitenorm-fixed.yaml) with the site norm's mean dropped:
+# the codec sees h / std and outputs y * std, per site and dimension (codec.site_norm_center: false).
+base: ../hellaswag.yaml
+run: {name: b1-hs-shared13-sitenorm-fixed-scale-only}
+codec: {site_norm: fixed, site_norm_center: false, site_stats: ../data/hellaswag-site-stats.pt}
+training:
+  max_updates: 119600
+  early_stopping: {patience: null}
+evaluation:
+  checkpoints: [best]
