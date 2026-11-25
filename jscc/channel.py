@@ -32,23 +32,30 @@ def token_mask(mask: torch.Tensor | None, z: torch.Tensor) -> torch.Tensor | Non
     raise ValueError(f"unsupported mask shape {tuple(mask.shape)}")
 
 
-def normalize_power(z: torch.Tensor, mask: torch.Tensor | None = None, *, token_wise: bool = False):
-    """Unit average power per sample (over valid tokens), or per token if ``token_wise``.
+def power_scale(z: torch.Tensor, mask: torch.Tensor | None = None, *, token_wise: bool = False):
+    """``(z, scale)`` with ``z / scale`` at unit average power per sample (over valid tokens), or per
+    token if ``token_wise``; ``scale`` broadcasts against ``z``.
 
-    BF16/FP16 inputs are promoted to FP32.
+    BF16/FP16 inputs are promoted to FP32; samples without valid tokens are zeroed.
     """
     if z.dtype in (torch.bfloat16, torch.float16):
         z = z.float()
     if token_wise:
-        return z / torch.sqrt(z.pow(2).mean(dim=-1, keepdim=True) + 1e-8)
-    if mask is None:
+        power = z.pow(2).mean(dim=-1, keepdim=True)
+    elif mask is None:
         power = z.pow(2).mean(dim=tuple(range(1, z.ndim)), keepdim=True)
     else:
         m = mask.to(z.dtype).unsqueeze(-1)
         count = mask.sum(dim=1, dtype=torch.int64).reshape(-1, 1, 1) * z.shape[-1]
         power = (z.pow(2) * m).sum(dim=(1, 2), keepdim=True) / count.clamp_min(1)
         z = torch.where(count > 0, z, torch.zeros_like(z))
-    return z / torch.sqrt(power + 1e-8)
+    return z, torch.sqrt(power + 1e-8)
+
+
+def normalize_power(z: torch.Tensor, mask: torch.Tensor | None = None, *, token_wise: bool = False):
+    """Unit average power per sample (over valid tokens), or per token if ``token_wise``."""
+    z, scale = power_scale(z, mask, token_wise=token_wise)
+    return z / scale
 
 
 class AWGNChannel(nn.Module):

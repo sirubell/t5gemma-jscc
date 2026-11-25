@@ -65,6 +65,10 @@ Everything else (sha256 bindings, cache/batch identities, manifests, receipts, a
 
 `codec.site_norm_sides` selects which end applies it: `both` (default), `input` (transmitter only) or `output` (receiver only).
 
+`codec.site_norm_center: false` drops the mean (no − mean before the encoder, no + mean after the decoder) and `codec.site_norm_scale: false` drops the std (no ÷ std, no · std), on every side `site_norm_sides` applies; both default to `true` and cannot both be `false`. The learned scale/shift are unchanged.
+
+Power normalization is separate: the channel input is z / s with s the RMS of z per sample over valid tokens (per token at the decoder hidden stream), and by default the receiver decodes the channel output without s. `channel.restore_power: true` gives the receiver s as ideal side information: it decodes (z / s + n) · s, so the SNR is unchanged and the noise-free path equals the codec without power normalization. It isolates what split normalization adds beyond undoing the transmit scale. It needs the caller's power normalization (`normalize_power: true`, a channel without `normalizes_power`).
+
 `codec.site_stats` names the statistics file, relative to the YAML that declares it. Generate one with `python -m jscc.site_stats CONFIG N_BATCHES OUT.pt`: it runs the frozen backbone over training batches 0..N-1 with the site norm off and measures valid tokens at the config's `training.sites` and `memory`. The tracked `configs/data/hellaswag-site-stats.pt` and `configs/data/coco-site-stats.pt` use 128 batches of 16. A run with `site_norm` other than `none` fails if the file is missing. The mean and std are also saved in checkpoints, which replace the file's values when loaded, but the file is still read when the model is built (see [running](running.md#moving-a-run-or-checkout)).
 
 ## Channel contract

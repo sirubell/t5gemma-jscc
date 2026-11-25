@@ -18,7 +18,7 @@ class MyChannel(torch.nn.Module):
 
 | Item | Rule |
 |---|---|
-| Power | By default the caller scales `z` to unit average power per sample (encoder streams: over valid tokens; decoder hidden stream: per token). Set `normalizes_power = True` if your mapping (e.g. a QAM constellation) fixes power itself. |
+| Power | By default the caller scales `z` to unit average power per sample (encoder streams: over valid tokens; decoder hidden stream: per token). Set `normalizes_power = True` if your mapping (e.g. a QAM constellation) fixes power itself. With `channel.restore_power: true` the caller multiplies your output back by that scale before decoding (not allowed with `normalizes_power`). |
 | SNR | AWGN uses noise std `10^(-SNR/20)` per real dimension at unit signal power. Define your own convention (Es/N0, per complex symbol) and keep it consistent. Training draws SNR uniformly from `channel.train_snr_range`. |
 | Trainable parameters | Optimized with the codec, saved in checkpoints, put in `train()`/`eval()` mode with the codec (BatchNorm/Dropout behave correctly). |
 | Auxiliary loss | `self.aux_loss` is added with weight `training.channel_aux_weight` (default 0). |

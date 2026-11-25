@@ -31,7 +31,9 @@ Each run directory holds `config.yaml`, `metrics.jsonl` (training and validation
 | `codec.film` | Give the receiver the SNR |
 | `codec.site_norm` | `none`, `fixed` (codec sees (h − mean) / std per site and dimension, output de-standardized; statistics from `codec.site_stats`) or `learned` (plus per-site scale/shift initialized to that) |
 | `codec.site_norm_sides` | `both` (default), `input` or `output`: which end applies the site norm |
+| `codec.site_norm_center`, `codec.site_norm_scale` | Both `true` (default); `false` drops the mean (centering) or the std (scaling) of the site norm on every side it applies; not both `false` |
 | `channel.type` | `awgn`, `identity` or `package.module:ClassName` ([guide](docs/channel-integration.md)) |
+| `channel.restore_power` | `false` (default); `true`: the receiver multiplies the channel output by the power-normalization scale before decoding (ideal side information; noise still at the configured SNR). Needs `normalize_power: true` and a channel without `normalizes_power` |
 | `training.early_stopping` | Validate every `every` updates; stop after `patience` validations without `min_delta` relative improvement; the best checkpoint is saved at every new minimum; `patience: null` trains to `max_updates`; `stop: false` trains to `max_updates` and keeps the best at the rule's stop as `best_distillation_early_stop.pt` |
 | `training.selection.reference` | Optional `{"site|condition": KL}`: validations also log `normalized` (mean of KL ÷ reference over cells) and `best_distillation_normalized.pt` is kept at every new normalized minimum |
 | `training.loss_normalization.reference` | Per-`site\|condition` KL references: each site's KL is divided by its mean reference (factors scaled to average 1); validation stays raw |

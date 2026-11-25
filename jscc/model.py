@@ -16,7 +16,7 @@ from contextlib import contextmanager, nullcontext
 import torch
 from torch import nn
 
-from .channel import build_channel, normalize_power, token_mask
+from .channel import build_channel, power_scale, token_mask
 from .codec import Codec, SiteNorm
 
 
@@ -54,6 +54,11 @@ class SplitModel(nn.Module):
         self.channel = channel
         self.site_norm = site_norm
         self.normalize = channel_config.get("normalize_power", True) and not getattr(channel, "normalizes_power", False)
+        # Ideal side information: the receiver multiplies the channel output back by the transmit power scale.
+        self.restore_power = channel_config.get("restore_power", False)
+        if self.restore_power and not self.normalize:
+            raise ValueError("channel.restore_power needs the caller's power normalization "
+                             "(normalize_power: true and a channel without normalizes_power)")
         self.sdpa_flash_math = sdpa_flash_math
         self.site = None
         self._handles = []
@@ -149,9 +154,13 @@ class SplitModel(nn.Module):
                             enabled=dtype in (torch.bfloat16, torch.float16)):
             z = codec.encode(hidden if self.site_norm is None else self.site_norm.normalize(hidden, key))
             self.uses[stream] += int(z.numel() if mask is None else mask.sum().item() * z.shape[-1])
+            scale = None
             if self.normalize:
-                z = normalize_power(z, mask, token_wise=token_wise)
+                z, scale = power_scale(z, mask, token_wise=token_wise)
+                z = z / scale
             received = self.channel(z, self.snr_db)
+            if self.restore_power and scale is not None:
+                received = received * scale
             out = codec.decode(received, self.snr_db)
             if self.site_norm is not None:
                 out = self.site_norm.denormalize(out, key)
@@ -302,6 +311,8 @@ def wrap(base, config):
         sites = list(config["training"]["sites"])
         streams = sites + (["memory"] if any(s.startswith("dec_") for s in sites) else [])
         stats = torch.load(config["codec"]["site_stats"], map_location="cpu", weights_only=True)["stats"]
-        site_norm = SiteNorm(stats, streams, learned=mode == "learned", sides=config["codec"].get("site_norm_sides", "both"))
+        site_norm = SiteNorm(stats, streams, learned=mode == "learned", sides=config["codec"].get("site_norm_sides", "both"),
+                             center=config["codec"].get("site_norm_center", True),
+                             scale=config["codec"].get("site_norm_scale", True))
     return SplitModel(base, codec, build_channel(config["channel"]), config["channel"], memory_codec=memory,
                       sdpa_flash_math=config["model"].get("sdpa_flash_math", False), site_norm=site_norm)

@@ -26,6 +26,14 @@ def tiny_model(codec=CODEC, channel=CHANNEL, layers=3):
     return wrap(tiny_backbone(layers), config)
 
 
+def site_stats_file(path, streams=("enc_l1", "dec_l0", "memory")):
+    """Random per-stream mean/std (width 16) saved for ``codec.site_stats``; returns ``(path, stats)``."""
+    g = torch.Generator().manual_seed(0)
+    stats = {s: {"mean": torch.randn(16, generator=g), "std": torch.rand(16, generator=g) + 0.5} for s in streams}
+    torch.save({"stats": stats}, path)
+    return str(path), stats
+
+
 def text_batch(batch=2, src=6, tgt=4, seed=1):
     g = torch.Generator().manual_seed(seed)
     input_ids = torch.randint(1, 28, (batch, src), generator=g)

@@ -112,15 +112,20 @@ class SiteNorm(nn.Module):
     around that, initialized to the identity: x * (1 + g_in) + b_in into the encoder and
     (y * (1 + g_out) + b_out) * std + mean out of the decoder.
     ``sides`` (``codec.site_norm_sides``): ``both``, ``input`` (transmitter only) or ``output`` (receiver only).
+    ``center`` / ``scale`` (``codec.site_norm_center`` / ``codec.site_norm_scale``): ``False`` drops the mean
+    (subtract and add back) or the std (divide and multiply back) on every applied side.
     """
 
     mean: torch.Tensor
     std: torch.Tensor
 
-    def __init__(self, stats: dict, streams, learned: bool, sides: str = "both"):
+    def __init__(self, stats: dict, streams, learned: bool, sides: str = "both", center: bool = True, scale: bool = True):
         super().__init__()
         if sides not in ("both", "input", "output"):
             raise ValueError("codec.site_norm_sides must be both, input or output")
+        if not (center or scale):
+            raise ValueError("codec.site_norm_center and codec.site_norm_scale cannot both be false; use site_norm: none")
+        self.center, self.scale = center, scale
         self.streams, self.input, self.output = list(streams), sides != "output", sides != "input"
         mean = torch.stack([stats[s]["mean"] for s in self.streams]).float()
         self.register_buffer("mean", mean)
@@ -133,7 +138,11 @@ class SiteNorm(nn.Module):
         if not self.input:
             return hidden
         i = self.streams.index(stream)
-        x = (hidden.float() - self.mean[i]) / self.std[i]
+        x = hidden.float()
+        if self.center:
+            x = x - self.mean[i]
+        if self.scale:
+            x = x / self.std[i]
         if "g_in" in self.affine:
             x = x * (1 + self.affine["g_in"][i]) + self.affine["b_in"][i]
         return x
@@ -145,4 +154,6 @@ class SiteNorm(nn.Module):
         y = y.float()
         if "g_out" in self.affine:
             y = y * (1 + self.affine["g_out"][i]) + self.affine["b_out"][i]
-        return y * self.std[i] + self.mean[i]
+        if self.scale:
+            y = y * self.std[i]
+        return y + self.mean[i] if self.center else y

@@ -4,9 +4,10 @@ from typing import Any
 import pytest
 import torch
 
-from jscc.channel import normalize_power
-from jscc.model import encoder_stack
-from tests.helpers import image_batch, text_batch, tiny_model
+from jscc.channel import normalize_power, power_scale
+from jscc.codec import SiteNorm
+from jscc.model import encoder_stack, wrap
+from tests.helpers import CHANNEL, CODEC, image_batch, site_stats_file, text_batch, tiny_backbone, tiny_model
 
 SITES = ["enc_emb", "enc_l0", "enc_l1", "enc_l2", "enc_fn", "dec_l0", "dec_l1"]
 
@@ -133,8 +134,6 @@ def test_student_from_teacher_prefix_is_exact(images, dtype):
 
 @pytest.mark.parametrize("mode", ["fixed", "learned"])
 def test_site_norm_standardizes_each_stream(tmp_path, mode):
-    from jscc.model import wrap
-    from tests.helpers import CHANNEL, CODEC, tiny_backbone
     g = torch.Generator().manual_seed(0)
     stats = {s: {"mean": torch.randn(16, generator=g), "std": torch.rand(16, generator=g) + 0.5}
              for s in ("enc_l1", "dec_l0", "memory", "enc_fn")}
@@ -176,3 +175,82 @@ def test_site_norm_standardizes_each_stream(tmp_path, mode):
     other.load_communication_state(state)
     assert other.site_norm is not None
     assert all(torch.equal(a, b) for a, b in zip(other.site_norm.state_dict().values(), state["site_norm"].values()))
+
+
+def _coded(model, site, snr_db=None):
+    """Source hidden state, the first stream's encoder output / channel output / decoder input, and the
+    reconstruction of one forward at ``site`` (noise seeded)."""
+    model.set_site(site)
+    seen: dict[str, Any] = {}
+
+    def keep(key, pick):
+        def hook(*args):  # returns None, so the hooked value is not replaced
+            seen.setdefault(key, pick(args))
+        return hook
+    hooks = [model.codec.encoder.register_forward_hook(keep("z", lambda a: a[2])),
+             model.channel.register_forward_hook(keep("channel", lambda a: a[2])),
+             model.codec.decoder[0].register_forward_pre_hook(keep("received", lambda a: a[1][0]))]
+    torch.manual_seed(5)
+    rec = logits(model, text_batch(), snr_db=snr_db)[1]
+    for hook in hooks:
+        hook.remove()
+    return model.activation, seen, rec
+
+
+def test_default_power_path_is_unchanged():
+    """Default: the channel gets z / sqrt(mean power over valid tokens + 1e-8) and the receiver decodes its output as is."""
+    model = tiny_model()
+    assert not model.restore_power
+    _, seen, _ = _coded(model, "enc_l1", -6.0)
+    mask = text_batch()["attention_mask"].unsqueeze(-1)
+    z = seen["z"].float()
+    power = (z.pow(2) * mask).sum(dim=(1, 2), keepdim=True) / (mask.sum(dim=(1, 2), keepdim=True) * z.shape[-1])
+    sent = z / torch.sqrt(power + 1e-8)
+    torch.manual_seed(5)
+    assert torch.allclose(seen["channel"], sent + torch.randn_like(sent) * 10.0 ** (6.0 / 20.0), atol=1e-6)
+    assert torch.equal(seen["received"], seen["channel"])
+
+
+@pytest.mark.parametrize("site", ["enc_l1", "dec_l0"])
+def test_restore_power_gives_the_receiver_the_transmit_scale(site):
+    model = tiny_model(channel={**CHANNEL, "restore_power": True})
+    decoder_site = site.startswith("dec_")
+    _, seen, _ = _coded(model, site, -6.0)
+    mask = None if decoder_site else text_batch()["attention_mask"].bool()
+    _, scale = power_scale(seen["z"], mask, token_wise=decoder_site)
+    assert torch.equal(seen["received"], seen["channel"] * scale)  # noise added at unit power, then rescaled
+    h, _, rec = _coded(model, site)
+    streams = [(h, rec)] + ([(model.memory_activation, model.memory_reconstruction)] if decoder_site else [])
+    for source, out in streams:  # noise-free: the same as the codec without power normalization
+        assert source is not None and out is not None
+        with torch.no_grad():
+            assert torch.allclose(out, model.codec.decode(model.codec.encode(source)), atol=1e-5)
+
+
+@pytest.mark.parametrize("channel", [{"type": "tests.test_model:Quantized"}, {"type": "awgn", "normalize_power": False}])
+def test_restore_power_needs_caller_power_normalization(channel):
+    with pytest.raises(ValueError, match="restore_power"):
+        tiny_model(channel={**channel, "restore_power": True})
+
+
+@pytest.mark.parametrize("learned", [False, True])
+def test_site_norm_center_and_scale_switches(tmp_path, learned):
+    path, stats = site_stats_file(tmp_path / "stats.pt")
+    s, h = stats["enc_l1"], torch.randn(2, 3, 16)
+    expected = {(True, True): ((h - s["mean"]) / s["std"], h * s["std"] + s["mean"]),
+                (True, False): (h - s["mean"], h + s["mean"]),
+                (False, True): (h / s["std"], h * s["std"])}
+    for (center, scale), (into, out) in expected.items():  # learned: identity affine at init
+        norm = SiteNorm(stats, ["enc_l1"], learned=learned, center=center, scale=scale)
+        assert torch.equal(norm.normalize(h, "enc_l1"), into) and torch.equal(norm.denormalize(h, "enc_l1"), out)
+        receiver = SiteNorm(stats, ["enc_l1"], learned=learned, sides="output", center=center, scale=scale)
+        assert torch.equal(receiver.normalize(h, "enc_l1"), h) and torch.equal(receiver.denormalize(h, "enc_l1"), out)
+    with pytest.raises(ValueError, match="site_norm_center"):
+        SiteNorm(stats, ["enc_l1"], learned=learned, center=False, scale=False)
+    codec = {**CODEC, "site_norm": "learned" if learned else "fixed", "site_stats": path, "site_norm_scale": False}
+    model = wrap(tiny_backbone(), {"codec": codec, "channel": dict(CHANNEL), "model": {}, "training": {"sites": ["enc_l1"]}})
+    assert model.site_norm is not None and model.site_norm.center and not model.site_norm.scale
+    inputs: list[Any] = []
+    model.codec.encoder.register_forward_pre_hook(lambda m, a: inputs.append(a[0]))
+    h, _, _ = _coded(model, "enc_l1")
+    assert h is not None and torch.equal(inputs[0], h.float() - s["mean"])
